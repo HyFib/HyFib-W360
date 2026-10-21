@@ -100,6 +100,42 @@ test('an owner adds a contact, records consent and tags, imports a CSV and expor
   await page.getByRole('link', { name: 'Bina', exact: true }).click();
   await expect(page.getByLabel('City', { exact: true })).toHaveValue('Pune');
 
+  // A choice field (ADR-407): added with its options in Settings, chosen on the contact page.
+  const binaUrl = page.url();
+  await page.goto(`/c/${slug}/settings/messaging`);
+  await page.getByLabel('New field', { exact: true }).fill('Tier');
+  await page.getByLabel('Type', { exact: true }).selectOption('choice');
+  await page.getByLabel('Options, one per line', { exact: true }).fill('Gold\nSilver\n\nBronze');
+  await page.getByRole('button', { name: 'Add field' }).click();
+  await expect(page.getByRole('cell', { name: 'tier', exact: true })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Options of “Tier”' })).toHaveText(
+    /Gold\s*Silver\s*Bronze/,
+  );
+  await page.goto(binaUrl);
+  const tier = page.getByLabel('Tier', { exact: true });
+  await expect(tier).toHaveValue('');
+  await tier.selectOption('Silver');
+  await page.getByRole('button', { name: 'Save contact' }).click();
+  await expect(page.getByText('Contact saved.')).toBeVisible();
+  await page.reload();
+  await expect(page.getByLabel('Tier', { exact: true })).toHaveValue('Silver');
+  // An option a contact has chosen cannot be removed; the others can.
+  await page.goto(`/c/${slug}/settings/messaging`);
+  await page.getByRole('button', { name: 'Edit options of the field “Tier”' }).click();
+  // The table's own options input: the new-field form below keeps its choice type and its input.
+  const editOptions = page.getByRole('table').getByLabel('Options, one per line', { exact: true });
+  await editOptions.fill('Gold\nBronze');
+  await page.getByRole('button', { name: 'Save options' }).click();
+  await expect(
+    page.getByText(
+      'Contacts have “Silver” chosen, so it cannot be removed or renamed. Change those contacts first.',
+    ),
+  ).toBeVisible();
+  await editOptions.fill('Silver\nGold');
+  await page.getByRole('button', { name: 'Save options' }).click();
+  await expect(page.getByText('Options saved.')).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Options of “Tier”' })).toHaveText(/Silver\s*Gold/);
+
   // Consent keywords are company settings.
   await page.goto(`/c/${slug}/settings/messaging`);
   await page.getByLabel('Stop all messages').fill('stop, band karo');

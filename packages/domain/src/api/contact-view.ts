@@ -2,7 +2,10 @@ import { z } from 'zod';
 import { AppError, notFound } from '@w360/core';
 import { and, contactMerges, contacts, eq, isNull, outerColumn, sql, type Tx } from '@w360/db';
 
-/** A custom field's value: text and dates (`YYYY-MM-DD`) as strings, numbers, yes/no as booleans. */
+/**
+ * A custom field's value: text and dates (`YYYY-MM-DD`) as strings, numbers, yes/no as booleans, a
+ * choice as its option (a string, ADR-407).
+ */
 export type ApiFieldValue = string | number | boolean;
 
 /**
@@ -34,7 +37,7 @@ export const apiContactSchema = z.object({
   fields: z
     .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
     .describe(
-      'Custom field values by field key (GET /contact-fields): text and dates (YYYY-MM-DD) as strings, numbers as numbers, yes/no as booleans. A field without a value is left out.',
+      'Custom field values by field key (GET /contact-fields): text and dates (YYYY-MM-DD) as strings, numbers as numbers, yes/no as booleans, a choice as its option written as GET /contact-fields lists it. A field without a value is left out.',
     ),
   consent: z.object({ marketing: consentValue, utility: consentValue }),
   source: z.string().describe('Where the contact came from: whatsapp, manual, import, api, store.'),

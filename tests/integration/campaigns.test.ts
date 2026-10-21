@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { authorizedTenantScope, sql, type TenantScope } from '@w360/db';
 import {
+  VARIANTS_OUT_OF_ORDER,
   assignVariant,
   attributeCampaignOptOut,
   campaignCompletionNotice,
@@ -1995,7 +1996,7 @@ describe('A/B template variants (ADR-405)', () => {
     const frozen = await variantRows(id);
     expect(frozen).toHaveLength(40);
     // Each recipient's variant is the one the stable hash gives, in SQL as in TypeScript.
-    for (const r of frozen) expect(r.variant).toBe(assignVariant(id, r.contact_id, 30));
+    for (const r of frozen) expect(r.variant).toBe(assignVariant(id, r.contact_id, [30]));
     const bCount = frozen.filter((r) => r.variant === 'B').length;
     expect(bCount).toBe(b!.audience!.total);
 
@@ -2034,6 +2035,8 @@ describe('A/B template variants (ADR-405)', () => {
     // Results per variant add up to the campaign's.
     const view = await s.campaigns.getCampaign(owner, id);
     expect(view.variantB).toMatchObject({ templateId: noticeId, sharePercent: 30 });
+    // A two-variant campaign lists B alone after A (ADR-410), as variantB gives it.
+    expect(view.variants.map((v) => v.label)).toEqual(['B']);
     const results = view.variantResults!;
     expect(results.map((r) => r.variant)).toEqual(['A', 'B']);
     expect(results[0]!.analytics).toMatchObject({ audience: 40 - bCount, queued: 40 - bCount });
@@ -2060,6 +2063,7 @@ describe('A/B template variants (ADR-405)', () => {
     expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 5 });
     const view = await s.campaigns.getCampaign(owner, id);
     expect(view.variantB).toBeNull();
+    expect(view.variants).toHaveLength(0);
     expect(view.variantResults).toBeNull();
     expect((await s.campaigns.listRecipients(owner, id, {})).withVariants).toBe(false);
     const [variantCount] = await fx.query<{ n: number }>(
@@ -2309,5 +2313,424 @@ describe('A/B template variants (ADR-405)', () => {
     await s.campaigns.pauseCampaign(owner, id, {});
     await s.campaigns.resumeCampaign(owner, id, {});
     expect(await campaignRow(id)).toMatchObject({ status: 'running' });
+  });
+
+  /** The campaigns service of a web server whose deployment allows five variants (ADR-410). */
+  const wideService = (s: Setup) =>
+    createCampaignsService({
+      db: fx.dbs.app,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      clock: s.clock,
+      notices: fx.notices(),
+      variantsLimit: 5,
+    });
+  const utilityVariant = (templateId: string, sharePercent: number) => ({
+    templateId,
+    variables: { header: [], body: [] },
+    sharePercent,
+  });
+
+  it('assigns, approves, sends and reports three variants, each recipient its own (ADR-410)', async () => {
+    const s = await setup();
+    const wide = wideService(s);
+    const owner = await fx.ctx(s.c, s.c.owner);
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    const phones: string[] = [];
+    for (let i = 0; i < 60; i += 1) {
+      const phone = `+9198470000${String(i).padStart(2, '0')}`;
+      phones.push(phone);
+      await s.contact(phone, { name: `T${i}` });
+    }
+    const bId = await approvedTemplate(s, 'store_news_three_b', notice);
+    const cId = await approvedTemplate(s, 'store_news_three_c', {
+      ...notice,
+      body: { text: 'Something new waits for you in store.', examples: [] },
+    });
+    await s.campaigns.updateSettings(
+      owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    const { id } = await s.draft('Three templates');
+    await wide.updateDraft(
+      owner,
+      id,
+      s.draftInput('Three templates', {
+        expectedVersion: 1,
+        variants: [utilityVariant(bId, 30), utilityVariant(cId, 20)],
+      }),
+      {},
+    );
+
+    // The review checks every variant and splits the audience in three.
+    const review = await wide.reviewDraft(owner, id);
+    expect(review.problems).toEqual([]);
+    expect(review.variants!.map((v) => [v.label, v.templateId, v.sharePercent])).toEqual([
+      ['A', s.templateId, 50],
+      ['B', bId, 30],
+      ['C', cId, 20],
+    ]);
+    const totals = new Map(review.variants!.map((v) => [v.label, v.audience!.total]));
+    expect([...totals.values()].reduce((sum, n) => sum + n, 0)).toBe(60);
+    for (const [label, n] of totals) expect(n, label).toBeGreaterThan(0);
+
+    // A test of variant C sends C's template.
+    const tested = await wide.sendTest(owner, id, { phones: [phones[0]], variant: 'C' }, {});
+    expect(tested).toEqual([expect.objectContaining({ ok: true })]);
+    const [testMessage] = await fx.query<{ template_id: string }>(
+      `SELECT m.template_id FROM app.messages m
+         JOIN app.conversations cv ON cv.id = m.conversation_id
+         JOIN app.contacts ct ON ct.id = cv.contact_id
+        WHERE ct.tenant_id = $1 AND ct.phone_e164 = $2 AND m.campaign_id IS NULL`,
+      [s.c.tenant.id, phones[0]],
+    );
+    expect(testMessage?.template_id).toBe(cId);
+
+    // Submitted by one member, waiting for another's approval: the email names all three.
+    const draft = await wide.getCampaign(owner, id);
+    await wide.submitCampaign(marketer, id, { expectedVersion: draft.campaign.version }, {});
+    const frozen = await variantRows(id);
+    expect(frozen).toHaveLength(60);
+    // Each recipient's variant is the one the stable hash gives, in SQL as in TypeScript.
+    for (const r of frozen) expect(r.variant).toBe(assignVariant(id, r.contact_id, [30, 20]));
+    for (const [label, n] of totals)
+      expect(
+        frozen.filter((r) => r.variant === label),
+        label,
+      ).toHaveLength(n);
+    const approvals = await campaignEmails(s.c.tenant.id, `campaign-approval:${id}:`);
+    expect(approvals.length).toBeGreaterThan(0);
+    for (const email of approvals) {
+      const text = email.lines.join(' ');
+      expect(text).toContain('It tests 3 templates side by side');
+      expect(text).toContain('C “store_news_three_c” (20% of the audience)');
+      expect(text).toContain('Approving it approves all 3');
+    }
+    const pendingView = await wide.getCampaign(owner, id);
+    expect(pendingView.variants.map((v) => [v.label, v.template?.id])).toEqual([
+      ['B', bId],
+      ['C', cId],
+    ]);
+
+    // Approving approves every variant: C's template paused by Meta refuses it, naming C.
+    await fx.query(`UPDATE app.message_templates SET status = 'paused' WHERE id = $1`, [cId]);
+    await expectAppError(
+      wide.approveCampaign(owner, id, {}, {}),
+      'precondition_failed',
+      /Variant C’s template is no longer approved by Meta/,
+    );
+    await fx.query(`UPDATE app.message_templates SET status = 'approved' WHERE id = $1`, [cId]);
+    await wide.approveCampaign(owner, id, {}, {});
+
+    // The runner sends each recipient its recorded variant's template.
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 60 });
+    const queued = await variantRows(id);
+    expect(byContact(queued)).toEqual(byContact(frozen));
+    const templateOf = { A: s.templateId, B: bId, C: cId } as Record<string, string>;
+    const messages = await fx.query<{ template_id: string; contact_id: string }>(
+      `SELECT m.template_id, cv.contact_id FROM app.messages m
+         JOIN app.conversations cv ON cv.id = m.conversation_id WHERE m.campaign_id = $1`,
+      [id],
+    );
+    expect(messages).toHaveLength(60);
+    const variants = byContact(queued);
+    for (const m of messages)
+      expect(m.template_id).toBe(templateOf[variants.get(m.contact_id) ?? '']);
+    expect(await s.dispatchAll(id)).toHaveLength(60);
+    const sentNames = fx.standIn.state.requests
+      .filter((r) => r.path.endsWith('/messages'))
+      .slice(-60)
+      .map((r) => (r.body as { template: { name: string } }).template.name);
+    expect(sentNames.filter((n) => n === 'festive_sale')).toHaveLength(totals.get('A')!);
+    expect(sentNames.filter((n) => n === 'store_news_three_b')).toHaveLength(totals.get('B')!);
+    expect(sentNames.filter((n) => n === 'store_news_three_c')).toHaveLength(totals.get('C')!);
+
+    // Results per variant, three of them, adding up to the campaign's.
+    const view = await wide.getCampaign(owner, id);
+    const results = view.variantResults!;
+    expect(results.map((r) => r.variant)).toEqual(['A', 'B', 'C']);
+    for (const r of results) expect(r.analytics.audience, r.variant).toBe(totals.get(r.variant));
+    expect(results.reduce((sum, r) => sum + r.analytics.queued, 0)).toBe(view.analytics!.queued);
+    const listed = await wide.listRecipients(owner, id, {});
+    expect(listed.withVariants).toBe(true);
+    for (const r of listed.items) expect(r.variant).toBe(variants.get(r.contactId));
+    await s.campaigns.updateSettings(
+      owner,
+      { approvalRequired: false, cap: null, costCurrency: null },
+      {},
+    );
+  });
+
+  it('pauses for a third variant’s template only while that variant has pending recipients (ADR-410)', async () => {
+    const s = await setup();
+    const wide = wideService(s);
+    const owner = await fx.ctx(s.c, s.c.owner);
+    for (let i = 0; i < 40; i += 1)
+      await s.contact(`+9198480000${String(i).padStart(2, '0')}`, { name: `P${i}` });
+    const bId = await approvedTemplate(s, 'store_news_pause_b', notice);
+    const cId = await approvedTemplate(s, 'store_news_pause_c', notice);
+    const { id } = await s.draft('Pause for C');
+    await wide.updateDraft(
+      owner,
+      id,
+      s.draftInput('Pause for C', {
+        expectedVersion: 1,
+        variants: [utilityVariant(bId, 30), utilityVariant(cId, 30)],
+      }),
+      {},
+    );
+    await wide.submitCampaign(owner, id, { expectedVersion: 2 }, {});
+    await fx.query(`UPDATE app.message_templates SET status = 'paused' WHERE id = $1`, [cId]);
+    expect(await s.tick(id)).toMatchObject({
+      outcome: 'paused',
+      pauseReason: 'template_not_approved',
+    });
+    const [event] = await fx.query<{ variant: string }>(
+      `SELECT detail->>'variant' AS variant FROM app.campaign_events
+        WHERE campaign_id = $1 AND type = 'paused' ORDER BY occurred_at DESC LIMIT 1`,
+      [id],
+    );
+    expect(event?.variant).toBe('C');
+    await expectAppError(
+      wide.resumeCampaign(owner, id, {}),
+      'precondition_failed',
+      /Variant C’s template is not approved by Meta/,
+    );
+    // Once C has no pending recipients, A and B send without it.
+    await fx.query(
+      `UPDATE app.campaign_recipients SET state = 'skipped', skip_reason = 'suppressed'
+        WHERE campaign_id = $1 AND variant = 'C'`,
+      [id],
+    );
+    await wide.resumeCampaign(owner, id, {});
+    const pending = (await variantRows(id)).filter((r) => r.state === 'pending');
+    expect(pending.every((r) => r.variant === 'A' || r.variant === 'B')).toBe(true);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: pending.length });
+    await fx.query(`UPDATE app.message_templates SET status = 'approved' WHERE id = $1`, [cId]);
+  });
+
+  it('checks a third variant’s template and the stored shares before a submission (ADR-410)', async () => {
+    const s = await setup();
+    const wide = wideService(s);
+    const owner = await fx.ctx(s.c, s.c.owner);
+    for (let i = 0; i < 40; i += 1)
+      await s.contact(`+9198490000${String(i).padStart(2, '0')}`, { name: `K${i}` });
+    const bId = await approvedTemplate(s, 'store_news_check_b', notice);
+    const cId = await approvedTemplate(s, 'store_news_check_c', notice);
+    const { id } = await s.draft('Checked');
+    await wide.updateDraft(
+      owner,
+      id,
+      s.draftInput('Checked', {
+        expectedVersion: 1,
+        variants: [utilityVariant(bId, 30), utilityVariant(cId, 30)],
+      }),
+      {},
+    );
+    expect((await wide.reviewDraft(owner, id)).problems).toEqual([]);
+
+    // C's template no longer approved: the review names C, and submitting is refused for it.
+    await fx.query(`UPDATE app.message_templates SET status = 'paused' WHERE id = $1`, [cId]);
+    expect((await wide.reviewDraft(owner, id)).problems).toEqual([
+      'Variant C: The template is not approved by Meta.',
+    ]);
+    await expectAppError(
+      wide.submitCampaign(owner, id, { expectedVersion: 2 }, {}),
+      'precondition_failed',
+      /^Variant C: The template is not approved by Meta\.$/,
+    );
+    await fx.query(`UPDATE app.message_templates SET status = 'approved' WHERE id = $1`, [cId]);
+
+    // Stored shares that leave A under 10% (never written by the app) are refused too, and
+    // nothing is frozen.
+    await fx.query(
+      `UPDATE app.campaign_variants SET share_percent = CASE label WHEN 'B' THEN 50 ELSE 45 END
+        WHERE campaign_id = $1`,
+      [id],
+    );
+    expect((await wide.reviewDraft(owner, id)).problems).toEqual([
+      'Variant A needs at least 10% of the recipients: the other variants take 95%.',
+    ]);
+    await expectAppError(
+      wide.submitCampaign(owner, id, { expectedVersion: 2 }, {}),
+      'precondition_failed',
+      /^Variant A needs at least 10% of the recipients: the other variants take 95%\.$/,
+    );
+    expect(await variantRows(id)).toHaveLength(0);
+    // Past 100% (an older web server checks B alone and keeps C): refused in words too, never a
+    // database error from an inverted range.
+    await fx.query(
+      `UPDATE app.campaign_variants SET share_percent = CASE label WHEN 'B' THEN 90 ELSE 30 END
+        WHERE campaign_id = $1`,
+      [id],
+    );
+    expect((await wide.reviewDraft(owner, id)).problems).toEqual([
+      'Variant A needs at least 10% of the recipients: the other variants take 120%.',
+    ]);
+    await expectAppError(
+      wide.submitCampaign(owner, id, { expectedVersion: 2 }, {}),
+      'precondition_failed',
+      /^Variant A needs at least 10% of the recipients: the other variants take 120%\.$/,
+    );
+    expect(await variantRows(id)).toHaveLength(0);
+
+    // Stored labels with a gap (B removed, C left) are refused as out of order, not split.
+    await fx.query(`UPDATE app.campaign_variants SET share_percent = 30 WHERE campaign_id = $1`, [
+      id,
+    ]);
+    await fx.query(`DELETE FROM app.campaign_variants WHERE campaign_id = $1 AND label = 'B'`, [
+      id,
+    ]);
+    expect((await wide.reviewDraft(owner, id)).problems).toEqual([VARIANTS_OUT_OF_ORDER]);
+    await expectAppError(
+      wide.submitCampaign(owner, id, { expectedVersion: 2 }, {}),
+      'precondition_failed',
+    );
+    // Saving the draft labels its variants B, C and on again.
+    await wide.updateDraft(
+      owner,
+      id,
+      s.draftInput('Checked', { expectedVersion: 2, variants: [utilityVariant(cId, 30)] }),
+      {},
+    );
+    expect((await wide.reviewDraft(owner, id)).problems).toEqual([]);
+  });
+
+  it('pauses for a recipient whose variant has no row, and refuses to resume it (ADR-410)', async () => {
+    const s = await setup();
+    const wide = wideService(s);
+    const owner = await fx.ctx(s.c, s.c.owner);
+    for (let i = 0; i < 30; i += 1)
+      await s.contact(`+9198500000${String(i).padStart(2, '0')}`, { name: `Q${i}` });
+    const bId = await approvedTemplate(s, 'store_news_orphan_b', notice);
+    const cId = await approvedTemplate(s, 'store_news_orphan_c', notice);
+    const { id } = await s.draft('Orphan');
+    await wide.updateDraft(
+      owner,
+      id,
+      s.draftInput('Orphan', {
+        expectedVersion: 1,
+        variants: [utilityVariant(bId, 30), utilityVariant(cId, 30)],
+      }),
+      {},
+    );
+    await wide.submitCampaign(owner, id, { expectedVersion: 2 }, {});
+    expect((await variantRows(id)).some((r) => r.variant === 'C')).toBe(true);
+    // C's row removed behind the app's back (variants change only in drafts).
+    await fx.query(`DELETE FROM app.campaign_variants WHERE campaign_id = $1 AND label = 'C'`, [
+      id,
+    ]);
+    let outcome = await s.tick(id);
+    // A first batch may hold no C recipient: it is sent, and a later one pauses.
+    for (let i = 0; i < 5 && outcome.outcome !== 'paused'; i += 1) {
+      s.clock.advance(15_000);
+      outcome = await s.tick(id);
+    }
+    expect(outcome).toMatchObject({ outcome: 'paused', pauseReason: 'template_not_approved' });
+    const [event] = await fx.query<{ variant: string }>(
+      `SELECT detail->>'variant' AS variant FROM app.campaign_events
+        WHERE campaign_id = $1 AND type = 'paused' ORDER BY occurred_at DESC LIMIT 1`,
+      [id],
+    );
+    expect(event?.variant).toBe('C');
+    await expectAppError(
+      wide.resumeCampaign(owner, id, {}),
+      'precondition_failed',
+      /^Variant C has recipients waiting but no template: cancel the campaign\.$/,
+    );
+    // No C recipient was sent anything.
+    const messages = await fx.query<{ template_id: string }>(
+      `SELECT template_id FROM app.messages WHERE campaign_id = $1`,
+      [id],
+    );
+    expect(messages.every((m) => m.template_id !== cId)).toBe(true);
+  });
+
+  it('refuses a third variant until the deployment allows it, another company’s template, and shares that leave A under 10% (ADR-410)', async () => {
+    const mine = await setup();
+    const theirs = await setup();
+    const wide = wideService(mine);
+    const owner = await fx.ctx(mine.c, mine.c.owner);
+    const bId = await approvedTemplate(mine, 'store_news_limit_b', notice);
+    const cId = await approvedTemplate(mine, 'store_news_limit_c', notice);
+    const { id } = await mine.draft('Limits');
+    const rows = () =>
+      fx.query<{ label: string; template_id: string | null; share_percent: number }>(
+        `SELECT label, template_id, share_percent FROM app.campaign_variants
+          WHERE campaign_id = $1 ORDER BY label`,
+        [id],
+      );
+    const edit = (service: typeof wide, version: number, overrides: Record<string, unknown>) =>
+      service.updateDraft(
+        owner,
+        id,
+        mine.draftInput('Limits', { expectedVersion: version, ...overrides }),
+        {},
+      );
+
+    // A web server of a deployment that has not raised the limit takes two variants only.
+    await expectAppError(
+      edit(mine.campaigns, 1, {
+        variants: [utilityVariant(bId, 30), utilityVariant(cId, 20)],
+      }),
+      'validation_failed',
+      /at most 2 templates for now/,
+    );
+    expect(await rows()).toHaveLength(0);
+    await edit(mine.campaigns, 1, { variants: [utilityVariant(bId, 30)] });
+    expect(await rows()).toEqual([{ label: 'B', template_id: bId, share_percent: 30 }]);
+
+    // Raised to five, a draft takes C; another company's template is not found, nothing written.
+    await expectAppError(
+      edit(wide, 2, {
+        variants: [utilityVariant(bId, 30), utilityVariant(theirs.templateId, 20)],
+      }),
+      'not_found',
+    );
+    expect(await rows()).toHaveLength(1);
+    await expect(
+      fx.query(
+        `INSERT INTO app.campaign_variants (id, tenant_id, campaign_id, label, template_id, share_percent)
+         VALUES (gen_random_uuid(), $1, $2, 'C', $3, 20)`,
+        [mine.c.tenant.id, id, theirs.templateId],
+      ),
+    ).rejects.toThrow(/campaign_variants_template_fk/);
+    await expectAppError(
+      edit(wide, 2, {
+        variants: [utilityVariant(bId, 50), utilityVariant(cId, 45)],
+      }),
+      'validation_failed',
+      /Variant A needs at least 10% of the recipients/,
+    );
+    const five = [10, 10, 10, 10, 10].map((share) => utilityVariant(bId, share));
+    await expectAppError(edit(wide, 2, { variants: five }), 'validation_failed');
+    await edit(wide, 2, { variants: [utilityVariant(bId, 30), utilityVariant(cId, 20)] });
+    expect(await rows()).toEqual([
+      { label: 'B', template_id: bId, share_percent: 30 },
+      { label: 'C', template_id: cId, share_percent: 20 },
+    ]);
+
+    // ADR-405's variantB, on a server that allows two, changes B and keeps C; it cannot grow the
+    // draft, but it can edit one that has more (the limit lowered for a rollback).
+    await edit(mine.campaigns, 3, { variantB: utilityVariant(cId, 25) });
+    expect(await rows()).toEqual([
+      { label: 'B', template_id: cId, share_percent: 25 },
+      { label: 'C', template_id: cId, share_percent: 20 },
+    ]);
+    await expectAppError(
+      edit(mine.campaigns, 4, { variantB: utilityVariant(cId, 25), variants: [] }),
+      'validation_failed',
+      /Give either variantB or variants, not both/,
+    );
+    // variantB: null removes every variant, as a C without B would leave a gap.
+    await edit(mine.campaigns, 4, { variantB: null });
+    expect(await rows()).toHaveLength(0);
+    // Trimming through variants removes the rows past the last label.
+    await edit(wide, 5, {
+      variants: [utilityVariant(bId, 20), utilityVariant(cId, 20), utilityVariant(cId, 20)],
+    });
+    await edit(wide, 6, { variants: [utilityVariant(cId, 40)] });
+    expect(await rows()).toEqual([{ label: 'B', template_id: cId, share_percent: 40 }]);
   });
 });

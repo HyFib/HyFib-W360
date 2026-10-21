@@ -39,7 +39,6 @@ import {
   webhookEvents,
   systemScope,
   type ApiScope,
-  type ContactFieldType,
   type ContactSource,
   type Database,
   type Tx,
@@ -51,7 +50,7 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
-import { apiFieldValue, coerceFieldValue, normalizeTag } from '../contacts/fields';
+import { apiFieldValue, coerceFieldValue, normalizeTag, type FieldShape } from '../contacts/fields';
 import { crmMembers, memberRefs } from '../crm/common';
 import { INBOX_WORKER_ROLES } from '../inbox/routing';
 import { parseInput } from '../validation';
@@ -2978,12 +2977,13 @@ export function webhookContactEventFieldValuesFor(
 /**
  * A condition the list adds, read by its field's type (ADR-332, ADR-335): a value as the API reads
  * a contact's values (`apiFieldValue`: text trimmed, up to 500 characters; a number as members type
- * them; a real date as YYYY-MM-DD; true or false), an empty one refused; a word only for a text
+ * them; a real date as YYYY-MM-DD; true or false; one of a choice's options as written, ADR-407),
+ * an empty one refused; a word only for a text
  * field, trimmed as its text is; a range only for a number or date field, each end read as a value
  * of it and the start not after the end.
  */
 function webhookContactFieldConditionRead(
-  field: { label: string; type: ContactFieldType },
+  field: FieldShape,
   pair: WebhookContactFieldValue,
   refused: (path: string, message: string) => AppError,
   path: string,
@@ -2999,7 +2999,7 @@ function webhookContactFieldConditionRead(
     if (field.type !== 'text') {
       throw refused(
         `${path}.contains`,
-        `${field.label} is not a text field: give a value${field.type === 'boolean' ? '' : ' or a range'} of it instead.`,
+        `${field.label} is not a text field: give a value${field.type === 'boolean' || field.type === 'choice' ? '' : ' or a range'} of it instead.`,
       );
     }
     const read = coerceFieldValue(field, pair.contains);
@@ -3058,7 +3058,12 @@ export async function webhookContactEventFieldValuesChecked(
     added.length === 0
       ? []
       : await tx
-          .select({ key: contactFields.key, label: contactFields.label, type: contactFields.type })
+          .select({
+            key: contactFields.key,
+            label: contactFields.label,
+            type: contactFields.type,
+            options: contactFields.options,
+          })
           .from(contactFields)
           .where(and(eq(contactFields.tenantId, tenantId), inArray(contactFields.key, added)));
   const fieldByKey = new Map(fields.map((f) => [f.key, f]));
@@ -6480,7 +6485,8 @@ export function createWebhooksService(deps: {
 
     /**
      * The custom fields an endpoint can choose to take the changes of (ADR-184) or name values of
-     * (ADR-332): every field of the company, by label, with its type.
+     * (ADR-332): every field of the company, by label, with its type and a choice's options
+     * (ADR-407).
      */
     async contactFieldChoices(ctx: TenantContext): Promise<WebhookFieldChoice[]> {
       assertCan(ctx, 'developer.manage');
@@ -6492,6 +6498,7 @@ export function createWebhooksService(deps: {
               key: contactFields.key,
               label: contactFields.label,
               type: contactFields.type,
+              options: contactFields.options,
             })
             .from(contactFields)
             .where(eq(contactFields.tenantId, ctx.tenant.id))

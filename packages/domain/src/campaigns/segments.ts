@@ -180,6 +180,9 @@ const FIELD_OPS: Record<ContactFieldType, ReadonlySet<FieldComparison>> = {
   number: new Set(['is_set', 'is_not_set', 'equals', 'not_equals', 'greater_than', 'less_than']),
   date: new Set(['is_set', 'is_not_set', 'equals', 'before', 'after']),
   boolean: new Set(['is_set', 'is_not_set', 'is_true', 'is_false']),
+  // A choice is compared as text is, whatever its case (ADR-407); a value that is no option matches
+  // no contact, so a segment saved before an unused option was removed still reads.
+  choice: new Set(['is_set', 'is_not_set', 'equals', 'not_equals']),
 };
 const VALUE_OPS: ReadonlySet<FieldComparison> = new Set([
   'equals',

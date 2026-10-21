@@ -4320,8 +4320,8 @@ Decision:
   most). Existing keys keep their scopes.
 
 Not built: changing a field's type, renaming fields in the app (Settings adds and deletes them;
-the service could always rename, and now audits it), choices for a field (a list of allowed values),
-field order, and events for field definitions.
+the service could always rename, and now audits it), choices for a field (a list of allowed values;
+since built: ADR-407), field order, and events for field definitions.
 
 ## ADR-116 Following messages through the public API (2026-10-03)
 
@@ -9919,7 +9919,8 @@ Decision:
   after saving. A rename sends no webhook and records no contact change (ADR-112, ADR-114). No
   migration.
 
-Not built: changing a field's type (ADR-115 keeps it fixed), choices for a field, and field order.
+Not built: changing a field's type (ADR-115 keeps it fixed), choices for a field (since built:
+ADR-407), and field order.
 
 ## ADR-263 Choosing the CRM pipelines whose deal events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
 
@@ -17621,3 +17622,553 @@ Codex's review of PR #105: the campaign page counted each variant and the campai
 read-committed transaction, so while recipients were being sent the variants could fail to add up
 to the results; it now reads them in one repeatable-read snapshot, as the API's detail does. The
 same review found that template edits did not see variant B's campaigns (ADR-404, fixed there).
+
+## ADR-406 HTTP steps save response headers, a text body and the status as values (P4-02) (2026-10-21)
+
+Context: an automation's "Call a web address" step saved values only from a JSON response body, by
+path (ADR-043). Many company systems answer in plain text ("OK 4411"), put what matters in a header
+(a request id, a resource's `Location`, a rate limit) or only say how a call went by its status
+(201 created, 202 accepted). A body that was not JSON saved nothing.
+
+Decision:
+
+- **Where a saved value comes from:** each saved value has a source, `from`: `json` (a path in a
+  JSON body, as before), `header` (a response header by name), `text` (the whole body) or `status`
+  (the status code, as digits). A saved value without `from` is a JSON path: every stored graph,
+  published version, run in progress and request already written ahead (`{path, saveAs}`) means
+  what it meant, and reads back exactly as stored (parsing adds no `from`, so a version's
+  definition hash and an automation's exports are unchanged). The graph's version stays 1, as for
+  `bodyFormat` (ADR-236): the field is optional and its absence keeps the old meaning. A run uses
+  its pinned version's definition, as before.
+- **Only successful responses save values,** as before: a failure branch sees nothing saved, so
+  the status saved is always 2xx (it tells 200 from 201, 202 or 204). Values are clipped to an
+  answer's 1,000 UTF-16 code units (`clipText`: an emoji counts as two and is never split), kept in
+  the call's `saved_values` and the run's answers as before, and cleared by retention and erasure
+  as before.
+- **Headers:** matched by name without regard to case; the name is validated as a header name
+  (letters, digits and -, at most 60). Node joins a header received several times with ", "
+  (keeping only the first for headers that allow one value, such as Content-Type), and the egress
+  client joins any list the same way, so a repeated header is saved as its values in the order
+  received, separated by a comma and a space (RFC 9110, section 5.3). A header the response lacks
+  saves nothing. Node reads header values as latin1, so UTF-8 text in a header arrives as its
+  latin1 characters (garbled); a value that must carry other scripts belongs in the body.
+- **Body text:** only when the content type is textual: `text/*`, `application/json`,
+  `application/xml` and the `+json`/`+xml` types, with no charset, `utf-8` or `us-ascii`. It is
+  decoded as UTF-8 (invalid bytes as U+FFFD, a byte order mark dropped, each NUL as U+FFFD as
+  ADR-130 requires), trimmed of outer white space and clipped as answers are. An image, a PDF, an
+  octet stream, another charset, no content type or an empty body saves nothing.
+- **Headers that are not saved:** a name containing `cookie`, `authoriz`, `authent`, `oauth`,
+  `token`, `secret`, `passw`, `session`, `credential`, `csrf`, `xsrf`, `signature`, `bearer` or
+  `passcode`; a part (between -) that is `auth`, `authn`, `authz`, `jwt`, `pwd`, `otp`, `sig`, `sid`
+  or `hmac`; or a part ending in `key`
+  (Set-Cookie, Authorization, WWW-Authenticate, X-Api-Key, X-Accesskey, X-JWT, X-Hmac-Sig). Short
+  words count only as whole parts, so Author, X-Design or X-Hotpath are allowed; a part ending in
+  `key` also refuses X-Idempotency-Key and X-Monkey, which errs on the safe side. These are
+  refused when the draft is saved ("The Set-Cookie header can carry credentials or a session, so
+  HyFib does not save it."). Two refusals need the company's settings and run with the checks that
+  block publishing: a header the step itself sends a secret in (a server may echo it back) and a
+  header named like a company secret. A header names a secret when, lowercased with - read as _
+  and an `x_` prefix ignored on either side (also compared with it), it is the secret's name (X-Ref
+  for `ref`, X-Shop-Ref for `x_shop_ref`), or holds a secret name of at least six characters as
+  whole parts (X-Crm-Ref-Id for `crm_ref`); a short secret name such as
+  `id` or `ref` therefore never refuses X-Request-Id or X-Ref-Count. Location is allowed, since a
+  created resource's address is a common value to save, although a server may put a signed
+  address in it; that address is then an answer like any other (T355).
+- **Echoed secrets:** the worker leaves out a value, from any source, that holds a secret value
+  the request carried, so a server echoing the request does not hand the secret to whoever reads
+  the run's answers or a message sends it on. The check (`automations/echo.ts`, one matcher per
+  response) runs on the whole value before it is clipped, so padding cannot move a secret across
+  the 1,000-character cut. It reads the value as written and in the encodings ordinary echoes use:
+  JSON string escapes (`\/`, `\"`, `\u002F`), URL and form encoding (`%2F`, `+`), XML and HTML
+  character references (`&#x2F;`, `&#47;`, `&sol;`), and a secret of eight characters or more in
+  base64 or base64url at any of the three alignments, in each of those forms (base64 written with
+  `\/` or `%2B`). A secret of six characters or more counts anywhere in the value. A shorter one
+  (one to five characters, a PIN) counts as a whole token: no letter or digit right before it when
+  it starts with one, nor right after it when it ends with one, so `4829` is found in `pin=4829`
+  and `#123` in `x#123`, but `4829` not in `148291`, and a status of 201 is left out only when a
+  secret is exactly `201`. A short secret the request sent touching a letter, a digit or another
+  secret part (a step published before the separator check below) counts anywhere instead, for
+  that call (`adjacentSecrets` over the headers as rendered).
+- **Cut echoes:** a value whose last characters (an escape cut short ignored) are the start of a
+  secret of six characters or more is left out as a possible cut echo: four or more characters
+  after other text ("Bearer sk_l", `ref=Zq8vK` against a six-character `Zq8vK2`); and when nothing
+  precedes them (a bare start, such as a JSON field holding the first 64 characters of a token),
+  eight or more characters, or all but one or two of the secret (`Zq8vK2p` against `Zq8vK2pa`). So
+  a bare start is saved only when it is under eight characters and at least three short of the
+  secret ("live" against `live_9f8a…`; for a secret of six, seven, eight, nine or ten characters
+  or more, at most three, four, five, six or seven of its characters), and after other text at
+  most three characters of a secret's start are saved. A secret whose start repeats inside it (a
+  self-overlapping secret) can make a shorter value end with a counted overlap and be dropped,
+  which fails safe; so does a value ending in four to seven characters of a secret's start after
+  other text when it is ordinary data (`Environment: live`, `mode=live`), with its own reason.
+- **Separators beside a secret in a header:** because short secrets are matched as tokens, a
+  member who can edit automations but not see secrets could otherwise build the adjacency on
+  purpose (`X-Probe: q{{secret.crm_pin}}q`, a secret twice in a row, `%41` or a placeholder right
+  before it) so that an echo hides the secret inside a longer word, then strip the padding from
+  the saved answer. In a step that saves response values, a `{{secret.<name>}}` placeholder that
+  touches a letter, a digit or another placeholder is refused by the checks run when the draft is
+  saved (shown as an error) and before publishing or a test run ("In the X-Probe header, put a
+  separator (a space, -, :, =, comma, ;, / or .) between {{secret.crm_pin}} and the text or
+  placeholder beside it, so that HyFib can recognise the secret if the server sends it back."). It
+  is a check, not part of the graph's schema, because published versions are parsed again when
+  they run and must not break; for those, the worker's `adjacentSecrets` rule above applies.
+- **Secret length:** new secrets, and new values for existing ones, need at least four characters
+  (`WEB_REQUEST_LIMITS.secretValueMinLength`, "Secret values need at least 4 characters."): a one
+  to three character secret would leave out ordinary values ("1" in "price 1.5"). Secrets saved
+  shorter before keep working. Short PINs of four or more characters stay accepted, since refusing
+  them would push them into headers as plain text; Settings says "At least 4 characters." beside
+  the value. It does not warn about existing short secrets: values are write-only and encrypted,
+  so the page cannot know a length without decrypting.
+- **The answers left out are recorded:** each refused header (`refused_header`), a header the step
+  sends a secret in or named like a company secret (`secret_header`), each echoed secret
+  (`echoed_secret`) and each possible cut echo (`possible_cut_echo`) is recorded by answer name with
+  its reason, never the value, in the call's
+  `dropped_values` (migration 0319, written with the outcome and fixed with it by the call's
+  guard). The run page's web request table shows them ("Not saved: ref (it held a secret the
+  request sent, which the server echoed)", in the step's order), and the runbook tells operators to
+  replace a secret that was echoed and to check the company's server for a possible cut echo.
+  The names are configuration, not customer content: exported with the call and deleted with its
+  run.
+- **Editor:** each saved value has "Value N from" (JSON path, Header, Body text, Status code) and
+  the input its source needs: the path, the header's name, or a line saying what is saved. The
+  domain's `withHttpSaveSource` changes a value's source keeping its answer name; the simulator
+  names each value's source ("ref (from the X-Request-Id header)"). Messages are written as the
+  editor's others are. Sources live in the automation's graph; the only migration is 0319.
+- **Run pages, webhooks and the API:** run pages list saved answers by name and calls by method,
+  host, path and outcome, now with the answers left out; `automation.run_step` events carry no
+  saved values and are unchanged; neither assumed a JSON path.
+- **Deployment:** apply 0319, then roll out workers, then web servers (`docs/DEPLOYMENT.md`).
+  Rolling workers back once a graph uses `from` fails pinned versions in the older parser, and an
+  older worker's save would throw after the request was sent, leaving the call to become unknown;
+  rolling web servers back makes such drafts unreadable to the editor.
+
+Known limits: a value is saved only from a 2xx response; secrets the server transforms other than
+as above are not recognised (hashed, split, encrypted, encoded twice, base64 wrapped in lines, a
+number parsed and written again without its leading zeros); a value that is a secret's bare start
+can reveal at most three, four, five, six or seven of its characters for a secret of six, seven,
+eight, nine or ten characters or more, a value ending after other text at most three, and for a
+secret of four or five characters (no cut-echo check) all but one; a secret's start followed by
+other text (an ellipsis or a
+closing quote: `Invalid key sk_live_abcd... (truncated)`, a text body ending `"}`) is not
+recognised, so a server that truncates its echo that way can reveal that much; a short secret
+(under eight characters) is not looked for in base64; a short secret run into letters or digits by
+the server, not by the step, is not recognised; headers are matched as Node presents them, so one
+Node drops as a duplicate (a second Content-Type) cannot be saved.
+
+Not built: values from failure responses, the body of a non-UTF-8 charset, binary bodies, a part
+of a text body (a pattern or a line), and saving all headers at once.
+
+Review (before merge): an independent review found one High: the echo check ran on values after
+they were clipped, so a member who can edit automations but not see secrets could pad a header to
+an echoing endpoint and save all but the last characters of a secret across the cut (now checked
+on the whole value, and a value ending with a secret's start is left out). It also found that
+ordinary encodings (JSON's `\/`, URL encoding, character references, `\u` escapes, base64) got past
+the check on body text (now read), that values left out for safety left no trace (now recorded in
+`dropped_values` and shown on the run page), that a short secret name such as `id` refused
+X-Request-Id (now whole names or six characters), deny-list gaps (`jwt`, `bearer`, `pwd`, `otp`,
+`sig`, parts ending in `key`; Author no longer refused), an untested worker-time refusal of a
+secret added after publishing (now an integration test) and no deployment note. All were fixed.
+A second review found no High. It found one Medium: secrets shorter than eight characters, which
+Settings still accepts, were no longer looked for at all, so a PIN echoed whole was saved (now
+found as a whole token). It also found that the end-overlap rule dropped ordinary values such as
+"live" and called them echoes (now only after other text, recorded as `possible_cut_echo` with its
+own runbook advice), that a secret named `x_…` no longer matched its header (the prefix is now
+ignored on both sides), that base64 inside JSON escapes or percent-encoding was missed (now
+checked in every decoded form), and nits (a numeric secret parsed again is a transform not
+recognised, answers left out in the step's order, `authn`, `authz`, `passcode` and `hmac`
+refused). All were fixed.
+A third review found no High. It found two Mediums: a member could defeat the token match of a
+short secret from the step itself (`q{{secret.pin}}q`, the secret twice, `%41` beside it),
+now refused by the separator check and, for steps already published, matched
+anywhere by the worker, with six- and seven-character secrets matched anywhere always; and the
+"after other text" rule let a value that is a long secret's bare start through at any length (now
+from eight characters), with the claim that a cut echo reveals at most three characters removed.
+It also found that one to three character secrets drop ordinary values (new ones now need four)
+and nits (the token boundary only on a side where the secret's edge is a letter or digit, one
+matcher per response). All were fixed.
+
+## ADR-407 Choice-type custom contact fields (P3-01) (2026-10-21)
+
+Context: custom contact fields took text, a number, a date or yes/no (ADR-112, ADR-115). A company
+that sorts its contacts by a fixed list (a tier, a branch, a lead source) used text, so members,
+imports and integrations wrote "Gold", "gold" and "Gld" for one thing, and segments and webhook
+filters missed some. Custom deal fields gained a `choice` type in ADR-385; ADR-115 and ADR-262 left
+"choices for a field" unbuilt for contacts.
+
+Decision: ADR-385's design, for contacts, through the same functions.
+
+- **A `choice` type** (`contacts/fields.ts`): 1 to 50 options, kept in the order given, each
+  trimmed, 1 to 80 characters without line breaks or control characters, none twice ignoring case
+  (`fieldOptionsSchema`, now shared with deal fields, whose `dealFieldOptionsSchema` is the same
+  schema). Settings → Messaging takes them one per line (blank lines left out) and lists them under
+  the field's type; `POST /contact-fields` takes `options` for a choice and refuses them for any
+  other type. A contact takes one option or none.
+- **Stored on the field** (migration 0320): `app.contact_fields.options`, a text array, null for
+  every other type, with 0301's shape check and a type check that accepts `choice`; both are
+  validated in the migration (at most 50 rows a company). The runtime role may update `options` (a
+  column grant); keys and types still never change. Options differing only in case are refused by
+  the service, which a check without a function cannot express.
+- **Changing options:** owners and administrators in Settings → Messaging, and keys with
+  `contact_fields.manage` through `PATCH /contact-fields/{key}` (which now takes `label`,
+  `options`, or both), may add options, reorder them, and remove or rename options no contact has
+  chosen. An option a contact has chosen stays exactly as written (a change of case is a rename), or
+  the change is refused naming it ("Contacts have “Silver” chosen, so it cannot be removed or
+  renamed. Change those contacts first."; 409 through the API). Erased contacts hold no values, so
+  they never keep an option. The same list changes nothing and is not audited. Changing options of
+  another type of field is refused (422).
+- **The company's contact-field lock:** a change of options takes `contact-fields:<company>`
+  exclusively (the advisory lock additions already took, ADR-115), and every write of values takes
+  it shared before reading the fields and before locking a contact (`lockContactFieldValues`), so a
+  value is never checked against options being replaced and a change of options counts every value
+  committed. Each writer then locks the rows of the fields it writes `FOR SHARE` (only those, so
+  other fields' renames never wait for it), still before the contact, in the order a field's
+  deletion takes them (ADR-112), so a value written while its field is being deleted is refused once
+  the deletion commits, or removed by it. A deletion then locks the contacts holding a value `FOR NO
+KEY UPDATE` in id order before removing the values, so it waits for any transaction holding one of
+  those contacts. Bulk field edits and imports lock the contacts they may change `FOR NO KEY UPDATE`
+  in id order too (they never change `tenant_id` or `id`, the only key other tables reference), so
+  neither crosses a deletion in id order; automation steps' key share locks and foreign key checks
+  (tags, consent events, a message's conversation) do not wait for them, while steps that set a
+  field or create a deal, Flow answers and a first name from WhatsApp wait until they commit. An
+  import that adds tags locks `FOR UPDATE` instead, as bulk tag edits do, so automation steps adding
+  a tag take turns with it; it does not itself keep a contact under the 50 tags members and steps
+  keep (an existing limit, not changed here). An import locks every existing contact the file names
+  before writing and writes values as a patch over the locked row, so neither a deleted field's
+  value nor a member's concurrent change is written back from an earlier read. A merge locks every
+  field row, since `app.merge_contacts` copies the merged contact's values unfiltered. What can
+  still cycle, each detected by PostgreSQL, which fails one transaction: a bulk tag edit, the API's
+  call changing many contacts or an import that adds tags (all lock `FOR UPDATE`, as they change
+  tags, which automation steps take turns on through their key share lock) with an automation step
+  waiting for a field being deleted and that deletion; a contact a merge kept, or another request
+  created, during an import, locked after the import's other contacts and possibly out of id order
+  (a created one usually has a later id, but ids come from the app servers' clocks, and later chunks
+  can find two in either order); and a Flow answer whose inbound transaction already holds some contact locked by
+  an earlier message of the same webhook change (an earlier form answer, or the name filled in when
+  a new identity joins an existing contact) that has a value of a field being deleted, possibly with
+  a change of options too. A member's or key's request then gets a conflict, which the member or the
+  API client sends again; a failed automation step rolls back and its run stays due, so its job or
+  the minute sweep runs it again (each failure counts toward the five failed attempts in a row after
+  which the run ends with `step_error`); a failed inbound change rolls back whole, its receipt is
+  marked failed and the webhook job retries it with backoff, skipping changes already committed.
+  Writers: the contact page and new-contact form, CSV import, bulk field edits (ADR-238),
+  `POST`/`PATCH /contacts` and the call that changes many (through `lockFields`), automation steps
+  that set a field, Flow answers saved into fields (which read the fields before locking the
+  contact), and merges by members and through the API (ADR-224, ADR-227), whose values move
+  unchecked, both being values of the company's fields.
+- **Values, where members type them:** the contact page and the new-contact form show a select with
+  "Not set" and the options (a value the options no longer hold, which the rules above prevent but a
+  page read before a change can show, is listed first and disabled, so the select never hides it and
+  it cannot be chosen again); a saved contact page sends only the values the member changed, so a
+  value left alone is never checked again and never blocks saving the rest; bulk field edits a
+  select. Forms, bulk edits, CSV import, automation steps ("Set a contact field", whose builder now
+  lists the options under the value) and Flow answers take an option whatever its case and store it
+  as written; anything else is refused ("Tier must be one of its options."; a CSV row error; a run
+  step `skipped` with `invalid_value`; a Flow answer `invalid`), as other types' bad values are. The
+  deal function `coerceDealFieldValue` now delegates to the contact one, which handles choices.
+- **Values through the API** are strict, as for other types: the option as written, as a string
+  (spaces around it ignored, as for text; null or an empty string removes it). `GET /contacts`'s
+  `fields[<key>]` filter takes an option whatever its case and refuses a value that is none (it
+  could find nothing). `Contact.fields`, in the API and the contact webhooks, gives the option as a
+  string; `GET /contact-fields` gives each field's `options` (null for other types) and the type
+  `choice`; the OpenAPI document describes both, with schema tests.
+- **Reading:** the contacts CSV export writes the option as text (unchanged code), and the company
+  data export carries each field's `options`. Segments, and
+  contact searches through the API (ADR-117), compare a choice as they compare text: is, is not
+  (also contacts without a value), set and not set, whatever its case; a value that is no option is
+  accepted and matches nobody, so a segment saved before an unused option was removed still reads.
+  The Contacts page filters do not filter by field values, so they are unchanged. Webhook field value
+  filters (ADR-332): a choice field's options are ticked in Settings → Webhooks (a stored value that
+  is no longer an option is listed apart and kept, as values of deleted fields are); the API takes
+  values exactly as written, and words and ranges are refused for a choice ("not a text field: give
+  a value of it instead"). Automation conditions on contact fields compare as text ignoring case
+  (unchanged). Campaign variables, automation placeholders and template variables fill in the option
+  as text (unchanged).
+- **Audit:** a choice field's creation records the number of options; a change records
+  `contact_field.options_changed` with the key and the numbers of options, added and removed, never
+  the options. Permissions are unchanged.
+
+Where contacts differ from deals: contacts have far more writers (imports of 5,000 rows, bulk edits,
+automations, Flows, merges and three API calls), and each takes the shared lock before it locks a
+contact; a CSV import reads its rows against the fields before its transaction, so under the lock it
+compares each mapped field with what it read (`sameFieldShape`: id, type, options as written) and is
+refused ("The custom fields changed while the file was read. Import it again.") rather than store a
+value read against options since replaced. Field deletion keeps ADR-112's order (the field row, then
+the values) and takes no advisory lock, unlike deal deletion, which takes the deal-field lock; the
+writers lock the field rows instead, as the API did since ADR-112 (an automation run reads its
+field after taking a key share lock on the contact, which a deletion's removal of values does not
+wait for). Contact fields are defined
+through the API too (ADR-115), so options are given and changed there, and the API filters contacts
+by a value (ADR-113), which takes the option in any case. Segments accept a value that is no option,
+where the deals board's filter (ADR-391) offers only options.
+
+Not built: several options per contact (multi-select), colours or descriptions per option, renaming
+an option contacts have chosen with its values carried over, a value list for automation conditions
+on a choice (they take text), and changing a field's type into or out of `choice`.
+
+## ADR-408 An enrolment's contacts listed with their outcomes (P4-01) (2026-10-21)
+
+Context: ADR-401 (members) and ADR-403 (API keys) store each enrolled contact in
+`app.automation_enrollment_contacts` with its position, outcome (pending, started with its run,
+refused with a reason, cancelled) and the time it was handled, but the enrolment's page and
+`GET /automations/{id}/enrollments/{enrollmentId}` gave only counts and refusals by reason. A member
+who saw "Refused: 12" could not tell which customers to follow up by hand, and an integration could
+not match runs to the contacts it enrolled. Both ADRs left "an enrolment's contacts listed with
+their outcomes" out, and P4-01's Remaining listed it.
+
+Decision:
+
+- **One reader for both:** `selectEnrolledContacts` (automations/enrollments) reads a page of an
+  enrolment's rows in position order, after a position and of one outcome when asked, with the
+  contact as it is now (a left join, so a contact merged away keeps its row), and
+  `assertEnrollmentOfAutomation` refuses an enrolment that is not the path's automation's.
+  `toEnrolledContact` (enrollment-model, pure) maps a row: the reason only for a refusal (with
+  members' label, falling back to its code), the run only for a start, and the contact's state:
+  `active`, `erased` or `merged`. An erased contact shows no name, number or id (nothing to open)
+  and members' pages call it "Erased contact"; one merged away since the snapshot has no row left
+  and is called "Merged into another contact".
+- **Keyset pages by position:** the snapshot's position never changes, so the cursor is the last
+  position shown (`nextCursor` as text, 1 to 10,000; anything else is refused as an invalid
+  cursor) and pages never skip or repeat a contact, filtered or not. Each page is read when it is
+  asked for, so outcomes can change between pages while the enrolment runs, as campaign recipients'
+  do (ADR-127).
+- **In the app:** the enrolment's page gains a Contacts card: position, the contact (a link to its
+  page while it is active), the outcome ("Refused: <reason>" for refusals, and "Open the run" when
+  one started) and when it was handled, 50 per page with "Next page", filtered by outcome with the
+  counts' words (All, Started, Refused, Not started, Waiting) as links, as the campaign recipients
+  page filters. The page re-renders every 15 seconds while the enrolment runs, the list with it.
+- **Who sees it in the app: `automations.read` and `contacts.read`.** Seeing an enrolment needs
+  `automations.read` (ADR-401); listing its contacts also needs what the Contacts page needs, so
+  the list names no contact a member could not find there: supervisors, marketers, administrators
+  and owners see it; analysts (who see enrolments but not contacts) see the counts only and no
+  Contacts card. The page checks both itself and the service checks them again; a refusal from the
+  service (`forbidden`) also shows the counts without the card, never an error. Names and numbers
+  come through `shownNumber`, so a role the company masks sees numbers masked as everywhere else
+  (ADR-226). No permission is new and the permission matrix does not change.
+- **Through the API:** `GET /automations/{id}/enrollments/{enrollmentId}/contacts` with `limit`
+  (1 to 100, default 50), `cursor` and `outcome` (`pending`, `started`, `refused`, `cancelled`), the
+  `{ data, nextCursor }` shape and error answers of the API's other lists (422 for an invalid query
+  or cursor, 404 for another company's enrolment, another automation's or an unknown one). Scopes:
+  `automations.start`, which reading the enrolment needs, and `contacts.read`, as the list names
+  contacts (as `GET /campaigns/{id}/recipients` needs it); both are checked as reads
+  (`assertAnyScope`), as ADR-403's reads are, so the list works while the company is suspended,
+  each within the plan's scopes (ADR-092). Each row gives `position`,
+  `contactId`, `contact` (the state), `outcome`, `reason`, `runId` and `processedAt`: ids only.
+  Names and numbers are left out although `contacts.read` reads them elsewhere: `GET /contacts/{id}`
+  gives them, and an integration that enrolled the contacts has them already. An erased contact's
+  row has no id, as the API lists no erased contact (ADR-127), and keeps its place so the list adds
+  up to the enrolment's total. `runId` is the run's id as the run webhooks give it with
+  `run.enrollmentId`; `GET /automation-runs/{id}` still reads runs keys started only (ADR-077), as
+  ADR-403 left it. Described in the OpenAPI document with the schema `AutomationEnrollmentContact`
+  and an example page, both checked by unit tests against the schema.
+- **No index, no migration:** 0311's unique key `(tenant_id, enrollment_id, position)` serves the
+  page (equality on the first two columns, a range and the order on the third); an outcome is
+  filtered along that index, so a page of a rare outcome reads at most the 10,000 rows of one
+  enrolment, the cap. An index on the outcome would serve only that and cost a write on every
+  outcome recorded. An integration test checks the plan uses the key with and without an outcome.
+- **Reads only:** nothing is written or audited, as reading an enrolment is not; both run in a
+  read-only transaction in the company's scope under row security.
+
+Not built: exporting an enrolment's contacts as CSV; searching them by name or number; stopping or
+re-enrolling the contacts of one outcome; names and numbers in the API's rows; reading an
+enrolment's runs through `GET /automation-runs/{id}`.
+
+## ADR-409 WhatsApp order reports: totals by day and by product (P4-06a) (2026-10-21)
+
+Context: Commerce → Orders lists the carts customers send from the company's WhatsApp catalog and
+exports them as CSV (ADR-235), but a company that wanted to know how many orders arrived each day,
+what they came to in each currency or which products sold had to export the orders and count them
+elsewhere. ADR-235 listed "order reports (totals by day or product)" as not built.
+
+Decision:
+
+- **On Commerce → Orders, not in Reports.** The report is a page of its own,
+  `/c/{slug}/commerce/orders/report`, linked from the order list ("Order report"). Reports'
+  numbers are the company's, read with `reports.read` by members who may not see a single
+  conversation (analysts, marketers), and are the same in report emails and `GET /reports`
+  (ADR-297); an order's visibility is the inbox's, member by member (ADR-235), so order totals
+  would have been the only figures on that page to change with who reads them, and an analyst
+  (no `commerce.read`) would have read orders through them. So no metric definition is added and
+  no migration: the order report reuses what Reports decided rather than their registry: periods
+  from `resolvePeriod` (a preset or custom whole days in the company's time zone, at most 92 days,
+  not after today; the same form and wording) and one repeatable-read, read-only snapshot
+  (ADR-026) under the company's scope.
+- **What it counts:** the orders received in the period (by `received_at`, the time WhatsApp
+  gives the order message, as the order list shows it), per day of the company and per status (the order's status now, as the list shows it);
+  their subtotals per currency, only for orders whose subtotal HyFib knows (every item read with a
+  price in one currency, ADR-046), the others counted as "orders without a known total", never
+  estimated; the totals by status; and the cart items HyFib could not read
+  (`dropped_items`), counted apart, with the orders that had any. By product: each retailer id
+  with the name HyFib's copy of the catalog gave on the latest order that had one ("Not in HyFib's
+  copy of the catalog" otherwise), the quantity, the number of orders and, per currency, quantity
+  × unit price for the items whose price and currency HyFib read (the quantity of every other
+  line is shown apart, so the two always add up to the quantity), whether or not the order as a
+  whole has a total. The 200 most ordered products
+  are listed and the page says how many there were.
+- **Money exact.** Sums are taken in SQL as numeric over the bigint minor units (quantity ×
+  price as numeric, so no product overflows) and returned as text; `exactMinor` refuses anything
+  but whole digits and carries them as `bigint`; `formatOrderTotal` writes them in the currency's
+  major unit from that decimal text (`minorToMajorText`) and lets `Intl` format the text itself,
+  so a total beyond 2^53 minor units keeps every digit. No total passes through a float.
+- **Who and what:** `commerce.read`, over exactly the orders the member's list shows
+  (`orderVisibility`: every order with `inbox.read_all`; those of their own conversations and the
+  unassigned queue with `inbox.read_assigned`; none otherwise, so a marketer's report is empty as
+  their list is). Totals carry no customer data: no names, numbers, notes or references, so
+  neither `contacts.read` nor `contacts.export` is needed and the permission matrix is unchanged.
+  Viewing is not audited, as viewing the list is not.
+- **Bounded:** two statements per page, both selecting orders by the period, which
+  `commerce_orders_list_idx (tenant_id, received_at DESC, id DESC)` covers, under the pool's
+  15-second statement timeout as Reports are: the orders grouped by day, status and currency, and
+  one products statement that reads the period's visible items once (a CTE, by order id, which
+  `commerce_order_items_position_uq (tenant_id, order_id, position)` leads with) and derives from
+  that set the product totals, the names (`distinct on`, for the listed products only) and the
+  priced subtotals (listed products only, grouped into JSON once and joined, not a subquery per
+  product). Both indexes exist since 0018, so no migration (no
+  0322). No query plan was examined (no database here); the indexes say what the planner can use,
+  not what it chooses.
+- **Days the database and the runtime disagree on:** a group PostgreSQL dates outside the
+  period's days (possible only if its time zone data and Node's ICU data differ) is left out of
+  totals, days and statuses, as Reports leave such rows out, and the page logs it (zone, day,
+  count; RUNBOOKS §10H) so the gap is not silent. Known limit: the product figures still include
+  those orders, since the products statement is bounded by the period's instants rather than by
+  day labels; bounding it by labels would cost every page for a case this rare.
+- **Tables only**, as the Reports page has no charts.
+
+Not built: a CSV of the totals and the report through the public API (both would repeat the page's
+numbers; the CSV of the orders stays ADR-235's), a choice of statuses or numbers, totals by
+customer, totals by the status an order had on a given day (statuses are today's), and store
+orders (P4-06b), which have their own copy.
+
+Review (before merge): no High issue. A Medium issue: the threat model and the feature matrix said
+two service-level regressions were caught by the integration tests, which had not run; they now say
+those regressions survive the unit tests and the integration tests (CI only) are written to catch
+them. Low issues: the name rule and the priced subtotals' visibility had no integration proof (now
+tested: a product renamed between orders with a newer nameless order, and a listed product's line
+on an order the agent cannot see); index use was stated as fact without a plan (reworded, and the
+product figures now come from one read of the items, names chosen for listed products only); the
+tables lacked captions and row headers (added, as on Reports); a day outside the period failed the
+page (now left out and logged, as above, with a RUNBOOKS entry); and no case crossed a
+daylight-saving change (added for New York's on 1 November 2026). Nits: the day column is
+WhatsApp's time, the name is the latest order's that had one, and a line without a currency now
+counts as unpriced, so priced and unpriced lines always add up. All were fixed. A second review
+found one Medium issue: the priced subtotals were a correlated subquery per listed product, which
+PostgreSQL would run once per product over every line of the period; they are now grouped once and
+joined. A Low issue: the product figures still count orders a time zone skew drops from the days;
+the limit is now stated here and in RUNBOOKS.
+
+## ADR-410 Campaigns that test up to five templates (P3-04, P5-08, P5-09) (2026-10-21)
+
+Context: ADR-405 let a campaign send two templates side by side (variants A and B) and listed "more
+than two variants" as not built. Companies comparing several messages (a short one, a long one,
+one with an offer) still had to run them two at a time, each pair with its own approval and its
+own audience, and compare the pairs by eye. Its table already took labels B to Z.
+
+Decision:
+
+- **Up to five variants, at least 10% each.** A draft may add variants C, D and E after B, so a
+  campaign tests up to five templates (`MAX_VARIANTS`): A, the campaign's own template, and B to E
+  in `app.campaign_variants`, one row each, each with its own template of the number's account,
+  its own mapping and its share, 10% to 90% in steps of 5 (`variantShareSchema`, unchanged). A gets
+  the rest, which must also be at least 10% (`variantSetProblem`), so the shares sum to 100% and no
+  variant gets less than a tenth of the audience. Five because the approval email, the review's and
+  the page's tables and a member's attention still take every variant at once, and each of five
+  keeps at least a tenth of the recipients: with 1,000 contacts a 10% variant has about 100
+  recipients, a binomial standard deviation of 0.95 points, while 5% would leave about 50, whose
+  differences are harder still to tell from chance (the results claim no winner either way). Steps of 5 are kept so the
+  table's check is unchanged and an even three-way split is 35/35/30 (the closest the steps give).
+  A campaign without variants and one with B alone behave exactly as before.
+- **No migration.** The checks of 0317 (labels B to Z, shares of 10% to 90% in steps of 5, the
+  recipients' variant A to Z), its unique label per campaign and its grants (`INSERT`, `DELETE`,
+  `UPDATE` of template, mapping and share) already take C to E, and nothing else limits variants to
+  A and B in the database. A draft's variants are written in its transaction: rows past the last
+  label removed, each label upserted; a later variant is never left without the one before.
+- **Assignment generalised, still recorded once.** The bucket is ADR-405's (first 32 bits of the
+  MD5 of "campaign id:contact id" modulo 100); the buckets are laid end to end in label order
+  (`variantRanges`): B the first `shares[0]`, C the next `shares[1]`, then D and E, and A the rest,
+  last. With B alone this is ADR-405's rule exactly (B below its share), so two-variant campaigns
+  split as they always did. `variantOfBucket`, `assignVariant` and `variantConditionSql` (each
+  variant's range in SQL) are one rule; the snapshot records each label and the runtime role still
+  cannot update it, so no contact is rerolled by a retry, a restart, a pause or a resume. Adding a
+  variant to a draft takes its buckets from A only (B keeps its contacts). ADR-405's other promises
+  now hold for B and for appending a variant only: a draft taken back and submitted again gives
+  each contact the same variant only if its shares are unchanged, and changing B's share, or
+  replacing or removing a variant before the last, moves the buckets of the variants after it (a
+  draft's variants are labelled in order, so removing C relabels D as C). Stored labels that skip
+  one (never written by the app) are refused before a submission ("The variants are out of order:
+  save the draft again …") rather than split, and so are stored shares that leave A under 10% or
+  pass 100% (as an older server could store): no audience is split by them, and `variantRanges`
+  refuses such a set in words rather than render an inverted range. Each variant's SQL condition is a half-open
+  `int4range` containing the bucket, so the MD5 is computed once per contact per variant; with
+  five variants the submission's transaction makes up to five passes over the audience (one per
+  variant, each classified by its own rules), a cost not measured (the 10,000-contact staging run
+  of P3-04 in BACKLOG covers it). The unit tests check all
+  1,593 valid share sets (17 of two variants, 120 of three, 455 of four, 1,001 of five) over the
+  10,000 deterministic contacts of ADR-405: every variant's count within three of its own binomial
+  standard deviations, Pearson's statistic below the chi-square's 0.999 quantile for its degrees
+  of freedom, and for two other campaign ids every variant within ADR-405's 1.5 points; the largest
+  deviation is 1.12 points (38.88% for the variant given buckets 50 to 89, 2.3 deviations). The
+  ids are fixed, so the outcome is too.
+- **Every check per variant, as B's.** Readiness checks each variant's template with
+  `variantTemplateProblems` (chosen, approved by Meta, of the number's account, sendable, its
+  category's consent and opt-in, its mapping complete, media and parameter rules through its send
+  spec), and a variant nobody in its share can receive blocks submitting; problems name their
+  variant ("Variant C: …"). Costs, the frequency cap and the messaging-limit notice are per variant
+  as for B. Approval and resuming check every variant's template while it has pending recipients
+  (`assertVariantTemplatesApproved`, "Variant C's template is no longer approved by Meta."), and so
+  does the runner, which loads every variant row and pauses naming the variant. Every variant sends
+  from the campaign's number.
+- **Draft, review, approval and results show every variant.** The editor adds variants one after
+  another ("Add variant C: another approved message for part of the audience"; removing one removes
+  those after it) and says what A keeps; the review's Variants table, the campaign page's header and
+  Variants card, the approval email ("It tests 3 templates side by side: …; Approving it approves
+  all 3") and test sends ("Variant to test") take every variant. `campaignVariantAnalytics` counts
+  the campaign's own labels, so a campaign of three reports three, never empty D and E.
+- **API and webhooks additive (P5-08, P5-09).** Drafts take `variants` (every variant after A in
+  order, at most four; given, it replaces them all; left out, they stay) beside ADR-405's `variantB`,
+  whose meaning is kept: B alone, set without dropping C to E, and null removing every variant (a C
+  without B would leave a gap); the two are refused together. `settings.variants` gives them all
+  and `settings.variantB` still gives B. The labels C, D and E join the enums of `variants` on
+  `GET /campaigns/{id}` and the draft review, of each recipient's `variant` and of
+  `recipient.variant` in `campaign.recipient_skipped`, values that appear only for campaigns that
+  test more than two templates; no field changes meaning, and the top-level template stays A's. A
+  recorded label is read back strictly (`parseVariantLabel` throws on any label HyFib does not
+  write) instead of mapping it to A.
+- **Rolling deploy gated.** A web server or worker of the release before reads variant B only. Met
+  with a variant C, an older web server submits its contacts as A, shows and checks only A and B
+  on the review and approval pages (an approver would approve a template they never saw) and
+  reports C's recipients as A; an older worker never sends C's recipients (they stay pending, a
+  batch of them stalling the campaign) and names them A in webhooks. So web servers let a draft
+  grow past two variants only up to `CAMPAIGN_VARIANTS_MAX` (2 to 5, **2 when unset**,
+  `nextCampaignVariants`), which the deployment raises once every server runs this release and
+  lowers before a rollback. At 2 a new server writes what ADR-405 writes; a draft that already has
+  more (the setting lowered for a rollback) can still be edited or trimmed, never grown. Workers
+  handle any number and do not read it. Lowering the setting does not reach campaigns already
+  submitted, whose labels are recorded: before a rollback, those waiting for approval are sent back
+  to draft (an older server would approve them checking two templates), and scheduled, running and
+  paused ones are cancelled, since a member can resume a paused campaign on an older server
+  (DEPLOYMENT lists them per company and has the steps). A recipient whose label has no variant
+  row (never written by the app) pauses the campaign naming it, and resuming is refused for it,
+  rather than the recipient waiting for good.
+
+Not built: more than five variants, shares below 10% or off the 5% steps, a per-variant schedule,
+audience or number, a winner or significance, per-variant results in `campaign.status_changed`,
+detecting older servers automatically (the gate is the deployment's setting), a submission
+pass that computes each contact's bucket once for every variant, and any verification against
+Meta (the Graph stand-in only).
+
+Review (before merge): an independent review found no High issue. Two Medium issues: the rollback
+steps missed campaigns waiting for approval or scheduled, and did not say that a pause does not
+stop a member resuming on older code (DEPLOYMENT now sends back, cancels and lists them with their
+status); and no integration test exercised readiness checking a third variant's template or the
+stored shares, so PROGRESS overstated what the mutation run showed (tests added, the accounting
+redone). Low issues: the editor's default shares could offer a fifth variant leaving A 5% (a
+variant is now offered only while A keeps 20%, `canAddVariant`); the new refusals named no field
+(they now carry paths such as `variants.1.sharePercent` and `variantB`); a recipient whose label
+had no row waited for good (now a pause naming it); no test sent `variants` through the API routes
+(the e2e does); ADR-405's stability promise was not restated for more variants, and the
+submission's cost was not stated (both above); and a stored gap in the labels was a server error
+(now a readiness problem). All were fixed. A second review found one High and one Medium issue
+from one gap: readiness still built each variant's audience for an invalid stored set, so a
+5% A over few contacts added a second problem (a flaky test) and a set past 100% raised a database
+error from an inverted range; readiness now builds them only for a valid set, `variantRanges`
+refuses an invalid one in words, and the test covers both. A Low: the e2e's `PATCH` now grows the
+draft, so it exercises the limit the API routes pass on. All were fixed.

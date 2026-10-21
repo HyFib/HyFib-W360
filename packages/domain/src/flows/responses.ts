@@ -7,11 +7,13 @@ import {
   flowResponses,
   flowSends,
   flows,
+  inArray,
   isNull,
   sql,
   type FlowAnswerOutcome,
   type Tx,
 } from '@w360/db';
+import { lockContactFieldValues } from '../contacts/field-definitions';
 import { coerceFieldValue, normalizeEmail } from '../contacts/fields';
 import { FLOW_TOKEN_RE } from './model';
 
@@ -126,16 +128,44 @@ export async function recordFlowCompletion(
       message: 'The form was sent to another contact, so the answers were not applied.',
     });
   } else if (send && completion.answers && send.mapping.length > 0) {
-    // The answers belong to the contact the form was sent to (the token names that send).
+    // The answers belong to the contact the form was sent to (the token names that send). The
+    // company's contact-field lock first, as every write of values takes it (ADR-407), then the
+    // rows of the fields the form saves into, locked against a deletion before the contact, in the
+    // order a deletion takes them (ADR-112); other fields are not locked. The inbound transaction
+    // may already hold some contact locked by an earlier message of the same webhook change (an
+    // earlier form answer, or a name filled in when a new identity joined an existing contact);
+    // if that contact has a value of one of these fields while the field is being deleted, this
+    // and the deletion (possibly with a change of options) deadlock. PostgreSQL fails one: the
+    // change rolls back whole, its receipt is marked failed and the webhook job retries it with
+    // backoff (`deleteContactField` says more).
+    const keys = [
+      ...new Set(
+        send.mapping.flatMap(({ target }) =>
+          target.startsWith('field:') ? [target.slice('field:'.length)] : [],
+        ),
+      ),
+    ];
+    if (keys.length > 0) await lockContactFieldValues(tx, input.tenantId);
+    const fieldRows =
+      keys.length === 0
+        ? []
+        : await tx
+            .select({
+              key: contactFields.key,
+              label: contactFields.label,
+              type: contactFields.type,
+              options: contactFields.options,
+            })
+            .from(contactFields)
+            .where(
+              and(eq(contactFields.tenantId, input.tenantId), inArray(contactFields.key, keys)),
+            )
+            .for('share');
     const [contact] = await tx
       .select({ id: contacts.id, erasedAt: contacts.erasedAt })
       .from(contacts)
       .where(and(eq(contacts.tenantId, input.tenantId), eq(contacts.id, send.contactId)))
       .for('update');
-    const fieldRows = await tx
-      .select({ key: contactFields.key, label: contactFields.label, type: contactFields.type })
-      .from(contactFields)
-      .where(eq(contactFields.tenantId, input.tenantId));
     const fields = new Map(fieldRows.map((f) => [f.key, f]));
     const set: { displayName?: string; email?: string | null } = {};
     const attrSet: Record<string, string | number | boolean> = {};

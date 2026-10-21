@@ -22,6 +22,7 @@ import {
   sql,
   users,
   type AutomationEnrollmentEndReason,
+  type AutomationEnrollmentOutcome,
   type AutomationEnrollmentSource,
   type AutomationEnrollmentStatus,
   type Database,
@@ -41,6 +42,7 @@ import {
   segmentWhere,
 } from '../campaigns/segments';
 import { loadFieldTypes } from '../campaigns/segments';
+import { shownNumber } from '../contacts/number-masking';
 import { contactFilterConditions } from '../contacts/service';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
@@ -48,8 +50,14 @@ import { loadEntitlements } from '../plans/entitlements';
 import { parseInput } from '../validation';
 import { triggerSchema } from './graph';
 import {
+  ENROLLED_CONTACTS_PAGE,
   ENROLLMENT_LIMITS,
   apiKeyEnrollmentEnd,
+  enrolledContactsPage,
+  enrolledContactsQuerySchema,
+  toEnrolledContact,
+  type EnrolledContact,
+  type EnrolledContactRow,
   assertEnrollableCount,
   enrollmentKeyMayUse,
   enrollmentBatchDelayMs,
@@ -823,6 +831,74 @@ export async function readEnrollmentDetail(
   };
 }
 
+/**
+ * Refuses an enrolment that is not the automation's (ADR-408): another company's (row security and
+ * the company's id), another automation's or an unknown one is not found, as the enrolment's page
+ * and `GET /automations/{id}/enrollments/{enrollmentId}` answer.
+ */
+export async function assertEnrollmentOfAutomation(
+  tx: Tx,
+  tenantId: string,
+  automationId: string,
+  enrollmentId: string,
+): Promise<void> {
+  const [row] = await tx
+    .select({ id: automationEnrollments.id })
+    .from(automationEnrollments)
+    .where(
+      and(
+        eq(automationEnrollments.tenantId, tenantId),
+        eq(automationEnrollments.id, enrollmentId),
+        eq(automationEnrollments.automationId, automationId),
+      ),
+    );
+  if (!row) throw notFound('Enrolment');
+}
+
+/**
+ * A page of an enrolment's contacts in position order (the snapshot's, which never changes), after
+ * a position and of one outcome when given, with each contact as it is now (ADR-408). Served by
+ * 0311's unique key on (tenant_id, enrollment_id, position); an outcome is filtered along it, over
+ * at most the 10,000 rows of one enrolment.
+ */
+export async function selectEnrolledContacts(
+  tx: Tx,
+  tenantId: string,
+  enrollmentId: string,
+  page: { outcome?: AutomationEnrollmentOutcome; after?: number; limit: number },
+): Promise<EnrolledContactRow[]> {
+  return tx
+    .select({
+      position: automationEnrollmentContacts.position,
+      contactId: automationEnrollmentContacts.contactId,
+      displayName: contacts.displayName,
+      phoneE164: contacts.phoneE164,
+      erasedAt: contacts.erasedAt,
+      outcome: automationEnrollmentContacts.outcome,
+      reason: automationEnrollmentContacts.reason,
+      runId: automationEnrollmentContacts.runId,
+      processedAt: automationEnrollmentContacts.processedAt,
+    })
+    .from(automationEnrollmentContacts)
+    .leftJoin(
+      contacts,
+      and(
+        eq(contacts.tenantId, automationEnrollmentContacts.tenantId),
+        eq(contacts.id, automationEnrollmentContacts.contactId),
+      ),
+    )
+    .where(
+      and(
+        eq(automationEnrollmentContacts.tenantId, tenantId),
+        eq(automationEnrollmentContacts.enrollmentId, enrollmentId),
+        page.outcome ? eq(automationEnrollmentContacts.outcome, page.outcome) : undefined,
+        page.after ? gt(automationEnrollmentContacts.position, page.after) : undefined,
+      ),
+    )
+    .orderBy(asc(automationEnrollmentContacts.position))
+    .limit(page.limit);
+}
+
 /** Records a batch's outcomes in one statement; returns how many started and were refused. */
 async function recordOutcomes(
   tx: Tx,
@@ -1115,6 +1191,44 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
         (tx) => readEnrollmentDetail(tx, ctx.tenant.id, id, ctx.tenant.status === 'active'),
         { accessMode: 'read only' },
       );
+    },
+
+    /**
+     * An enrolment's contacts in position order with their outcomes, 50 per page, of one outcome
+     * when asked (ADR-408): what seeing the enrolment needs (`automations.read`) and what the
+     * Contacts page needs (`contacts.read`), so the list names no contact a member could not find
+     * there. Names and numbers as the member sees them elsewhere (ADR-226); an erased contact is
+     * named as erased. Another automation's or company's enrolment is not found.
+     */
+    async listEnrolledContacts(
+      ctx: TenantContext,
+      automationId: string,
+      enrollmentId: string,
+      input: unknown,
+    ): Promise<{ items: EnrolledContact[]; nextCursor: string | null }> {
+      assertCan(ctx, 'automations.read');
+      assertCan(ctx, 'contacts.read');
+      if (!z.uuid().safeParse(automationId).success || !z.uuid().safeParse(enrollmentId).success) {
+        throw notFound('Enrolment');
+      }
+      const q = parseInput(enrolledContactsQuerySchema, input ?? {});
+      const rows = await db.run(
+        ctx.scope,
+        async (tx) => {
+          await assertEnrollmentOfAutomation(tx, ctx.tenant.id, automationId, enrollmentId);
+          return selectEnrolledContacts(tx, ctx.tenant.id, enrollmentId, {
+            ...(q.outcome ? { outcome: q.outcome } : {}),
+            ...(q.cursor ? { after: q.cursor } : {}),
+            limit: ENROLLED_CONTACTS_PAGE + 1,
+          });
+        },
+        { accessMode: 'read only' },
+      );
+      const { shown, nextCursor } = enrolledContactsPage(rows, ENROLLED_CONTACTS_PAGE);
+      return {
+        items: shown.map((r) => toEnrolledContact(r, (phone) => shownNumber(ctx, phone))),
+        nextCursor,
+      };
     },
 
     /**

@@ -2810,7 +2810,10 @@ function FieldValueChoices({
   /** The range typed for each number and date field, by key (ADR-335). */
   ranges: Record<string, { from: string; to: string }>;
   onRangesChange: (next: Record<string, { from: string; to: string }>) => void;
-  /** The yes/no values and the values kept as they are ticked (`webhookContactFieldValueId`). */
+  /**
+   * The yes/no values, choice options (ADR-407) and the values kept as they are ticked
+   * (`webhookContactFieldValueId`).
+   */
   ticked: string[];
   onTickedChange: (next: string[]) => void;
 }) {
@@ -2867,16 +2870,22 @@ function FieldValueChoices({
         <div className="ml-6 grid max-h-96 gap-3 overflow-y-auto">
           {choices.map((field) => {
             const id = `${prefix}-field-value-${field.key}`;
-            if (field.type === 'boolean') {
+            // Yes/no values and a choice field's options (ADR-407) are ticked.
+            if (field.type === 'boolean' || field.type === 'choice') {
+              const values: (boolean | string)[] =
+                field.type === 'boolean' ? [true, false] : (field.options ?? []);
               return (
                 <div key={field.key} role="group" aria-labelledby={id} className="grid gap-1">
                   <span id={id} className="text-sm font-medium break-all">
                     {webhookFieldText(field)}
                   </span>
                   <div className="flex flex-wrap gap-4">
-                    {[true, false].map((value) => {
+                    {values.map((value, index) => {
                       const pairId = webhookContactFieldValueId({ key: field.key, value });
-                      const boxId = `${id}-${value ? 'yes' : 'no'}`;
+                      const boxId =
+                        typeof value === 'boolean'
+                          ? `${id}-${value ? 'yes' : 'no'}`
+                          : `${id}-option-${index}`;
                       return (
                         <div key={pairId} className="flex items-center gap-2">
                           <Checkbox
@@ -4219,7 +4228,7 @@ export function WebhookEndpointForm({
     endpoint?.contactEventTags?.join(', ') ?? '',
   );
   // The field values of added and changed contacts (ADR-332): lines for text, number and date
-  // fields and ticks for yes/no fields, words for text fields and one range a number or date field
+  // fields and ticks for yes/no fields and choice fields' options (ADR-407), words for text fields and one range a number or date field
   // (ADR-335); a condition the endpoint holds that its field's inputs cannot show as it is (its
   // field deleted, added again with another type, or a field's second range) is ticked and kept as
   // it is.
@@ -4227,10 +4236,10 @@ export function WebhookEndpointForm({
   // a save refreshes the endpoint without remounting the form, and deciding again from it (which
   // range comes first) would move a range the inputs do not hold out of the kept list unseen.
   const [fieldConditionLayout] = useState(() => {
-    const fieldTypeByKey = new Map(contactFieldChoices.map((f) => [f.key, f.type]));
+    const fieldByKey = new Map(contactFieldChoices.map((f) => [f.key, f]));
     const editable = (pair: WebhookContactFieldValue) => {
-      const type = fieldTypeByKey.get(pair.key);
-      return type !== undefined && webhookFieldConditionEditable(type, pair);
+      const field = fieldByKey.get(pair.key);
+      return field !== undefined && webhookFieldConditionEditable(field.type, pair, field.options);
     };
     const stored = endpoint?.contactEventFieldValues ?? [];
     const rangeShown = new Set<string>();
@@ -4245,6 +4254,11 @@ export function WebhookEndpointForm({
   });
   const shownInInputs = (pair: WebhookContactFieldValue) =>
     fieldConditionLayout.shown.includes(pair);
+  // A choice field's values are ticked among its options (ADR-407), as yes/no values are.
+  const ticksValues = (pair: WebhookContactFieldValue) =>
+    'value' in pair &&
+    (typeof pair.value === 'boolean' ||
+      contactFieldChoices.some((f) => f.key === pair.key && f.type === 'choice'));
   const keptFieldValues = fieldConditionLayout.kept;
   const [everyContactEventFieldValue, setEveryContactEventFieldValue] = useState(
     !endpoint?.contactEventFieldValues,
@@ -4252,7 +4266,7 @@ export function WebhookEndpointForm({
   const [fieldValueLines, setFieldValueLines] = useState<Record<string, string>>(() => {
     const lines: Record<string, string> = {};
     for (const pair of endpoint?.contactEventFieldValues ?? []) {
-      if (!shownInInputs(pair) || !('value' in pair) || typeof pair.value === 'boolean') continue;
+      if (!shownInInputs(pair) || !('value' in pair) || ticksValues(pair)) continue;
       const text = webhookFieldValueText(pair.value);
       lines[pair.key] = lines[pair.key] ? `${lines[pair.key]}\n${text}` : text;
     }
@@ -4281,9 +4295,7 @@ export function WebhookEndpointForm({
   );
   const [fieldValuesTicked, setFieldValuesTicked] = useState<string[]>(() =>
     (endpoint?.contactEventFieldValues ?? [])
-      .filter(
-        (pair) => !shownInInputs(pair) || ('value' in pair && typeof pair.value === 'boolean'),
-      )
+      .filter((pair) => !shownInInputs(pair) || ticksValues(pair))
       .map(webhookContactFieldValueId),
   );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
@@ -4615,8 +4627,9 @@ export function WebhookEndpointForm({
         ) {
           chosenContactEventFieldValues = [];
           for (const field of contactFieldChoices) {
-            if (field.type === 'boolean') {
-              for (const value of [true, false]) {
+            if (field.type === 'boolean' || field.type === 'choice') {
+              const values = field.type === 'boolean' ? [true, false] : (field.options ?? []);
+              for (const value of values) {
                 if (
                   fieldValuesTicked.includes(webhookContactFieldValueId({ key: field.key, value }))
                 )

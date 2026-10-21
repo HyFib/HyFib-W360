@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { AppError } from '@w360/core';
-import type { ApiScope, AutomationEnrollmentEndReason, AutomationEnrollmentSource } from '@w360/db';
+import {
+  AUTOMATION_ENROLLMENT_OUTCOMES,
+  type ApiScope,
+  type AutomationEnrollmentEndReason,
+  type AutomationEnrollmentOutcome,
+  type AutomationEnrollmentSource,
+} from '@w360/db';
 import { contactFilterSchema } from '../contacts/service';
 import { startRefusalOf, type StartRefusal } from './starts';
 
@@ -334,4 +340,126 @@ export function apiKeyEnrollmentEnd(input: {
     return 'api_scope_missing';
   }
   return null;
+}
+
+// An enrolment's contacts with their outcomes (ADR-408) ---------------------------------------
+
+/** Contacts on one page of an enrolment's list in the app, as the app's other long lists. */
+export const ENROLLED_CONTACTS_PAGE = 50;
+
+/** How members read each contact's outcome (the enrolment page's counts use the same words). */
+export const ENROLLED_OUTCOME_LABELS: Record<AutomationEnrollmentOutcome, string> = {
+  pending: 'Waiting',
+  started: 'Started',
+  refused: 'Refused',
+  cancelled: 'Not started',
+};
+
+const INVALID_CURSOR = 'Invalid cursor: give the nextCursor of the previous page.';
+
+/**
+ * The position after which a page of an enrolment's contacts starts: the last position of the page
+ * before (`nextCursor`), 1 to the most contacts an enrolment takes. Positions never change, so a
+ * page never skips or repeats a contact.
+ */
+export const enrolledContactsCursorSchema = z
+  .string()
+  .regex(/^[1-9][0-9]{0,4}$/, { error: INVALID_CURSOR })
+  .transform(Number)
+  .refine((position) => position <= ENROLLMENT_LIMITS.contacts, { error: INVALID_CURSOR });
+
+/** A page of an enrolment's contacts on members' pages: one outcome or all, after a cursor. */
+export const enrolledContactsQuerySchema = z
+  .object({
+    outcome: z.enum(AUTOMATION_ENROLLMENT_OUTCOMES).optional(),
+    cursor: enrolledContactsCursorSchema.optional(),
+  })
+  .strict();
+
+/** One row of an enrolment's contacts as the database gives it, with the contact as it is now. */
+export interface EnrolledContactRow {
+  position: number;
+  /** NULL once the contact was merged into another (the merge deletes it). */
+  contactId: string | null;
+  displayName: string | null;
+  phoneE164: string | null;
+  erasedAt: Date | null;
+  outcome: AutomationEnrollmentOutcome;
+  reason: string | null;
+  runId: string | null;
+  processedAt: Date | null;
+}
+
+/** What became of the contact since the snapshot. */
+export type EnrolledContactState = 'active' | 'erased' | 'merged';
+
+/** One enrolled contact as members' pages and the API read it. */
+export interface EnrolledContact {
+  position: number;
+  /** The contact; null once it was erased or merged into another (nothing left to open). */
+  contactId: string | null;
+  contact: EnrolledContactState;
+  /** The name and number as the viewer may see them; null for an erased or merged contact. */
+  name: string | null;
+  phone: string | null;
+  outcome: AutomationEnrollmentOutcome;
+  /** Why a start was refused (the refusal's code); null for any other outcome. */
+  reason: string | null;
+  /** The refusal as members read it, falling back to its code. */
+  reasonLabel: string | null;
+  /** The run started for the contact; null otherwise, or once retention deleted it. */
+  runId: string | null;
+  /** When the enrolment handled the contact; null while it waits. */
+  processedAt: Date | null;
+}
+
+/**
+ * Maps a row onto what members' pages and the API show. `shownNumber` gives the number as the
+ * viewer may see it (ADR-226 masking). An erased contact shows neither name, number nor an id to
+ * open; a contact merged away has no row left to name.
+ */
+export function toEnrolledContact(
+  row: EnrolledContactRow,
+  shownNumber: (phone: string | null) => string | null,
+): EnrolledContact {
+  const contact: EnrolledContactState =
+    row.contactId === null ? 'merged' : row.erasedAt ? 'erased' : 'active';
+  const active = contact === 'active';
+  const refused = row.outcome === 'refused' ? row.reason : null;
+  return {
+    position: row.position,
+    contactId: active ? row.contactId : null,
+    contact,
+    name: active ? row.displayName : null,
+    phone: active ? shownNumber(row.phoneE164) : null,
+    outcome: row.outcome,
+    reason: refused,
+    reasonLabel: refused
+      ? (ENROLLMENT_REFUSAL_LABELS[refused as EnrollmentRefusal] ?? refused)
+      : null,
+    runId: row.outcome === 'started' ? row.runId : null,
+    processedAt: row.processedAt,
+  };
+}
+
+/** How members' pages name an enrolled contact. */
+export function enrolledContactLabel(
+  c: Pick<EnrolledContact, 'contact' | 'name' | 'phone'>,
+): string {
+  if (c.contact === 'erased') return 'Erased contact';
+  if (c.contact === 'merged') return 'Merged into another contact';
+  return c.name ?? c.phone ?? 'Unnamed contact';
+}
+
+/**
+ * A page read with one row more than `limit`: the rows to show, and the next page's cursor (the
+ * last position shown) when there is one.
+ */
+export function enrolledContactsPage<T extends { position: number }>(
+  rows: readonly T[],
+  limit: number,
+): { shown: T[]; nextCursor: string | null } {
+  const shown = rows.slice(0, limit);
+  const last = shown.at(-1);
+  return { shown, nextCursor: rows.length > limit && last ? String(last.position) : null };
 }

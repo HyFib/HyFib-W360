@@ -327,6 +327,11 @@ export interface RunDetail extends RunSummary {
     statusCode: number | null;
     errorCode: string | null;
     durationMs: number | null;
+    /**
+     * Answers the call left out for safety, by name, with the reason (ADR-406): `refused_header`,
+     * `secret_header`, `echoed_secret` or `possible_cut_echo`. Names only, never values.
+     */
+    droppedValues: Record<string, string>;
     createdAt: string;
     finishedAt: string | null;
   }[];
@@ -538,7 +543,12 @@ export function createAutomationService(deps: AutomationServiceDeps) {
       .where(eq(teams.tenantId, tenantId))
       .orderBy(asc(sql`lower(${teams.name})`));
     const fieldRows = await tx
-      .select({ key: contactFields.key, label: contactFields.label, type: contactFields.type })
+      .select({
+        key: contactFields.key,
+        label: contactFields.label,
+        type: contactFields.type,
+        options: contactFields.options,
+      })
       .from(contactFields)
       .where(eq(contactFields.tenantId, tenantId))
       .orderBy(asc(contactFields.label));
@@ -1898,6 +1908,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               statusCode: automationHttpCalls.statusCode,
               errorCode: automationHttpCalls.errorCode,
               durationMs: automationHttpCalls.durationMs,
+              droppedValues: automationHttpCalls.droppedValues,
               createdAt: automationHttpCalls.createdAt,
               finishedAt: automationHttpCalls.finishedAt,
             })

@@ -110,8 +110,14 @@ verification, app review, Embedded Signup configuration).
   the page's filters match, after a confirmation, with the checks of a member's edit and of bulk tag
   edits; no migration). **[Renaming custom fields in Settings built; its browser test runs only in
   CI]** (ADR-262: owners and administrators rename a field's label in Settings → Messaging, audited,
-  its key and so every value, CSV column and API name kept; no migration). **Remaining:** joining
-  conversations.
+  its key and so every value, CSV column and API name kept; no migration). **[Choice-type custom
+  contact fields built; their database and browser tests run only in CI]** (ADR-407, migration 0320:
+  a `choice` field has 1 to 50 options, in order, unique ignoring case; members, imports, bulk
+  edits, automations and Flow answers take an option in any case and the API exactly as written;
+  options can be added, reordered, and removed or renamed while no contact has them chosen, in
+  Settings → Messaging and through `PATCH /contact-fields/{key}`, under a company lock every write of
+  values takes; segments and webhook filters compare or tick options). **Remaining:** joining
+  conversations, multi-select fields and field order.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
   with a queued template, and with campaigns). **Remaining:** review Meta's
@@ -163,9 +169,15 @@ verification, app review, Embedded Signup configuration).
   recipients in steps of 5; each recipient's variant comes from a stable hash of the campaign and
   the contact, recorded once with the snapshot; every check, estimate and the approval runs per
   variant; results per variant side by side, descriptive only; the API creates, reviews and reads
-  variants and names each recipient's, as does `campaign.recipient_skipped`). **Remaining:** the
-  10k run in staging with real dispatch, per-recipient time zones, more than two variants (the
-  table takes them), media-header templates (only the API sends them, ADR-201).
+  variants and names each recipient's, as does `campaign.recipient_skipped`). **[Up to five
+  variants built; their database and browser tests run only in CI]** (ADR-410, no migration: a
+  draft may add variants C, D and E after B, so a campaign tests up to five templates, each share
+  10% to 90% in steps of 5 with A keeping at least 10%; the hash's buckets are laid end to end, B
+  first and A last, so two-variant campaigns split as before; every per-variant check, the
+  approval, the results, the API's `variants` and `recipient.variant` cover C to E; web servers
+  allow more than two only once the deployment raises `CAMPAIGN_VARIANTS_MAX` after every server
+  runs this release). **Remaining:** the 10k run in staging with real dispatch, per-recipient time
+  zones, media-header templates (only the API sends them, ADR-201).
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and
@@ -271,10 +283,15 @@ verification, app review, Embedded Signup configuration).
   them, scopes `automations.start` and `contacts.read` (`campaigns.read` for a segment), one
   per `Idempotency-Key`; keyset-paged reads and a stop; the enrolment names its key, each batch
   re-checks the key and the plan and ends it with its reason; members' and keys' enrolments are
-  visible to both; contacts' outcomes one by one not listed). **Remaining:** starting runs from
-  campaigns, an enrolment's contacts listed with their outcomes (in the app and the API), a
-  drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox run (release
-  checklist).
+  visible to both; contacts' outcomes one by one not listed). **[An enrolment's contacts listed
+  with their outcomes built; their database and browser tests run only in CI]** (ADR-408, no
+  migration: the enrolment's page lists its contacts in position order with each outcome, the
+  reason of a refusal, the run and when it was handled, 50 per keyset page, filtered by outcome,
+  for members with `automations.read` and `contacts.read`, numbers masked as elsewhere and erased
+  contacts named as erased; `GET /automations/{id}/enrollments/{enrollmentId}/contacts` gives them
+  by id with `automations.start` and `contacts.read`). **Remaining:** starting runs from
+  campaigns, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox
+  run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
   placeholders, headers, JSON body, values saved from the response, success and failure branches);
@@ -287,9 +304,16 @@ verification, app review, Embedded Signup configuration).
   refusals, crash and late results, timeouts, cancellation, sweep, erasure, retention, settings,
   isolation), e2e `web-requests.spec.ts`. **[Form bodies built; their database test runs only in
   CI]** (ADR-236: a step's body as URL-encoded form fields, placeholders URL-encoded, sent as
-  `application/x-www-form-urlencoded`; no migration). **Remaining:** calls against a real company
-  API in an authorized environment (release checklist), response headers or non-JSON bodies as
-  values, retries a company opts into for idempotent requests, OAuth client flows.
+  `application/x-www-form-urlencoded`; no migration). **[Response headers, text bodies and the
+  status as values built; unit tests run locally, the database and browser tests only in CI]**
+  (ADR-406: each saved value comes from a JSON path, a header, the body as text or the status;
+  credential and session headers, a header carrying the step's secret or named like a company
+  secret refused; a value holding a secret the request carried left out, checked before clipping
+  and in ordinary encodings (secrets transformed otherwise are not recognised); answers left out
+  recorded and shown on the run page (migration 0319); stored graphs unchanged).
+  **Remaining:** calls against a real company API in an authorized environment (release
+  checklist), values from failure responses, retries a company opts into for idempotent requests,
+  OAuth client flows.
 - **P4-03 WhatsApp Flows** — _implemented and locally verified (2026-09-27) against the Graph
   stand-in and signed, encrypted test requests; no live WhatsApp traffic yet_: Flow JSON written as
   text with checks while typing; drafts sent to Meta by the worker, one written-ahead operation at a
@@ -504,10 +528,14 @@ verification, app review, Embedded Signup configuration).
   notifications, paid and fulfilled). **[Order exports built; their database test runs only in CI]**
   (ADR-235: the orders a member can see as CSV, filtered by status, with `commerce.read` and
   `contacts.export`, numbers masked as for the member, erased contacts blanked, audited; no
-  migration). **Remaining:** checks on an approved sandbox number and with a company's Razorpay test
+  migration). **[Order reports built; their database and browser tests run only in CI]** (ADR-409:
+  Commerce → Orders → Order report, for a period of whole company days as Reports choose them, the
+  orders per day and status, exact subtotals per currency, items by product and unreadable items
+  apart, over the orders the member's list shows, with `commerce.read`; totals only; no migration).
+  **Remaining:** checks on an approved sandbox number and with a company's Razorpay test
   keys (release checklist), product enquiries (`referred_product`), payments inside WhatsApp
   (`order_details`, needs Meta payment configuration), writing to catalogs and stock, refunds from
-  HyFib, order reports, sending products from automations.
+  HyFib, sending products from automations.
 - **P4-06b Store connectors** — _implemented and locally verified (2026-09-27) against the Shopify
   and WooCommerce stand-ins; no live store traffic yet_: companies connect Shopify stores through
   HyFib's Shopify app (a signed callback bound to the member who started it, `read_orders` and

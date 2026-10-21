@@ -140,6 +140,8 @@ jobs:
       E2E_RAZORPAY_PORT: '4020'
       # Paying for plans (ADR-063) against the stand-in's subscriptions; off unless set.
       RAZORPAY_SUBSCRIPTIONS_ENABLED: 'true'
+      # Campaigns that test up to five templates (ADR-410); two unless set.
+      CAMPAIGN_VARIANTS_MAX: '5'
       # Automation web requests reach a local target started by the test: loopback egress is
       # allowed for APP_ENV=local|test only, and the name below resolves to 127.0.0.1 (hosts file).
       W360_EGRESS_ALLOW_LOOPBACK: 'true'

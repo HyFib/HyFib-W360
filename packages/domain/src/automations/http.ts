@@ -1,4 +1,12 @@
-import { clipText, parseExternalJson, uuidv7, type Clock, type Keyring } from '@w360/core';
+import {
+  clipText,
+  NUL,
+  NUL_REPLACEMENT,
+  parseExternalJson,
+  uuidv7,
+  type Clock,
+  type Keyring,
+} from '@w360/core';
 import { EgressError, type EgressClient } from '@w360/core/egress';
 import { QUEUES } from '@w360/contracts';
 import {
@@ -17,8 +25,18 @@ import {
   type Tx,
 } from '@w360/db';
 import type { JobSigner } from '../jobs/envelope';
+import { echoMatcher, looseSecretValuesOf } from './echo';
 import type { JobQueue } from '../jobs/queue';
-import { AUTOMATION_LIMITS, hostAllowed, type HttpHeaderPart, type HttpMethod } from './graph';
+import {
+  AUTOMATION_LIMITS,
+  hostAllowed,
+  httpHeaderText,
+  responseHeaderRefusal,
+  savedHeaderSecretRefusal,
+  type HttpHeaderPart,
+  type HttpMethod,
+  type HttpSave,
+} from './graph';
 import type { RunEffect } from './interpreter';
 import { signalAutomationRun, type AutomationRun } from './runs';
 
@@ -38,7 +56,8 @@ interface StoredRequest {
   url: string;
   headers: { name: string; parts: HttpHeaderPart[] }[];
   body: string | null;
-  save: { path: string; saveAs: string }[];
+  /** A request written before ADR-406 has `{path, saveAs}` items: JSON paths. */
+  save: HttpSave[];
 }
 
 export const FINISHED_HTTP_STATES: ReadonlySet<HttpCallState> = new Set([
@@ -235,6 +254,12 @@ export async function signalHttpCall(
 
 /** A value from a JSON response by a dotted path (keys and array positions); scalars only. */
 export function valueAtPath(document: unknown, path: string): string | null {
+  const value = scalarAtPath(document, path);
+  return value === null ? null : clipText(value, AUTOMATION_LIMITS.answerLength);
+}
+
+/** As `valueAtPath`, before clipping (so the whole value can be checked for secrets). */
+function scalarAtPath(document: unknown, path: string): string | null {
   let current: unknown = document;
   for (const segment of path.split('.')) {
     if (Array.isArray(current)) {
@@ -248,31 +273,186 @@ export function valueAtPath(document: unknown, path: string): string | null {
       return null;
     }
   }
-  if (typeof current === 'string') return clipText(current, AUTOMATION_LIMITS.answerLength);
+  if (typeof current === 'string') return current;
   if (typeof current === 'number' && Number.isFinite(current)) return String(current);
   if (typeof current === 'boolean') return current ? 'true' : 'false';
   return null;
 }
 
-/** Values to save from a response body, by answer name (missing or non-scalar values are left out). */
-export function savedValuesFrom(
-  body: Buffer,
-  save: readonly { path: string; saveAs: string }[],
-): Record<string, string> {
-  if (save.length === 0 || body.length === 0) return {};
-  let document: unknown;
+/**
+ * Whether a response's body can be saved as text (ADR-406): `text/*`, JSON and XML types
+ * (`application/json`, `application/xml`, `…+json`, `…+xml`), in UTF-8 (no charset, utf-8 or
+ * us-ascii). Anything else (images, PDFs, octet streams, other charsets, no content type) is not.
+ */
+export function textualContentType(contentType: string | null): boolean {
+  if (!contentType) return false;
+  const [essence = '', ...params] = contentType.split(';').map((p) => p.trim().toLowerCase());
+  const textual =
+    /^text\/[a-z0-9!#$&^_.+-]+$/.test(essence) ||
+    /^application\/([a-z0-9!#$&^_.-]+\+)?(json|xml)$/.test(essence);
+  if (!textual) return false;
+  for (const param of params) {
+    const at = param.indexOf('=');
+    if (at < 0 || param.slice(0, at).trim() !== 'charset') continue;
+    const charset = param
+      .slice(at + 1)
+      .trim()
+      .replace(/^"(.*)"$/, '$1');
+    if (charset !== 'utf-8' && charset !== 'utf8' && charset !== 'us-ascii') return false;
+  }
+  return true;
+}
+
+/**
+ * A response header's value by name, case-insensitively. Node joins a header received several
+ * times with ", " (keeping only the first for headers that allow one value, such as Content-Type),
+ * and the egress client joins any list the same way, so a repeated header is one value: its values
+ * in the order received, separated by a comma and a space (RFC 9110, section 5.3).
+ */
+export function responseHeaderValue(
+  headers: Readonly<Record<string, string>>,
+  name: string,
+): string | null {
+  const lower = name.toLowerCase();
+  const values = Object.entries(headers)
+    .filter(([key]) => key.toLowerCase() === lower)
+    .map(([, value]) => value);
+  return values.length > 0 ? values.join(', ') : null;
+}
+
+/** What a successful response offers to save. */
+export interface SavableResponse {
+  status: number;
+  headers: Readonly<Record<string, string>>;
+  body: Buffer;
+}
+
+/** What the request carried, so that a saved value does not hand back a company secret. */
+export interface SaveGuard {
+  /** The request's headers, secrets shown as their placeholders (`httpHeaderText`). */
+  requestHeaders?: readonly { name: string; value: string }[];
+  /** The company's secret names when the call was claimed. */
+  secretNames?: Iterable<string>;
+  /** The secret values the request carried. */
+  secretValues?: Iterable<string>;
+  /**
+   * Those of them the request sent touching a letter, a digit or another secret (`adjacentSecrets`,
+   * a step published before the separator check): found anywhere in a value, not only as tokens.
+   */
+  looseSecretValues?: Iterable<string>;
+}
+
+/**
+ * Why a value was left out for safety (ADR-406), recorded by answer name on the call (never the
+ * value): a header refused as a credential or session, a header the step sends a secret in or
+ * named like a company secret, a value holding a secret the request carried, or a value ending
+ * with the start of one, which may be an echo cut inside it.
+ */
+export const HTTP_DROP_REASONS = [
+  'refused_header',
+  'secret_header',
+  'echoed_secret',
+  'possible_cut_echo',
+] as const;
+export type HttpDropReason = (typeof HTTP_DROP_REASONS)[number];
+
+/** Outside text with each NUL character as U+FFFD, which PostgreSQL can store (ADR-130). */
+const storable = (text: string): string => text.replaceAll(NUL, NUL_REPLACEMENT);
+
+/** Parses a body as JSON once, for the values saved by path (undefined: empty or not JSON). */
+function jsonDocument(body: Buffer): unknown {
+  if (body.length === 0) return undefined;
   try {
-    document = parseExternalJson(body.toString('utf8'));
+    return parseExternalJson(body.toString('utf8'));
   } catch {
-    // Not JSON: there is nothing to save, and the call's outcome still stands.
-    return {};
+    // Not JSON: no path finds a value, and the call's outcome still stands.
+    return undefined;
   }
-  const values: Record<string, string> = {};
+}
+
+/**
+ * The whole value one source of a response offers, before clipping; null when it has none, or the
+ * reason a header is refused.
+ */
+function rawValue(
+  response: SavableResponse,
+  item: HttpSave,
+  guard: { requestHeaders: readonly { name: string; value: string }[]; secretNames: string[] },
+  json: () => unknown,
+): string | null | { refused: HttpDropReason } {
+  switch (item.from) {
+    case 'header': {
+      // Checked when the automation is saved and again here (a secret may have been added since).
+      if (responseHeaderRefusal(item.header) !== null) return { refused: 'refused_header' };
+      if (savedHeaderSecretRefusal(item.header, guard.requestHeaders, guard.secretNames) !== null)
+        return { refused: 'secret_header' };
+      // Node reads header values as latin1: UTF-8 bytes in a header arrive as latin1 characters.
+      const raw = responseHeaderValue(response.headers, item.header);
+      return raw === null ? null : storable(raw);
+    }
+    case 'text': {
+      if (response.body.length === 0) return null;
+      if (!textualContentType(responseHeaderValue(response.headers, 'content-type'))) return null;
+      // UTF-8 (invalid bytes as U+FFFD, a byte order mark dropped), outer white space trimmed.
+      const text = storable(new TextDecoder('utf-8').decode(response.body)).trim();
+      return text || null;
+    }
+    case 'status':
+      return String(response.status);
+    default: {
+      const document = json();
+      return document === undefined ? null : scalarAtPath(document, item.path);
+    }
+  }
+}
+
+/** Values to save from a response, and the answers left out for safety with the reason. */
+export interface SavedValues {
+  values: Record<string, string>;
+  dropped: Record<string, HttpDropReason>;
+}
+
+/**
+ * Values to save from a successful response, by answer name (ADR-406). Each comes from a JSON path
+ * in the body (the default), a header, the body as text (textual content types only) or the status
+ * code, clipped as answers are (to 1,000 UTF-16 code units, never splitting an emoji). A missing
+ * or non-scalar value and a path into a body that is not JSON save nothing. A refused header, a
+ * value holding a secret the request carried and one that may be an echo cut inside a secret
+ * (checked on the whole value before clipping, in the encodings `echoMatcher` reads) are left out
+ * and named in `dropped`.
+ */
+export function savedValuesFrom(
+  response: SavableResponse,
+  save: readonly HttpSave[],
+  guard: SaveGuard = {},
+): SavedValues {
+  const out: SavedValues = { values: {}, dropped: {} };
+  if (save.length === 0) return out;
+  // One matcher per response: each secret's patterns are prepared once for every value saved.
+  const echoes = echoMatcher(guard.secretValues ?? [], guard.looseSecretValues ?? []);
+  const checks = {
+    requestHeaders: guard.requestHeaders ?? [],
+    secretNames: [...(guard.secretNames ?? [])],
+  };
+  let parsed: { document: unknown } | null = null;
+  const json = () => (parsed ??= { document: jsonDocument(response.body) }).document;
   for (const item of save) {
-    const value = valueAtPath(document, item.path);
-    if (value !== null) values[item.saveAs] = value;
+    const raw = rawValue(response, item, checks, json);
+    if (raw === null) continue;
+    if (typeof raw !== 'string') {
+      out.dropped[item.saveAs] = raw.refused;
+      continue;
+    }
+    const value = clipText(raw, AUTOMATION_LIMITS.answerLength);
+    // A server that echoes the request would otherwise hand a secret to whoever reads the answers.
+    const echo = echoes(raw, value);
+    if (echo !== null) {
+      out.dropped[item.saveAs] = echo;
+      continue;
+    }
+    out.values[item.saveAs] = value;
   }
-  return values;
+  return out;
 }
 
 export interface HttpCallDeps extends HttpQueueDeps {
@@ -291,6 +471,8 @@ interface Claimed {
   method: HttpMethod;
   request: StoredRequest;
   secrets: Map<string, string>;
+  /** The company's secret names, when the step saves a header (ADR-406). */
+  secretNames: string[];
 }
 
 /**
@@ -417,6 +599,15 @@ export async function processHttpCall(
       });
       return 'failed';
     }
+    // A header named like a company secret is never saved, whenever the secret was added.
+    const secretNames = request.save.some((item) => item.from === 'header')
+      ? (
+          await tx
+            .select({ name: httpSecrets.name })
+            .from(httpSecrets)
+            .where(eq(httpSecrets.tenantId, tenantId))
+        ).map((row) => row.name)
+      : [];
     await tx
       .update(automationHttpCalls)
       .set({
@@ -431,6 +622,7 @@ export async function processHttpCall(
       method: call.method,
       request,
       secrets,
+      secretNames,
     };
   });
   if (typeof claimed === 'string') return claimed;
@@ -460,7 +652,9 @@ export async function processHttpCall(
         errorCode: outcome.errorCode,
         durationMs: outcome.durationMs,
         // Values are only kept for a run that can still use them (never after an erasure).
-        savedValues: active ? outcome.values : {},
+        savedValues: active ? outcome.saved.values : {},
+        // The answers left out for safety, by name and reason (never a value), for the run page.
+        droppedValues: outcome.saved.dropped,
         finishedAt: now,
         leaseUntil: null,
         requestCiphertext: null,
@@ -483,7 +677,7 @@ interface SendOutcome {
   statusCode: number | null;
   errorCode: string | null;
   durationMs: number | null;
-  values: Record<string, string>;
+  saved: SavedValues;
 }
 
 /** Fills secrets into the headers and sends the request through the egress client. */
@@ -508,7 +702,18 @@ async function send(egress: EgressClient, claimed: Claimed): Promise<SendOutcome
       statusCode: response.status,
       errorCode: null,
       durationMs: response.durationMs,
-      values: ok ? savedValuesFrom(response.body, claimed.request.save) : {},
+      saved: ok
+        ? savedValuesFrom(response, claimed.request.save, {
+            requestHeaders: claimed.request.headers.map((h) => ({
+              name: h.name,
+              value: httpHeaderText(h.parts),
+            })),
+            secretNames: claimed.secretNames,
+            secretValues: claimed.secrets.values(),
+            // Secrets a step published before the separator check sends touching other text.
+            looseSecretValues: looseSecretValuesOf(claimed.request.headers, claimed.secrets),
+          })
+        : { values: {}, dropped: {} },
     };
   } catch (error) {
     if (!(error instanceof EgressError)) throw error;
@@ -520,7 +725,7 @@ async function send(egress: EgressClient, claimed: Claimed): Promise<SendOutcome
       statusCode: null,
       errorCode: error.code,
       durationMs: null,
-      values: {},
+      saved: { values: {}, dropped: {} },
     };
   }
 }

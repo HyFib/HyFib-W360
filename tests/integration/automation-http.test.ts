@@ -52,6 +52,23 @@ beforeAll(async () => {
       } else if (req.url === '/down') {
         res.writeHead(503, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: 'maintenance' }));
+      } else if (req.url === '/receipt') {
+        // A plain-text answer with headers to save (ADR-406): one repeated, one a cookie.
+        res.setHeader('x-request-id', 'req-7781');
+        res.setHeader('x-late-ref', 'late-1');
+        res.setHeader('x-trace', ['first', 'second']);
+        res.setHeader('set-cookie', ['sid=abc; HttpOnly']);
+        res.writeHead(201, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('Receipt R-55 noted.\n');
+      } else if (req.url === '/echo') {
+        // A server that echoes the request back as text, the secret's header included.
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end(`You sent ${String(req.headers.authorization ?? '')}`);
+      } else if (req.url === '/probe') {
+        // Echoes the request's X-Probe header back in X-Echo.
+        res.setHeader('x-echo', String(req.headers['x-probe'] ?? ''));
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
       } else if (req.url === '/hang') {
         // Never answers: the client's deadline ends the exchange.
       } else {
@@ -262,6 +279,15 @@ async function callsOf(runId: string) {
        FROM app.automation_http_calls WHERE run_id = $1 ORDER BY created_at, id`,
     [runId],
   );
+}
+
+/** The answers a call left out for safety, by name and reason (migration 0319, ADR-406). */
+async function droppedOf(callId: string) {
+  const [row] = await fx.query<{ dropped_values: Record<string, string> }>(
+    `SELECT dropped_values FROM app.automation_http_calls WHERE id = $1`,
+    [callId],
+  );
+  return row?.dropped_values;
 }
 
 async function onlyCall(runId: string) {
@@ -532,6 +558,243 @@ describe('automation HTTP step', () => {
       [conv],
     );
     expect(contact?.attributes).toEqual({ city: 'x'.repeat(499) });
+  });
+
+  it('saves a header, the body as text and the status for a later step (ADR-406)', async () => {
+    const s = await setup();
+    const graph = orderGraph('/receipt');
+    const receiptGraph = {
+      ...graph,
+      nodes: graph.nodes.map((n) =>
+        n.id === 'call'
+          ? {
+              ...n,
+              save: [
+                { from: 'header', header: 'X-Request-ID', saveAs: 'ref' },
+                { from: 'header', header: 'X-Trace', saveAs: 'trace' },
+                { from: 'text', saveAs: 'note' },
+                { from: 'status', saveAs: 'code' },
+                // A JSON path into a text body finds nothing; the others still save.
+                { path: 'data.status', saveAs: 'status' },
+              ],
+            }
+          : n.id === 'tell'
+            ? {
+                ...n,
+                text: '{{answer.code}} {{answer.ref}} [{{answer.trace}}] {{answer.note}}',
+              }
+            : n,
+      ),
+    };
+    await publish(s.owner, receiptGraph);
+    const { conv, run, call } = await waitingAtCall(s);
+    expect(await processHttpCall(httpDeps(), scopeOf(s), call.id)).toBe('succeeded');
+    const done = await onlyCall(run.id);
+    expect(done).toMatchObject({ state: 'succeeded', status_code: 201 });
+    expect(done.saved_values).toStrictEqual({
+      ref: 'req-7781',
+      trace: 'first, second',
+      note: 'Receipt R-55 noted.',
+      code: '201',
+    });
+    expect(await drive(s.c, conv, run.id)).toBe('ended');
+    expect((await onlyRun(conv)).variables).toStrictEqual({
+      ref: 'req-7781',
+      trace: 'first, second',
+      note: 'Receipt R-55 noted.',
+      code: '201',
+    });
+    expect(await botTexts(conv)).toEqual(['201 req-7781 [first, second] Receipt R-55 noted.']);
+  });
+
+  it('refuses to save a cookie or a secret’s header, and never saves an echoed secret (ADR-406)', async () => {
+    const s = await setup();
+    const svc = automations();
+    const withSave = (path: string, save: unknown[]) => {
+      const graph = orderGraph(path);
+      return {
+        ...graph,
+        nodes: graph.nodes.map((n) => (n.id === 'call' ? { ...n, save } : n)),
+      };
+    };
+    // A cookie is refused when the draft is saved.
+    const name = `Cookies ${randomInt(1e6)}`;
+    const { id } = await svc.createAutomation(s.owner, { name });
+    await expectAppError(
+      svc.updateAutomation(s.owner, {
+        id,
+        expectedVersion: 0,
+        name,
+        description: null,
+        channelAccountId: null,
+        trigger: keyword('order'),
+        graph: withSave('/receipt', [{ from: 'header', header: 'Set-Cookie', saveAs: 'sid' }]),
+      }),
+      'validation_failed',
+      /Set-Cookie header can carry credentials or a session/,
+    );
+    await expectAppError(
+      publish(
+        s.owner,
+        withSave('/receipt', [{ from: 'header', header: 'Shop-Token', saveAs: 'status' }]),
+      ),
+      'validation_failed',
+      /Shop-Token header can carry credentials/,
+    );
+    // A header the step sends its secret in is refused when it is published.
+    const echoes = orderGraph('/receipt', {
+      headers: [{ name: 'X-Shop', value: 'Bearer {{secret.shop_token}}' }],
+    });
+    await expectAppError(
+      publish(s.owner, {
+        ...echoes,
+        nodes: echoes.nodes.map((n) =>
+          n.id === 'call'
+            ? { ...n, save: [{ from: 'header', header: 'X-Shop', saveAs: 'status' }] }
+            : n,
+        ),
+      }),
+      'precondition_failed',
+      /This step sends a secret in the X-Shop header/,
+    );
+
+    // A server echoing the request: the text holding the secret is not saved; the status is.
+    await publish(
+      s.owner,
+      withSave('/echo', [
+        { from: 'text', saveAs: 'status' },
+        { from: 'status', saveAs: 'code' },
+      ]),
+    );
+    const { run, call } = await waitingAtCall(s);
+    expect(await processHttpCall(httpDeps(), scopeOf(s), call.id)).toBe('succeeded');
+    const done = await onlyCall(run.id);
+    expect(done.saved_values).toStrictEqual({ code: '200' });
+    expect(JSON.stringify(done.saved_values)).not.toContain(TOKEN);
+    // The answer left out is named with its reason, never its value, and the run page gets it.
+    expect(await droppedOf(call.id)).toStrictEqual({ status: 'echoed_secret' });
+    const view = await automations().getRun(s.owner, run.id);
+    expect(view.httpCalls.map((c) => c.droppedValues)).toStrictEqual([{ status: 'echoed_secret' }]);
+  });
+
+  it('refuses at publish a header named like a company secret (ADR-406)', async () => {
+    const s = await setup();
+    const graph = orderGraph('/receipt');
+    await webRequests().saveSecret(s.owner, { name: 'crm_ref', domain: HOST, value: 'crm-9f' });
+    await expectAppError(
+      publish(s.owner, {
+        ...graph,
+        nodes: graph.nodes.map((n) =>
+          n.id === 'call'
+            ? { ...n, save: [{ from: 'header', header: 'X-Crm-Ref', saveAs: 'status' }] }
+            : n,
+        ),
+      }),
+      'precondition_failed',
+      /X-Crm-Ref header is named like the secret “crm_ref”/,
+    );
+  });
+
+  it('refuses at publish a secret touching other text in a step that saves values (ADR-406)', async () => {
+    const s = await setup();
+    const graph = orderGraph('/probe', {
+      headers: [{ name: 'X-Probe', value: 'q{{secret.shop_token}}q' }],
+    });
+    await expectAppError(
+      publish(s.owner, {
+        ...graph,
+        nodes: graph.nodes.map((n) =>
+          n.id === 'call'
+            ? { ...n, save: [{ from: 'header', header: 'X-Echo', saveAs: 'status' }] }
+            : n,
+        ),
+      }),
+      'precondition_failed',
+      /put a separator/,
+    );
+  });
+
+  it('drops the echo of a short secret a step published before the separator check sent beside text (ADR-406)', async () => {
+    const s = await setup();
+    await webRequests().saveSecret(s.owner, { name: 'crm_pin', domain: HOST, value: '4829' });
+    const withProbe = (probe: string) => {
+      const graph = orderGraph('/probe', { headers: [{ name: 'X-Probe', value: probe }] });
+      return {
+        ...graph,
+        nodes: graph.nodes.map((n) =>
+          n.id === 'call'
+            ? { ...n, save: [{ from: 'header', header: 'X-Echo', saveAs: 'status' }] }
+            : n,
+        ),
+      };
+    };
+    // Published as allowed now, then given a version written as a step could be before the check.
+    await publish(s.owner, withProbe('pin {{secret.crm_pin}}'));
+    const client = await fx.dbs.adminPool.connect();
+    try {
+      await client.query('BEGIN');
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO app.automation_versions (id, tenant_id, automation_id, kind, number, trigger,
+                graph, channel_account_id, definition_sha256, note, created_by_membership_id)
+         SELECT gen_random_uuid(), v.tenant_id, v.automation_id, 'published', v.number + 1,
+                v.trigger, $2::jsonb, v.channel_account_id,
+                encode(sha256(convert_to($2::text, 'UTF8')), 'hex'),
+                'written before the separator check', v.created_by_membership_id
+           FROM app.automation_versions v
+           JOIN app.automations a ON a.tenant_id = v.tenant_id AND a.active_version_id = v.id
+          WHERE a.tenant_id = $1 AND a.status = 'active'
+         RETURNING id`,
+        [s.c.tenant.id, JSON.stringify(withProbe('q{{secret.crm_pin}}q'))],
+      );
+      expect(inserted.rows).toHaveLength(1);
+      await client.query(
+        `UPDATE app.automations SET active_version_id = $2 WHERE tenant_id = $1 AND status = 'active'`,
+        [s.c.tenant.id, inserted.rows[0]!.id],
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    const { run, call } = await waitingAtCall(s);
+    expect(await processHttpCall(httpDeps(), scopeOf(s), call.id)).toBe('succeeded');
+    // The server received the secret beside the letters and echoed it; as a token it would pass.
+    expect(received.at(-1)?.headers['x-probe']).toBe('q4829q');
+    const done = await onlyCall(run.id);
+    expect(done.saved_values).toStrictEqual({});
+    expect(await droppedOf(call.id)).toStrictEqual({ status: 'echoed_secret' });
+  });
+
+  it('does not save a header named like a secret added after publishing, and says so (ADR-406)', async () => {
+    const s = await setup();
+    const graph = orderGraph('/receipt');
+    await publish(s.owner, {
+      ...graph,
+      nodes: graph.nodes.map((n) =>
+        n.id === 'call'
+          ? {
+              ...n,
+              save: [
+                { from: 'header', header: 'X-Late-Ref', saveAs: 'status' },
+                { from: 'status', saveAs: 'code' },
+              ],
+            }
+          : n,
+      ),
+    });
+    const { run, call } = await waitingAtCall(s);
+    // The secret arrives between publishing and the call: the worker reads the current names.
+    await webRequests().saveSecret(s.owner, {
+      name: 'late_ref',
+      domain: HOST,
+      value: 'late-ref-77aa',
+    });
+    expect(await processHttpCall(httpDeps(), scopeOf(s), call.id)).toBe('succeeded');
+    const done = await onlyCall(run.id);
+    expect(done.saved_values).toStrictEqual({ code: '201' });
+    expect(await droppedOf(call.id)).toStrictEqual({ status: 'secret_header' });
   });
 
   it('takes the failure branch on an error status, a removed domain or a missing secret', async () => {
@@ -931,12 +1194,12 @@ describe('web request settings', () => {
     await svc.addDomain(owner, { domain: '*.partner.test' });
 
     await expectAppError(
-      svc.saveSecret(owner, { name: 'shop_token', domain: 'other.test', value: 'x' }),
+      svc.saveSecret(owner, { name: 'shop_token', domain: 'other.test', value: 'xxxx-value' }),
       'validation_failed',
       /allowed domains/,
     );
     await expectAppError(
-      svc.saveSecret(owner, { name: 'Shop-Token', domain: HOST, value: 'x' }),
+      svc.saveSecret(owner, { name: 'Shop-Token', domain: HOST, value: 'xxxx-value' }),
       'validation_failed',
     );
     await expectAppError(
@@ -944,7 +1207,7 @@ describe('web request settings', () => {
       'validation_failed',
     );
     await expectAppError(
-      svc.saveSecret(marketer, { name: 'shop_token', domain: HOST, value: 'x' }),
+      svc.saveSecret(marketer, { name: 'shop_token', domain: HOST, value: 'xxxx-value' }),
       'forbidden',
     );
     const created = await svc.saveSecret(owner, { name: 'shop_token', domain: HOST, value: TOKEN });

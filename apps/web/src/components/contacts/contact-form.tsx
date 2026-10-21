@@ -5,12 +5,15 @@ import { Button, Field, Input, Select } from '@w360/ui';
 import { createContactAction, updateContactAction } from '@/app/actions/contacts';
 import { ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { changedAttributes, choiceOptions } from '@/lib/contact-fields';
 
 export interface ContactFieldDef {
   id: string;
   key: string;
   label: string;
-  type: 'text' | 'number' | 'date' | 'boolean';
+  type: 'text' | 'number' | 'date' | 'boolean' | 'choice';
+  /** A choice field's options, in order; null for every other type (ADR-407). */
+  options: string[] | null;
 }
 
 interface Values {
@@ -55,11 +58,15 @@ export function ContactForm({
     setError(null);
     try {
       if (contactId) {
+        // Only the values the member changed, so a value its field no longer takes (a choice whose
+        // options changed since it was set) never blocks saving the rest, and none at all when
+        // nothing changed, so no field is locked (ADR-407).
+        const attributes = changedAttributes(initial.attributes, values.attributes);
         const result = await updateContactAction(slug, contactId, {
           displayName: values.displayName,
           email: values.email,
           ...(phoneEditable ? { phone: values.phone } : {}),
-          attributes: values.attributes,
+          ...(Object.keys(attributes).length > 0 ? { attributes } : {}),
         });
         if (!result.ok) setError(result.message);
         else setSaved(true);
@@ -155,6 +162,20 @@ export function ContactForm({
                   <option value="">Not set</option>
                   <option value="yes">Yes</option>
                   <option value="no">No</option>
+                </Select>
+              ) : f.type === 'choice' ? (
+                <Select
+                  {...aria}
+                  value={value}
+                  disabled={!canEdit}
+                  onChange={(e) => setAttr(f.key, e.target.value)}
+                >
+                  <option value="">Not set</option>
+                  {choiceOptions(f.options, value).map(({ option, stale }) => (
+                    <option key={option} value={option} disabled={stale}>
+                      {stale ? `${option} (no longer an option)` : option}
+                    </option>
+                  ))}
                 </Select>
               ) : (
                 <Input

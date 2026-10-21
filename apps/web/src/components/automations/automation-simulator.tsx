@@ -8,6 +8,7 @@ import {
   advance,
   coerceDealFieldValue,
   dealValueMinor,
+  describeHttpSave,
   httpHeaderText,
   initialRunState,
   normalizeTag,
@@ -670,7 +671,7 @@ export function AutomationSimulator({
               <Field
                 key={item.saveAs}
                 id={`sim-http-${item.saveAs}`}
-                label={`${item.saveAs} (from ${item.path})`}
+                label={`${item.saveAs} (from ${describeHttpSave(item)})`}
               >
                 {(aria) => (
                   <Input

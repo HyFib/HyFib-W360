@@ -104,8 +104,11 @@ export const crmDeals = appSchema.table('crm_deals', {
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
-/** The types of a custom deal field: those contact fields take, and a choice (ADR-385). */
-export const DEAL_FIELD_TYPES = [...CONTACT_FIELD_TYPES, 'choice'] as const;
+/**
+ * The types of a custom deal field: those contact fields take, a choice among them (ADR-385, and
+ * for contact fields since ADR-407).
+ */
+export const DEAL_FIELD_TYPES = CONTACT_FIELD_TYPES;
 export type DealFieldType = (typeof DEAL_FIELD_TYPES)[number];
 
 /**

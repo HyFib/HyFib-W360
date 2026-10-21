@@ -115,6 +115,7 @@ describe('defining contact fields through the public API (ADR-115)', () => {
       key: 'delivery_city',
       label: 'Delivery City',
       type: 'text',
+      options: null,
       createdAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
     });
     const orders = await apiCreateContactField(
@@ -180,6 +181,7 @@ describe('defining contact fields through the public API (ADR-115)', () => {
       key: 'city',
       label: 'Town',
       type: 'text',
+      options: null,
       createdAt: expect.any(String),
     });
     expect(await attributesOf(contactId)).toEqual({ city: 'Chennai' });

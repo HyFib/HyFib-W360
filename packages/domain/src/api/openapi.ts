@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   AUTOMATION_END_REASONS,
   AUTOMATION_ENROLLMENT_END_REASONS,
+  AUTOMATION_ENROLLMENT_OUTCOMES,
   AUTOMATION_ENROLLMENT_SOURCES,
   AUTOMATION_ENROLLMENT_STATUSES,
   AUTOMATION_RUN_STATUSES,
@@ -1279,6 +1280,46 @@ export const apiAutomationEnrollmentDetailSchema = apiAutomationEnrollmentSchema
     ),
 });
 
+/** One contact of an enrolment with its outcome (ADR-408), as the API gives it: ids only. */
+export const apiEnrolledContactSchema = z.object({
+  position: z
+    .number()
+    .int()
+    .describe('The contact’s place in the snapshot, 1 to the total, in contact id order.'),
+  contactId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The contact (GET /contacts/{id}); null once it was erased (the API lists no erased contact) or merged into another.',
+    ),
+  contact: z
+    .enum(['active', 'erased', 'merged'])
+    .describe(
+      'What became of the contact since the snapshot: active, erased, or merged into another contact (the contact it was merged into is not named).',
+    ),
+  outcome: z
+    .enum(AUTOMATION_ENROLLMENT_OUTCOMES)
+    .describe(
+      'pending: not handled yet; started: a run was started for it; refused: a start refused it (reason says why); cancelled: not started because the enrolment stopped.',
+    ),
+  reason: z
+    .string()
+    .nullable()
+    .describe(
+      'Why a start was refused: suppressed, opted_out, contact_erased, no_marketing_opt_in, conversation_assigned, automation_busy, automation_limit, automation_quota, contact_gone (merged away since) or no_number; null for any other outcome.',
+    ),
+  runId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The run started for the contact, as `run.id` in the automation.run_* webhooks with `run.enrollmentId`; null otherwise, or once retention deleted the run. GET /automation-runs/{id} reads runs keys started only.',
+    ),
+  processedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the enrolment handled the contact; null while it is pending.'),
+});
+
 /** What a start of many runs answers for one number (ADR-161). */
 export const apiAutomationRunStartSchema = z.object({
   to: z.string().describe('The number, in E.164 form.'),
@@ -1757,7 +1798,7 @@ export const apiWebhookEndpointSchema = z.object({
           value: z
             .union([z.string(), z.number(), z.boolean()])
             .describe(
-              'A value of the field’s type: text, a number, a date as YYYY-MM-DD, or true or false for yes/no.',
+              'A value of the field’s type: text, a number, a date as YYYY-MM-DD, true or false for yes/no, or one of a choice field’s options as GET /contact-fields lists it.',
             ),
         }),
         z.object({
@@ -1995,6 +2036,52 @@ const enrollmentIdParam = {
   schema: { type: 'string', format: 'uuid' },
   description:
     'An enrolment of the automation (GET /automations/{id}/enrollments); another automation’s is not found.',
+};
+
+/**
+ * A page of an enrolment's contacts (ADR-408): one started, one refused, one erased since and one
+ * not handled yet. Exported so a test checks it against the schema.
+ */
+export const ENROLLED_CONTACTS_EXAMPLE = {
+  data: [
+    {
+      position: 1,
+      contactId: '0192a1b2-0000-7000-8000-000000000101',
+      contact: 'active',
+      outcome: 'started',
+      reason: null,
+      runId: '0192a1b2-0000-7000-8000-000000000201',
+      processedAt: '2026-10-21T09:30:02.000Z',
+    },
+    {
+      position: 2,
+      contactId: '0192a1b2-0000-7000-8000-000000000102',
+      contact: 'active',
+      outcome: 'refused',
+      reason: 'opted_out',
+      runId: null,
+      processedAt: '2026-10-21T09:30:02.000Z',
+    },
+    {
+      position: 3,
+      contactId: null,
+      contact: 'erased',
+      outcome: 'refused',
+      reason: 'contact_erased',
+      runId: null,
+      processedAt: '2026-10-21T09:30:02.000Z',
+    },
+    {
+      position: 4,
+      contactId: '0192a1b2-0000-7000-8000-000000000104',
+      contact: 'active',
+      outcome: 'pending',
+      reason: null,
+      runId: null,
+      processedAt: null,
+    },
+  ],
+  nextCursor: '4',
 };
 
 const pageParams = [
@@ -2324,7 +2411,7 @@ export function buildOpenApiDocument(serverUrl: string) {
                 additionalProperties: { type: 'string', maxLength: 500 },
                 maxProperties: MAX_FIELD_FILTERS,
               },
-              description: `Only contacts whose custom field has this value, as \`fields[<key>]=<value>\` (keys from GET /contact-fields), at most ${MAX_FIELD_FILTERS}: text equal whatever its case, a number equal as a number, a date as YYYY-MM-DD, \`true\` or \`false\` for yes/no. An unknown key or a value of another type is refused, naming \`fields.<key>\`.`,
+              description: `Only contacts whose custom field has this value, as \`fields[<key>]=<value>\` (keys from GET /contact-fields), at most ${MAX_FIELD_FILTERS}: text equal whatever its case, a number equal as a number, a date as YYYY-MM-DD, \`true\` or \`false\` for yes/no, one of a choice field's options whatever its case. An unknown key or a value of another type is refused, naming \`fields.<key>\`.`,
             },
           ],
           responses: {
@@ -2480,7 +2567,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'createContactField',
           summary: 'Add a custom field',
-          description: `${scopeNote('contact_fields.manage')} A company has at most ${MAX_CONTACT_FIELDS} fields. The key is made from the label unless given; a key the company has is refused with 409 (path \`key\`). The key and the type never change. One field per \`Idempotency-Key\`: a retry answers with the field as first added.`,
+          description: `${scopeNote('contact_fields.manage')} A company has at most ${MAX_CONTACT_FIELDS} fields. The key is made from the label unless given; a key the company has is refused with 409 (path \`key\`). The key and the type never change. A \`choice\` field takes its \`options\`; no other type takes any. One field per \`Idempotency-Key\`: a retry answers with the field as first added.`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('ContactFieldCreate')) },
           responses: {
@@ -2492,13 +2579,13 @@ export function buildOpenApiDocument(serverUrl: string) {
       '/contact-fields/{key}': {
         patch: {
           operationId: 'updateContactField',
-          summary: 'Rename a custom field',
-          description: `${scopeNote('contact_fields.manage')} Only the label changes: values stay under the key. The same label changes nothing, so a retry is safe without an \`Idempotency-Key\`.`,
+          summary: 'Rename a custom field or change its options',
+          description: `${scopeNote('contact_fields.manage')} Changes the label, a choice field's options, or both: values stay under the key, and the key and the type never change. Options can be added, reordered, and removed or renamed while no contact has them chosen; leaving out or rewriting one a contact has chosen is refused with 409 naming it (path \`options\`), and options of another type of field with 422. What the field has already changes nothing, so a retry is safe without an \`Idempotency-Key\`.`,
           parameters: [{ $ref: '#/components/parameters/FieldKey' }],
           requestBody: { required: true, content: json(ref('ContactFieldUpdate')) },
           responses: {
             '200': { description: 'The field.', content: json(dataOf(ref('ContactField'))) },
-            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
           },
         },
         delete: {
@@ -3417,7 +3504,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'createCampaign',
           summary: 'Create a campaign draft',
-          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign or store of the company; an \`orders\` or \`spend\` condition also needs \`orders.read\`). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: a member submits it in the app, or a key submits it for a member's approval (POST /campaigns/{id}/submit), and it sends under the authority of a member allowed to send campaigns; a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. \`variantB\` adds a second template for an A/B test: sent from the same number to the share of the recipients given, with its own variables, each variant checked on its own when the draft is submitted. One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
+          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign or store of the company; an \`orders\` or \`spend\` condition also needs \`orders.read\`). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: a member submits it in the app, or a key submits it for a member's approval (POST /campaigns/{id}/submit), and it sends under the authority of a member allowed to send campaigns; a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. \`variantB\` adds a second template for an A/B test: sent from the same number to the share of the recipients given, with its own variables, each variant checked on its own when the draft is submitted. \`variants\` gives every variant after A at once, B to E, so a campaign tests up to five templates; a draft can have more than two only where HyFib has enabled them (otherwise 422). One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('CreateCampaign')) },
           responses: {
@@ -3433,7 +3520,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'getCampaign',
           summary: 'A campaign with its results and settings',
-          description: `${scopeNote('campaigns.read')} The results are counted when the campaign is read, as its page in the app counts them: messages sent, delivered, read and failed, replies and opt-outs, why recipients were skipped and the commonest WhatsApp error codes of failed messages; null for a draft. Counts only (GET /campaigns/{id}/recipients lists the recipients): never members or costs. A key that also holds \`campaigns.write\` gets its settings, as members edit them while it is a draft, and its version; other keys get null for both. A campaign with variant B also gives \`variants\`: each variant's template, share and results side by side, descriptive counts that add up to \`results\` (HyFib picks no winner).`,
+          description: `${scopeNote('campaigns.read')} The results are counted when the campaign is read, as its page in the app counts them: messages sent, delivered, read and failed, replies and opt-outs, why recipients were skipped and the commonest WhatsApp error codes of failed messages; null for a draft. Counts only (GET /campaigns/{id}/recipients lists the recipients): never members or costs. A key that also holds \`campaigns.write\` gets its settings, as members edit them while it is a draft, and its version; other keys get null for both. A campaign with variants also gives \`variants\`: each variant's template, share and results side by side, A and then B to E, descriptive counts that add up to \`results\` (HyFib picks no winner).`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': {
@@ -3446,7 +3533,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         patch: {
           operationId: 'updateCampaign',
           summary: 'Edit a campaign draft',
-          description: `${scopeNote('campaigns.write')} Changes the settings given and keeps the others, as a member saving the draft would, with the same checks as POST /campaigns. Only a draft is edited: any other status is refused with 409, naming it. With \`expectedVersion\`, a draft changed since you read it (by a member or a key) is refused with 409 and keeps its settings. A retry sets the same settings again. Its history in the app names the key.`,
+          description: `${scopeNote('campaigns.write')} Changes the settings given and keeps the others, as a member saving the draft would, with the same checks as POST /campaigns. \`variants\` replaces every variant after A; \`variantB\` changes B alone and keeps C to E; the two are not given together. Only a draft is edited: any other status is refused with 409, naming it. With \`expectedVersion\`, a draft changed since you read it (by a member or a key) is refused with 409 and keeps its settings. A retry sets the same settings again. Its history in the app names the key.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('UpdateCampaign')) },
           responses: {
@@ -3517,7 +3604,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listCampaignRecipients',
           summary: 'A campaign’s recipients and what happened to each',
-          description: `${scopeNote('campaigns.read')} Also needs \`contacts.read\`, as the list names contacts. The campaign's recipients in a fixed order (by id), on pages that never skip or repeat one: the contact, whether the recipient is waiting, queued, skipped (and why) or was left out when the campaign was canceled, the message queued for it (the id the message feeds, with \`conversations.read\`, and \`message.status\` webhooks give it) with its status and WhatsApp's error, and when a reply and an opt-out were counted for it. \`outcome\` keeps the recipients one count of the campaign's results counts (GET /campaigns/{id}), by the count's own rule, so it lists as many recipients as that count, less those whose contact was erased: the API never lists erased contacts. Each page is read when it is asked for, so outcomes can change between pages while the campaign runs. Each recipient names its \`variant\`, given when the audience was taken and never changed: B for those sent a campaign's second template, A otherwise. A draft has no recipients.`,
+          description: `${scopeNote('campaigns.read')} Also needs \`contacts.read\`, as the list names contacts. The campaign's recipients in a fixed order (by id), on pages that never skip or repeat one: the contact, whether the recipient is waiting, queued, skipped (and why) or was left out when the campaign was canceled, the message queued for it (the id the message feeds, with \`conversations.read\`, and \`message.status\` webhooks give it) with its status and WhatsApp's error, and when a reply and an opt-out were counted for it. \`outcome\` keeps the recipients one count of the campaign's results counts (GET /campaigns/{id}), by the count's own rule, so it lists as many recipients as that count, less those whose contact was erased: the API never lists erased contacts. Each page is read when it is asked for, so outcomes can change between pages while the campaign runs. Each recipient names its \`variant\`, given when the audience was taken and never changed: B for those sent a campaign's second template, C, D or E for its third to fifth, A otherwise. A draft has no recipients.`,
           parameters: [
             { $ref: '#/components/parameters/Id' },
             ...pageParams,
@@ -3776,7 +3863,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'getAutomationEnrollment',
           summary: 'An enrolment’s progress',
-          description: `${scopeNote('automations.start')} One enrolment of the automation, a member's or a key's: its status, counts, refusals by reason, who started and stopped it, and whether it has stalled. Its contacts are not listed one by one.`,
+          description: `${scopeNote('automations.start')} One enrolment of the automation, a member's or a key's: its status, counts, refusals by reason, who started and stopped it, and whether it has stalled. GET /automations/{id}/enrollments/{enrollmentId}/contacts lists its contacts one by one.`,
           parameters: [{ $ref: '#/components/parameters/Id' }, enrollmentIdParam],
           responses: {
             '200': {
@@ -3784,6 +3871,39 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('AutomationEnrollmentWithProgress'))),
             },
             ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
+      '/automations/{id}/enrollments/{enrollmentId}/contacts': {
+        get: {
+          operationId: 'listAutomationEnrollmentContacts',
+          summary: 'An enrolment’s contacts and what happened to each',
+          description: [
+            `${scopeNote('automations.start')} Also needs \`contacts.read\`, as the list names contacts. Every contact of one enrolment of the automation, a member's or a key's, in its snapshot's order (\`position\`, which never changes, so pages never skip or repeat one), with its outcome: pending, started (with the run), refused (with the reason, the codes \`refusals\` counts in GET /automations/{id}/enrollments/{enrollmentId}) or cancelled, and when it was handled. \`outcome\` keeps the contacts of one outcome, so it lists as many as that count of the enrolment. Reading works while the company is suspended.`,
+            'Contacts are given by id only (GET /contacts/{id} gives a contact); an erased contact keeps its row with no id (`contact` erased), and so does one merged into another since (`contact` merged), so the list always adds up to the enrolment’s total. Each page is read when it is asked for, so outcomes can change between pages while the enrolment runs.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            enrollmentIdParam,
+            ...pageParams,
+            {
+              name: 'outcome',
+              in: 'query',
+              schema: { type: 'string', enum: [...AUTOMATION_ENROLLMENT_OUTCOMES] },
+              description: 'Only the contacts with this outcome.',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'A page of the enrolment’s contacts.',
+              content: {
+                'application/json': {
+                  ...pageOf('AutomationEnrollmentContact')['application/json'],
+                  example: ENROLLED_CONTACTS_EXAMPLE,
+                },
+              },
+            },
+            ...errors(401, 403, 404, 422, 429, 500),
           },
         },
       },
@@ -5229,6 +5349,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         AutomationRunStart: jsonSchema(apiAutomationRunStartSchema),
         AutomationEnrollment: jsonSchema(apiAutomationEnrollmentSchema),
         AutomationEnrollmentWithProgress: jsonSchema(apiAutomationEnrollmentDetailSchema),
+        AutomationEnrollmentContact: jsonSchema(apiEnrolledContactSchema),
         StartAutomationEnrollment: jsonSchema(apiStartEnrollmentSchema, 'input'),
         WebhookEndpoint: jsonSchema(apiWebhookEndpointSchema),
         WebhookEndpointWithSecret: jsonSchema(apiWebhookEndpointWithSecretSchema),
@@ -5370,6 +5491,7 @@ export const API_ROUTES = [
   ['get', '/automations/{id}/enrollments'],
   ['post', '/automations/{id}/enrollments'],
   ['get', '/automations/{id}/enrollments/{enrollmentId}'],
+  ['get', '/automations/{id}/enrollments/{enrollmentId}/contacts'],
   ['post', '/automations/{id}/enrollments/{enrollmentId}/stop'],
   ['get', '/automation-runs/{id}'],
   ['post', '/automation-runs/{id}/stop'],

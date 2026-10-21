@@ -93,6 +93,20 @@ export function BulkFieldForm({
               <option value="yes">Yes</option>
               <option value="no">No</option>
             </Select>
+          ) : field.type === 'choice' ? (
+            <Select
+              id={valueId}
+              value={value}
+              className="w-48"
+              onChange={(event) => setValue(event.target.value)}
+            >
+              <option value="">Choose</option>
+              {(field.options ?? []).map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </Select>
           ) : (
             <Input
               id={valueId}

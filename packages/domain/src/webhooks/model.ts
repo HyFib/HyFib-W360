@@ -35,7 +35,12 @@ import type {
   WebhookSurveyScore,
   WebhookTemplateStatus,
 } from '@w360/db';
-import { coerceFieldValue, validDate, type AttributeValue } from '../contacts/fields';
+import {
+  coerceFieldValue,
+  validDate,
+  type AttributeValue,
+  type FieldShape,
+} from '../contacts/fields';
 import type { CartEvent, StoreMessageSkipReason } from '../stores/messages-model';
 
 export type {
@@ -365,7 +370,22 @@ export interface WebhookFieldChoice {
   key: string;
   label: string;
   type: ContactFieldType;
+  /** A choice field's options, in order; null for every other type (ADR-407). */
+  options: string[] | null;
 }
+
+/** A field as the readers of Settings → Webhooks' inputs need it; options only for a choice. */
+type WebhookInputField = {
+  label: string;
+  type: ContactFieldType;
+  options?: readonly string[] | null;
+};
+
+const shape = (field: WebhookInputField): FieldShape => ({
+  label: field.label,
+  type: field.type,
+  options: field.options ?? null,
+});
 
 /** A custom field an endpoint takes the changes of (ADR-184), as stored. */
 export interface WebhookEndpointField {
@@ -464,10 +484,18 @@ export function webhookContactEventFieldValuesText(
  * is (ADR-332): a boolean for a yes/no field, a number for a number field, a real date for a date
  * field and text on one line for a text field. Any other value the endpoint holds (of a field
  * deleted and added again with another type, or text on several lines given through the API) is
- * listed apart and kept as it is, so saving the form never turns it into another value.
+ * listed apart and kept as it is, so saving the form never turns it into another value. A choice
+ * field's value is ticked among its options (ADR-407), so it is editable while it is one of them,
+ * written as the field lists it.
  */
-export function webhookFieldValueEditable(type: ContactFieldType, value: AttributeValue): boolean {
+export function webhookFieldValueEditable(
+  type: ContactFieldType,
+  value: AttributeValue,
+  options: readonly string[] | null = null,
+): boolean {
   switch (type) {
+    case 'choice':
+      return typeof value === 'string' && (options ?? []).includes(value);
     case 'boolean':
       return typeof value === 'boolean';
     case 'number':
@@ -488,8 +516,9 @@ export function webhookFieldValueEditable(type: ContactFieldType, value: Attribu
 export function webhookFieldConditionEditable(
   type: ContactFieldType,
   pair: WebhookContactFieldValue,
+  options: readonly string[] | null = null,
 ): boolean {
-  if ('value' in pair) return webhookFieldValueEditable(type, pair.value);
+  if ('value' in pair) return webhookFieldValueEditable(type, pair.value, options);
   if ('contains' in pair) return type === 'text' && !/[\r\n]/.test(pair.contains);
   const ends = [pair.atLeast, pair.atMost].filter((end) => end !== undefined);
   if (type === 'number') return ends.every((end) => typeof end === 'number');
@@ -500,15 +529,15 @@ export function webhookFieldConditionEditable(
 /**
  * The values Settings → Webhooks reads for a text, number or date field (ADR-332): one a line,
  * each read as a member's entry of the field is (`coerceFieldValue`, which trims it, a carriage
- * return included), blank lines skipped. Yes/no fields are ticked instead.
+ * return included), blank lines skipped. Yes/no and choice fields are ticked instead.
  */
 export function webhookFieldValuesFromLines(
-  field: { label: string; type: ContactFieldType },
+  field: WebhookInputField,
   text: string,
 ): { ok: true; values: AttributeValue[] } | { ok: false; message: string } {
   const values: AttributeValue[] = [];
   for (const line of text.split('\n')) {
-    const read = coerceFieldValue(field, line);
+    const read = coerceFieldValue(shape(field), line);
     if (!read.ok) return read;
     if (read.value !== null) values.push(read.value);
   }
@@ -525,7 +554,7 @@ export function webhookFieldWordsFromLines(
 ): { ok: true; words: string[] } | { ok: false; message: string } {
   const words: string[] = [];
   for (const line of text.split('\n')) {
-    const read = coerceFieldValue({ label: field.label, type: 'text' }, line);
+    const read = coerceFieldValue({ label: field.label, type: 'text', options: null }, line);
     if (!read.ok) return read;
     if (typeof read.value === 'string') words.push(read.value);
   }
@@ -548,7 +577,7 @@ export function webhookFieldRangeFromInputs(
     if (field.type !== 'number' && field.type !== 'date') {
       return { ok: false, message: `${field.label} takes no range.` };
     }
-    const value = coerceFieldValue(field, raw);
+    const value = coerceFieldValue(shape(field), raw);
     if (!value.ok) return value;
     if (typeof value.value === 'boolean') {
       return { ok: false, message: `${field.label} takes no range.` };

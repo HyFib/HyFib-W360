@@ -13,6 +13,7 @@ import {
   desc,
   eq,
   exactTimestamp,
+  inArray,
   messageTemplates,
   sql,
   tenants,
@@ -41,7 +42,7 @@ import {
   campaignDraftInputOf,
   campaignLauncherStanding,
   cancelLockedCampaign,
-  loadCampaignVariant,
+  loadCampaignVariants,
   lockCampaign,
   microsToAmount,
   pauseLockedCampaign,
@@ -59,7 +60,14 @@ import {
   type CampaignDraftReview,
   type StoredCampaignVariant,
 } from '../campaigns/service';
-import { VARIANT_LABELS, VARIANT_SHARE, variantShareSchema } from '../campaigns/variants';
+import {
+  DEFAULT_VARIANTS_LIMIT,
+  MAX_VARIANTS,
+  VARIANT_LABELS,
+  VARIANT_SHARE,
+  parseVariantLabel,
+  variantShareSchema,
+} from '../campaigns/variants';
 import { campaignVariablesSchema, readCampaignVariables } from '../campaigns/variables';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
@@ -109,12 +117,14 @@ export const apiCampaignSchema = z.object({
     .uuid()
     .nullable()
     .describe(
-      "Variant A's (the campaign's own) template; a campaign with variant B also sends B's (see `variants` in GET /campaigns/{id} and each recipient's `variant`).",
+      "Variant A's (the campaign's own) template; a campaign with variants also sends theirs, B to E (see `variants` in GET /campaigns/{id} and each recipient's `variant`).",
     ),
   templateName: z
     .string()
     .nullable()
-    .describe("Variant A's (the campaign's own) template's name; see `variants` for variant B's."),
+    .describe(
+      "Variant A's (the campaign's own) template's name; see `variants` for the other variants'.",
+    ),
   channel: z
     .object({
       id: z.uuid(),
@@ -223,7 +233,32 @@ const apiVariantBSchema = z
   .strict()
   .nullable()
   .describe(
-    'Variant B: a second template, sent from the same number to a share of the recipients, with its own variables; null for a campaign that sends its one template to everyone. Each variant is checked on its own before a member can submit it, and its results are counted side by side; HyFib picks no winner.',
+    'Variant B: a second template, sent from the same number to a share of the recipients, with its own variables; null for a campaign that sends its one template to everyone. Each variant is checked on its own before a member can submit it, and its results are counted side by side; HyFib picks no winner. A campaign may test more templates (C to E, see `variants`): in a draft, `variantB` sets B and keeps the variants after it, and null removes B and every variant after it.',
+  );
+
+/** A draft's variant after A (ADR-410), as `variants` lists them: B first, then C to E. */
+const apiVariantSchema = z
+  .object({
+    templateId: z
+      .uuid()
+      .nullable()
+      .describe(
+        "The variant's template, as GET /templates lists it; null for none yet. A member submits the draft only with an approved template of the number's WhatsApp account for each variant.",
+      ),
+    variables: apiVariablesSchema.describe(
+      "How each of the variant's template's variables is filled, as `variables` fills the campaign's own template's.",
+    ),
+    sharePercent: variantShareSchema.describe(
+      `The variant's share of the recipients, in percent: ${VARIANT_SHARE.min} to ${VARIANT_SHARE.max} in steps of ${VARIANT_SHARE.step}. Variant A, the campaign's own template, gets the rest, which must be at least ${VARIANT_SHARE.min}%.`,
+    ),
+  })
+  .strict();
+
+const apiVariantsSchema = z
+  .array(apiVariantSchema)
+  .max(MAX_VARIANTS - 1)
+  .describe(
+    `Every variant after A, in order: B first, then C, D and E (at most ${MAX_VARIANTS - 1}, so at most ${MAX_VARIANTS} templates with A), each a template sent from the same number to its share of the recipients with its own variables; empty for a campaign that sends its one template to everyone. The shares sum to 100% with A's rest, which must be at least ${VARIANT_SHARE.min}%. Each recipient's variant comes from a stable hash of the campaign and the contact when a member submits it, so the counts are close to the shares but rarely equal. Each variant is checked on its own before a member can submit it, and its results are counted side by side; HyFib picks no winner. A draft can have more than two variants only where HyFib has enabled them; otherwise more than one variant here is refused with 422.`,
   );
 
 const apiBudgetSchema = z
@@ -239,6 +274,7 @@ const apiBudgetSchema = z
 export const apiCampaignSettingsSchema = z.object({
   variables: apiVariablesSchema,
   variantB: apiVariantBSchema,
+  variants: apiVariantsSchema,
   audience: apiAudienceSchema,
   schedule: z
     .object({
@@ -286,7 +322,7 @@ export const apiCampaignDetailSchema = apiCampaignWithResultsSchema.extend({
     .array(campaignVariantResultsSchema)
     .nullable()
     .describe(
-      'Its variants A and B side by side, each with its template, share and results counted over the recipients given it, so their counts add up to `results`. Descriptive counts: HyFib picks no winner and computes no significance. Null for a draft and for a campaign without variant B.',
+      'Its variants side by side, A first and then B to E (as many as it tests), each with its template, share and results counted over the recipients given it, so their counts add up to `results`. Descriptive counts: HyFib picks no winner and computes no significance. Null for a draft and for a campaign without variants.',
     ),
 });
 export type ApiCampaignDetail = z.infer<typeof apiCampaignDetailSchema>;
@@ -295,18 +331,19 @@ type StoredCampaign = Awaited<ReturnType<typeof lockCampaign>>;
 
 function toApiSettings(
   c: StoredCampaign,
-  variantB: StoredCampaignVariant | null,
+  variants: readonly StoredCampaignVariant[],
 ): ApiCampaignSettings {
   const d = campaignDraftInputOf(c);
+  const toApi = (v: StoredCampaignVariant) => ({
+    templateId: v.templateId,
+    variables: v.variables,
+    sharePercent: v.sharePercent,
+  });
+  const variantB = variants.find((v) => v.label === 'B');
   return {
     variables: readCampaignVariables(c.variables),
-    variantB: variantB
-      ? {
-          templateId: variantB.templateId,
-          variables: variantB.variables,
-          sharePercent: variantB.sharePercent,
-        }
-      : null,
+    variantB: variantB ? toApi(variantB) : null,
+    variants: variants.map(toApi),
     audience:
       d.audience.kind === 'segment'
         ? { segmentId: d.audience.segmentId }
@@ -471,46 +508,59 @@ async function readApiCampaignDetail(
     row.status === 'draft'
       ? null
       : toCampaignResults(await campaignAnalytics(tx, tenantId, campaignId));
-  const variantB = await loadCampaignVariant(tx, tenantId, campaignId);
+  const variants = await loadCampaignVariants(tx, tenantId, campaignId);
   return {
     ...toApiCampaign(row),
     results,
     version: withSettings ? stored.version : null,
-    settings: withSettings ? toApiSettings(stored, variantB) : null,
+    settings: withSettings ? toApiSettings(stored, variants) : null,
     variants:
-      variantB && row.status !== 'draft'
-        ? await apiVariantResults(tx, tenantId, campaignId, row, variantB)
+      variants.length > 0 && row.status !== 'draft'
+        ? await apiVariantResults(tx, tenantId, campaignId, row, variants)
         : null,
   };
 }
 
-/** Each variant's results in the API's words (ADR-405), A the campaign's own template. */
+/**
+ * Each variant's results in the API's words (ADR-405), A the campaign's own template and then B to
+ * E, as many as the campaign tests (ADR-410).
+ */
 async function apiVariantResults(
   tx: Tx,
   tenantId: string,
   campaignId: string,
   row: CampaignRow,
-  variantB: StoredCampaignVariant,
+  variants: readonly StoredCampaignVariant[],
 ): Promise<CampaignVariantResults[]> {
-  const [templateB] = variantB.templateId
-    ? await tx
-        .select({ name: messageTemplates.name })
-        .from(messageTemplates)
-        .where(
-          and(
-            eq(messageTemplates.tenantId, tenantId),
-            eq(messageTemplates.id, variantB.templateId),
-          ),
-        )
-    : [];
-  const counted = await campaignVariantAnalytics(tx, tenantId, campaignId);
-  return counted.map(({ variant, analytics }) => ({
-    variant,
-    templateId: variant === 'A' ? row.templateId : variantB.templateId,
-    templateName: variant === 'A' ? (row.templateName ?? null) : (templateB?.name ?? null),
-    sharePercent: variant === 'A' ? 100 - variantB.sharePercent : variantB.sharePercent,
-    results: toCampaignResults(analytics),
-  }));
+  const templateIds = variants.flatMap((v) => (v.templateId ? [v.templateId] : []));
+  const names = new Map(
+    (templateIds.length > 0
+      ? await tx
+          .select({ id: messageTemplates.id, name: messageTemplates.name })
+          .from(messageTemplates)
+          .where(
+            and(eq(messageTemplates.tenantId, tenantId), inArray(messageTemplates.id, templateIds)),
+          )
+      : []
+    ).map((t) => [t.id, t.name]),
+  );
+  const shareOfA = 100 - variants.reduce((sum, v) => sum + v.sharePercent, 0);
+  const counted = await campaignVariantAnalytics(tx, tenantId, campaignId, [
+    'A',
+    ...variants.map((v) => v.label),
+  ]);
+  return counted.map(({ variant, analytics }) => {
+    const other = variants.find((v) => v.label === variant);
+    return {
+      variant,
+      templateId: other ? other.templateId : row.templateId,
+      templateName: other
+        ? ((other.templateId && names.get(other.templateId)) ?? null)
+        : (row.templateName ?? null),
+      sharePercent: other ? other.sharePercent : shareOfA,
+      results: toCampaignResults(analytics),
+    };
+  });
 }
 
 export const apiCampaignRecipientQuerySchema = z
@@ -568,7 +618,7 @@ export const apiCampaignRecipientSchema = z.object({
   variant: z
     .enum(VARIANT_LABELS)
     .describe(
-      'The variant the recipient was given when the audience was taken, which never changes: A, the campaign’s own template, or B, its second template (settings.variantB). A for every recipient of a campaign without variant B.',
+      'The variant the recipient was given when the audience was taken, which never changes: A, the campaign’s own template, B, its second template (settings.variantB), or C, D or E, its third to fifth (settings.variants). A for every recipient of a campaign without variants.',
     ),
 });
 export type ApiCampaignRecipient = z.infer<typeof apiCampaignRecipientSchema>;
@@ -613,7 +663,7 @@ function toApiRecipient(r: RecipientRow): ApiCampaignRecipient {
     queuedAt: iso(r.queued_at),
     repliedAt: iso(r.replied_at),
     optedOutAt: iso(r.opted_out_at),
-    variant: r.variant === 'B' ? 'B' : 'A',
+    variant: parseVariantLabel(r.variant),
   };
 }
 
@@ -853,7 +903,7 @@ const draftFields = {
     .uuid()
     .nullable()
     .describe(
-      "The template it sends, as GET /templates lists it (variant A's, the campaign's own, when it has variant B: see `variantB`); null for none yet. A member submits it only with an approved marketing or utility template of the number's WhatsApp account.",
+      "The template it sends, as GET /templates lists it (variant A's, the campaign's own, when it has variants: see `variants`); null for none yet. A member submits it only with an approved marketing or utility template of the number's WhatsApp account.",
     ),
   variables: apiVariablesSchema,
   audience: apiAudienceSchema,
@@ -897,6 +947,7 @@ const draftFields = {
     .max(168)
     .describe('Sending stops this many hours after it starts; the rest is recorded as expired.'),
   variantB: apiVariantBSchema,
+  variants: apiVariantsSchema,
 };
 
 export const apiCreateCampaignSchema = z
@@ -913,6 +964,7 @@ export const apiCreateCampaignSchema = z
     budget: draftFields.budget.optional(),
     stopAfterHours: draftFields.stopAfterHours.optional(),
     variantB: draftFields.variantB.optional(),
+    variants: draftFields.variants.optional(),
   })
   .strict();
 
@@ -938,6 +990,7 @@ export const apiUpdateCampaignSchema = z
     budget: draftFields.budget.optional(),
     stopAfterHours: draftFields.stopAfterHours.optional(),
     variantB: draftFields.variantB.optional(),
+    variants: draftFields.variants.optional(),
   })
   .strict()
   .refine(
@@ -946,6 +999,17 @@ export const apiUpdateCampaignSchema = z
   );
 
 type ApiDraftGiven = Omit<z.infer<typeof apiUpdateCampaignSchema>, 'expectedVersion'>;
+
+/**
+ * The most variants a key's draft may reach on this web server (ADR-410): `CAMPAIGN_VARIANTS_MAX`,
+ * two unless the deployment raised it once no server of the release before is left.
+ */
+export interface CampaignVariantsLimitDeps {
+  campaignVariantsLimit?: number;
+}
+
+const variantsLimitOf = (deps: CampaignVariantsLimitDeps) =>
+  deps.campaignVariantsLimit ?? DEFAULT_VARIANTS_LIMIT;
 
 /** A new draft's settings, as members' new drafts start (ADR-186). */
 const newDraftInput = (name: string, timezone: string): CampaignDraftInput => ({
@@ -995,6 +1059,8 @@ export function apiDraftInputFrom(
     stopAfterHours: given.stopAfterHours ?? base.stopAfterHours,
     // Variant B left out stays as the draft has it (ADR-405); null removes it.
     ...(given.variantB !== undefined ? { variantB: given.variantB } : {}),
+    // Every variant after A, given, replaces them all (ADR-410); left out, they stay.
+    ...(given.variants !== undefined ? { variants: given.variants } : {}),
   };
 }
 
@@ -1005,7 +1071,7 @@ export function apiDraftInputFrom(
  * submits it.
  */
 export async function apiCreateCampaign(
-  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  deps: Pick<OutboundDeps, 'db' | 'clock'> & CampaignVariantsLimitDeps,
   ctx: ApiContext,
   input: unknown,
   idempotency: IdempotencyInput | null,
@@ -1033,7 +1099,7 @@ export async function apiCreateCampaign(
         timezone: company.timezone,
         createdByUserId: null,
       });
-      await writeLockedCampaignDraft(tx, ctx.tenant.id, id, draft);
+      await writeLockedCampaignDraft(tx, ctx.tenant.id, id, draft, variantsLimitOf(deps));
       await recordCampaignEvent(tx, ctx.tenant.id, id, 'created', null, { apiKeyId: ctx.key.id });
       await recordSystemAudit(
         tx,
@@ -1062,7 +1128,7 @@ export async function apiCreateCampaign(
  * is not the one given. A retry sets the same settings again.
  */
 export async function apiUpdateCampaign(
-  deps: Pick<OutboundDeps, 'db'>,
+  deps: Pick<OutboundDeps, 'db'> & CampaignVariantsLimitDeps,
   ctx: ApiContext,
   campaignId: string,
   input: unknown,
@@ -1081,7 +1147,7 @@ export async function apiUpdateCampaign(
       );
     }
     const draft = prepareCampaignDraft(apiDraftInputFrom(campaignDraftInputOf(c), given));
-    await writeLockedCampaignDraft(tx, ctx.tenant.id, campaignId, draft);
+    await writeLockedCampaignDraft(tx, ctx.tenant.id, campaignId, draft, variantsLimitOf(deps));
     await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'edited', null, {
       apiKeyId: ctx.key.id,
     });
@@ -1251,7 +1317,7 @@ export const apiCampaignReviewSchema = z.object({
     )
     .nullable()
     .describe(
-      'Variants A and B side by side: each contact falls into one by a stable hash of the campaign and the contact, so the counts add up to audience and the amounts to estimate, every recipient counted and priced once. A problem names the variant it is about (Variant B: …). null for a draft without variant B.',
+      'Its variants side by side, A first and then B to E (as many as the draft tests): each contact falls into one by a stable hash of the campaign and the contact, so the counts add up to audience and the amounts to estimate, every recipient counted and priced once. A problem names the variant it is about (Variant C: …). null for a draft without variants.',
     ),
 });
 

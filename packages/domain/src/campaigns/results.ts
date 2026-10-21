@@ -177,15 +177,18 @@ export interface CampaignVariantAnalytics {
 /**
  * Each variant's results side by side (ADR-405), in one repeatable snapshot only when the caller's
  * transaction gives one: each is `campaignAnalytics` over the recipients given that variant, so the
- * variants' counts add up to the campaign's. Descriptive counts: no winner, no significance.
+ * variants' counts add up to the campaign's. `labels` are the campaign's variants, A first (A and B
+ * to E, ADR-410), so a campaign of three variants reports three. Descriptive counts: no winner, no
+ * significance.
  */
 export async function campaignVariantAnalytics(
   tx: Tx,
   tenantId: string,
   campaignId: string,
+  labels: readonly VariantLabel[],
 ): Promise<CampaignVariantAnalytics[]> {
   const out: CampaignVariantAnalytics[] = [];
-  for (const variant of VARIANT_LABELS) {
+  for (const variant of labels) {
     out.push({ variant, analytics: await campaignAnalytics(tx, tenantId, campaignId, variant) });
   }
   return out;
@@ -195,7 +198,9 @@ export async function campaignVariantAnalytics(
 export const campaignVariantResultsSchema = z.object({
   variant: z
     .enum(VARIANT_LABELS)
-    .describe('A: the campaign’s own template (templateId); B: its second template.'),
+    .describe(
+      'A: the campaign’s own template (templateId); B: its second template; C, D and E: its third to fifth, for a campaign that tests more than two.',
+    ),
   templateId: z.uuid().nullable(),
   templateName: z.string().nullable(),
   sharePercent: z
@@ -207,7 +212,7 @@ export const campaignVariantResultsSchema = z.object({
       'The share of the audience the variant was given, in percent: each recipient’s variant comes from a stable hash of the campaign and the contact, so the counts are close to it but rarely equal.',
     ),
   results: campaignResultsSchema.describe(
-    'Counted as the campaign’s results are, over the recipients given this variant only, so the two variants’ counts add up to the campaign’s. Descriptive counts: HyFib picks no winner and computes no significance.',
+    'Counted as the campaign’s results are, over the recipients given this variant only, so the variants’ counts add up to the campaign’s. Descriptive counts: HyFib picks no winner and computes no significance.',
   ),
 });
 export type CampaignVariantResults = z.infer<typeof campaignVariantResultsSchema>;

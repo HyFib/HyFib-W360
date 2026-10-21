@@ -156,11 +156,12 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   `campaigns.read` also holds `channels.read`, and the limit is operational metadata of the
   company's own number (no credential, no contact), read only from that number under the company's
   scope.
-- A campaign's variant B (ADR-405) is edited as the draft is (`campaigns.write`, drafts only, by
-  members and by keys with `campaigns.write`); its template must be one of the company's own (read
+- A campaign's variants B to E (ADR-405, ADR-410) are edited as the draft is (`campaigns.write`,
+  drafts only, by members and by keys with `campaigns.write`; no new permission); each template must
+  be one of the company's own (read
   under the company's scope, and `app.campaign_variants` has a composite foreign key to the
-  company's templates, so another company's template id is not found), and submitting checks it as
-  A's template is checked. The variant each recipient is given is written once with the snapshot:
+  company's templates, so another company's template id is not found), and submitting checks each
+  as A's template is checked. The variant each recipient is given is written once with the snapshot:
   the runtime role holds no `UPDATE` on `app.campaign_recipients.variant`, so a recorded variant
   cannot be changed. Results per variant are counts, as the campaign's are.
 - Erasing a contact needs `contacts.delete` (also while the company is suspended).
@@ -434,6 +435,14 @@ Phase 4 rules (automations, P4-01):
   count, or its failure after three signals) in that company's scope under the row lock, and the
   signal it sends is the member's signed job, verified as any. The runs' webhook payloads now carry
   `run.enrollmentId`. No other function is new or widened, and no permission is new.
+- An enrolment's contacts listed with their outcomes on its page (ADR-408) need
+  `automations.read`, as the page does, and `contacts.read`, as the Contacts page does, so the list
+  names no contact a member could not find there: analysts see the enrolment's counts but not its
+  contacts. The page checks both itself and the service again; the enrolment must be the path's
+  automation's, in the company's scope (another automation's, another company's or an unknown one
+  is not found). Numbers are masked for the roles the company masks (ADR-226), and an erased
+  contact appears as "Erased contact" with no name, number or link. A read in a read-only
+  transaction, not audited, as reading an enrolment is not. No permission is new.
 - Automations start only in unassigned conversations of an active (not suspended) company, never
   after an opt-out keyword, and every bot message re-checks the channel, the 24-hour window and the
   contact's WhatsApp number when queued (a template step checks its template and the contact's
@@ -639,6 +648,12 @@ Phase 4 rules (Commerce, P4-06a):
   of conversations the member can see, with customers' names, numbers (masked as for the member,
   ADR-226) and notes, formula-neutralised; an erased contact's orders carry neither number nor note.
   Each export is audited (`commerce.orders_exported`, with the status filter).
+- The order report (ADR-409) needs `commerce.read` only and totals exactly the orders the member's
+  list shows (the inbox's visibility: none for roles that see no conversation), inside the
+  company's scope; it carries counts and amounts by day, status, currency and product (retailer id
+  and catalog name), never a customer's name, number, note or an order reference, so it needs no
+  contacts permission and is not audited, as viewing the list is not. The period is resolved as
+  Reports resolve it (whole company days, at most 92, not after today).
 - The company's key secret and webhook secret are sent once, stored as keyring ciphertexts bound to
   the company and account (`commerce-payments:<company>:<account>:<key|webhook>`), never returned
   to the browser or logged, and used only by the worker (keys) and the merchant webhook route
@@ -966,7 +981,12 @@ Phase 5 rules (Public API, P5-08):
   active company) every enrolment of the company, members' included, by id and counts only: never
   a member's name, the inputs or the contacts, and the segment's id only with `campaigns.read`; a stop is audited as the key and names it
   (`stopped_by_api_key_id`). Members with `automations.read` see keys' enrolments on their pages,
-  naming the key, as run pages name a key.
+  naming the key, as run pages name a key. An enrolment's contacts
+  (`GET /automations/{id}/enrollments/{enrollmentId}/contacts`, ADR-408) need `automations.start`
+  and `contacts.read` (both checked as reads, as ADR-403's reads are, so also while suspended,
+  within the plan's scopes) and give ids
+  and outcomes only: never a name or a number, and no id for an erased contact; another
+  automation's or company's enrolment is not found (an integration test, run in CI).
 - Template sends to many numbers (ADR-163, `POST /messages/send-many`) need the scopes one send
   needs and check each number as one send does (erasure, the suppression list, consent for the
   template's category, the marketing frequency cap under the campaign runner's company lock), so a
@@ -1527,6 +1547,13 @@ Phase 5 rules (Public API, P5-08):
   field, as in Settings. Additions of one company take turns under a lock, so the 50-field limit
   holds for members and keys at once. Every change is audited as the key or the member with the
   field's key, never values; renames are audited now, in Settings too.
+- Choice-type contact fields (ADR-407): no permission row changes. A field's options are set and
+  changed with the permission that defines fields (`tenant.settings.manage` in Settings → Messaging,
+  `contact_fields.manage` through the API), in the company's scope only (another company's field is
+  not found); the runtime role may update `options` (a column grant, 0320) besides `label`, never
+  the key or the type. Values are set by those who could already set values (`contacts.write`,
+  `contacts.import`, automations, Flows) and checked against the options; an option a contact has
+  chosen cannot be removed or renamed. Audit entries hold the key and counts, never the options.
 - Custom deal fields (ADR-373): adding, renaming and deleting the company's deal fields needs
   `tenant.settings.manage` (owners and administrators, in Settings → Pipelines); anyone who reads
   the CRM sees them, and members who change deals (and keys with `deals.write`) set values. Values
