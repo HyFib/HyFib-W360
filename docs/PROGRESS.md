@@ -37,6 +37,24 @@ functions.
   permission row changes), THREAT-MODEL T356, DATA-RETENTION, DEPLOYMENT (0320), RUNBOOKS,
   ARCHITECTURE, the feature matrix's W-048 row.
 
+### Review fixes (before merge)
+
+An independent review found one High and one Medium; both are fixed, with the Lows and nits.
+
+- **High:** the company data export's spec for `app.contact_fields` left out `options`, which the
+  integration test comparing each spec with the live columns would have failed on, and an export
+  would have lost every choice field's options. It now lists `options` (DATA-RETENTION says so).
+- **Medium:** only the API locked field rows `FOR SHARE` before the contact (ADR-112), so a field
+  deleted while a member, an import, a bulk edit, an automation or a Flow wrote its value could
+  leave a value behind for a field added again with the key. These writers now read the fields
+  `FOR SHARE` after the advisory lock and before the contact (Flow answers now read them before
+  locking the contact); an integration test races a member's write with a deletion.
+- DEPLOYMENT now says old servers also fail segments, campaigns and API filters naming a choice
+  field (500s), including after a rollback. The contact page sends only changed values and shows a
+  value its options no longer hold as a disabled option. The W-048 matrix row is `implemented`
+  until its CI-only tests pass. API merges take the lock too. Unused helpers were removed, and
+  `ContactFieldUpdate` says "label or options" with `minProperties: 1`.
+
 ### Tests
 
 - Unit (`contacts/field-choices.test.ts`, `api/contact-fields.test.ts`, `contacts/fields.test.ts`,
@@ -64,7 +82,7 @@ functions.
 | Command                                            | Result                                                               |
 | -------------------------------------------------- | -------------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
-| `pnpm test` (unit)                                 | 1,980 of 1,980 passed (181 files)                                    |
+| `pnpm test` (unit)                                 | 1,981 of 1,981 passed (181 files), after the review fixes            |
 | `pnpm build`                                       | passed                                                               |
 | migration 0320                                     | parses (pglast); not applied here                                    |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: no PostgreSQL or browser on this machine; CI runs them |

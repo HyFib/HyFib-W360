@@ -1,14 +1,5 @@
 import { AppError, uuidv7 } from '@w360/core';
-import {
-  and,
-  asc,
-  contactFields,
-  contacts,
-  eq,
-  sql,
-  type ContactFieldType,
-  type Tx,
-} from '@w360/db';
+import { and, contactFields, contacts, eq, sql, type ContactFieldType, type Tx } from '@w360/db';
 import {
   MAX_CONTACT_FIELDS,
   fieldKeyFromLabel,
@@ -61,31 +52,12 @@ const fieldLockKey = (tenantId: string) =>
  * Takes the company's contact-field lock shared until the transaction ends (ADR-407): every write of
  * contact field values takes it before reading the fields it checks values against, and before it
  * locks a contact, so a change of a choice field's options either finishes first, and the values are
- * checked against the new options, or waits until the values are stored and then sees them.
+ * checked against the new options, or waits until the values are stored and then sees them. The
+ * writer then reads those fields `FOR SHARE`, still before the contact (ADR-112's order), so a
+ * deletion of a field, which takes no advisory lock, waits for it or is waited for.
  */
 export async function lockContactFieldValues(tx: Tx, tenantId: string): Promise<void> {
   await tx.execute(sql`select pg_advisory_xact_lock_shared(${fieldLockKey(tenantId)})`);
-}
-
-/** The company's contact fields by label, as forms, imports and exports list them. */
-export function loadContactFields(tx: Tx, tenantId: string): Promise<ContactFieldDefinition[]> {
-  return tx
-    .select(definition)
-    .from(contactFields)
-    .where(eq(contactFields.tenantId, tenantId))
-    .orderBy(asc(contactFields.label), asc(contactFields.key));
-}
-
-/**
- * The company's contact fields, read under the contact-field lock (`lockContactFieldValues`): for
- * writes of values, which check them against fields whose options cannot change until they commit.
- */
-export async function lockedContactFields(
-  tx: Tx,
-  tenantId: string,
-): Promise<ContactFieldDefinition[]> {
-  await lockContactFieldValues(tx, tenantId);
-  return loadContactFields(tx, tenantId);
 }
 
 /** Which field: by id (Settings) or by key (the API). */
@@ -186,7 +158,7 @@ export interface ContactFieldOptionsChange {
  * has chosen must stay in the list as it is written (a change of case is a rename), or the change
  * is refused naming it, so no contact is left with a value that is not an option. The company's
  * contact-field lock is taken exclusively, so a write of values checking them against the options
- * (`lockedContactFields`) finishes first, and its value is counted here, or waits and sees the new
+ * (`lockContactFieldValues`) finishes first, and its value is counted here, or waits and sees the new
  * options. Null when the company has no such field; the same list changes nothing (`changed`
  * false). Erased contacts hold no values, so every value counted is a live contact's.
  */

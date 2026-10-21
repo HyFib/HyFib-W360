@@ -67,7 +67,9 @@ export const apiContactFieldUpdateSchema = z
       ),
   })
   .strict()
-  .refine((v) => v.label !== undefined || v.options !== undefined, 'Give label or options.');
+  .refine((v) => v.label !== undefined || v.options !== undefined, 'Give label or options.')
+  // The refinement is not part of the JSON schema; the document says it with minProperties.
+  .meta({ minProperties: 1, description: 'Give the label, the options, or both.' });
 
 const toApi = (field: ContactFieldDefinition): ApiContactField => ({
   key: field.key,

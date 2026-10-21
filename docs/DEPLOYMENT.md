@@ -1989,14 +1989,19 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    (0301's, for contact fields) and grants the runtime role `UPDATE (options)`; the table holds at
    most 50 rows a company, so both checks are validated at once, under the migration's brief lock on
    the table. It is additive: old web servers and workers neither offer nor change choice fields,
-   and they cannot read a choice value: a contact form, an import, a bulk edit, an API request, an
-   automation step or a Flow answer that gives one a value fails with an internal error (or, in a
-   run, a failed step) and stores nothing. Create choice fields only after both the worker and the
-   web rollouts end. Every write of contact field values now takes the company's contact-field
+   and they cannot read a choice field at all: a contact form, an import, a bulk edit, an API
+   request, an automation step or a Flow answer that gives one a value fails with an internal error
+   (or, in a run, a failed step) and stores nothing; saving or previewing a segment that names a
+   choice field, a campaign's checks and send of such a segment, the API's segments and contact
+   searches naming one, and `GET /contacts?fields[<key>]=…` for one all answer 500 (old code has no
+   comparisons for the type). Create choice fields only after both the worker and the web rollouts
+   end. Every write of contact field values now takes the company's contact-field
    advisory lock shared (`contact-fields:<company id>`, the key additions already took); expect no
    change in contention, since only additions and changes of options take it exclusively. Rolling an
    image back leaves the column, checks and grant in place; an older release then fails the same way
-   for choice values until the choice fields are deleted.
+   for choice values, and every segment, campaign and API filter naming a choice field fails with
+   500s, until the choice fields are deleted (which removes their values and leaves those segments
+   refused as naming a field that does not exist).
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

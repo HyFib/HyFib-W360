@@ -816,7 +816,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   },
   {
     table: 'app.contact_fields',
-    columns: ['id', 'key', 'label', 'type', 'created_at'],
+    columns: ['id', 'key', 'label', 'type', 'options', 'created_at'],
   },
   {
     table: 'app.contact_identities',

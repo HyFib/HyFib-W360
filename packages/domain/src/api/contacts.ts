@@ -917,6 +917,8 @@ export async function apiMergeContacts(
     if (!exists.has(data.mergeContactId)) {
       throw await apiContactNotFound(tx, ctx.tenant.id, data.mergeContactId);
     }
+    // Values move under the contact-field lock, as a member's merge moves them (ADR-407).
+    await lockContactFieldValues(tx, ctx.tenant.id);
     const res = await tx.execute<{ summary: unknown }>(
       sql`select app.merge_contacts(${contactId}::uuid, ${data.mergeContactId}::uuid) as summary`,
     );

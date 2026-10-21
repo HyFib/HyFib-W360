@@ -5,7 +5,7 @@ import { Button, Field, Input, Select } from '@w360/ui';
 import { createContactAction, updateContactAction } from '@/app/actions/contacts';
 import { ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
-import { choiceOptions } from '@/lib/contact-fields';
+import { changedAttributes, choiceOptions } from '@/lib/contact-fields';
 
 export interface ContactFieldDef {
   id: string;
@@ -62,7 +62,9 @@ export function ContactForm({
           displayName: values.displayName,
           email: values.email,
           ...(phoneEditable ? { phone: values.phone } : {}),
-          attributes: values.attributes,
+          // Only the values the member changed, so a value its field no longer takes (a choice
+          // whose options changed since it was set) never blocks saving the rest (ADR-407).
+          attributes: changedAttributes(initial.attributes, values.attributes),
         });
         if (!result.ok) setError(result.message);
         else setSaved(true);
@@ -167,9 +169,9 @@ export function ContactForm({
                   onChange={(e) => setAttr(f.key, e.target.value)}
                 >
                   <option value="">Not set</option>
-                  {choiceOptions(f.options, value).map((option) => (
-                    <option key={option} value={option}>
-                      {option}
+                  {choiceOptions(f.options, value).map(({ option, stale }) => (
+                    <option key={option} value={option} disabled={stale}>
+                      {stale ? `${option} (no longer an option)` : option}
                     </option>
                   ))}
                 </Select>

@@ -130,11 +130,8 @@ export async function recordFlowCompletion(
     // The answers belong to the contact the form was sent to (the token names that send). The
     // company's contact-field lock first, as every write of values takes it (ADR-407).
     await lockContactFieldValues(tx, input.tenantId);
-    const [contact] = await tx
-      .select({ id: contacts.id, erasedAt: contacts.erasedAt })
-      .from(contacts)
-      .where(and(eq(contacts.tenantId, input.tenantId), eq(contacts.id, send.contactId)))
-      .for('update');
+    // The fields before the contact, locked against a deletion, in the order a deletion takes
+    // them (ADR-112).
     const fieldRows = await tx
       .select({
         key: contactFields.key,
@@ -143,7 +140,13 @@ export async function recordFlowCompletion(
         options: contactFields.options,
       })
       .from(contactFields)
-      .where(eq(contactFields.tenantId, input.tenantId));
+      .where(eq(contactFields.tenantId, input.tenantId))
+      .for('share');
+    const [contact] = await tx
+      .select({ id: contacts.id, erasedAt: contacts.erasedAt })
+      .from(contacts)
+      .where(and(eq(contacts.tenantId, input.tenantId), eq(contacts.id, send.contactId)))
+      .for('update');
     const fields = new Map(fieldRows.map((f) => [f.key, f]));
     const set: { displayName?: string; email?: string | null } = {};
     const attrSet: Record<string, string | number | boolean> = {};

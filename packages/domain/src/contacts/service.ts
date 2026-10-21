@@ -407,11 +407,25 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
 
   /**
    * The fields, read under the company's contact-field lock (ADR-407), for writes of values: taken
-   * before any contact is locked, so a choice field's options cannot change until they commit.
+   * before any contact is locked, so a choice field's options cannot change until they commit. The
+   * field rows are then locked `FOR SHARE`, still before the contact, in the order a field's
+   * deletion takes them (ADR-112): a deletion in progress is waited for and its field is then
+   * gone, or the deletion waits and removes what this transaction writes.
    */
   async function lockedFields(tx: Tx, tenantId: string): Promise<ContactFieldRow[]> {
     await lockContactFieldValues(tx, tenantId);
-    return loadFields(tx, tenantId);
+    return tx
+      .select({
+        id: contactFields.id,
+        key: contactFields.key,
+        label: contactFields.label,
+        type: contactFields.type,
+        options: contactFields.options,
+      })
+      .from(contactFields)
+      .where(eq(contactFields.tenantId, tenantId))
+      .orderBy(asc(contactFields.label))
+      .for('share');
   }
 
   /** Validates raw attribute strings against the field definitions (empty value = remove). */

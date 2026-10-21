@@ -17810,13 +17810,20 @@ Decision: ADR-385's design, for contacts, through the same functions.
   exclusively (the advisory lock additions already took, ADR-115), and every write of values takes
   it shared before reading the fields and before locking a contact (`lockContactFieldValues`), so a
   value is never checked against options being replaced and a change of options counts every value
-  committed. Writers: the contact page and new-contact form, CSV import, bulk field edits (ADR-238),
-  `POST`/`PATCH /contacts` and the call that changes many (through `lockFields`, before its row
-  locks), automation steps that set a field, Flow answers saved into fields, and merges (ADR-224),
-  whose values move unchecked, both being values of the company's fields.
+  committed. Each writer then reads the fields it checks against `FOR SHARE`, still before the
+  contact, in the order a field's deletion takes them (ADR-112), so a value written while its
+  field is being deleted is refused once the deletion commits, or removed by it. Writers: the
+  contact page and new-contact form, CSV import, bulk field edits (ADR-238), `POST`/`PATCH
+/contacts` and the call that changes many (through `lockFields`), automation steps that set a
+  field, Flow answers saved into fields (which now read the fields before locking the contact),
+  and merges by members and through the API (ADR-224, ADR-227), whose values move unchecked, both
+  being values of the company's fields.
 - **Values, where members type them:** the contact page and the new-contact form show a select with
-  "Not set" and the options (a value the options no longer hold, which the rules above prevent, is
-  still listed first so the select never hides it); bulk field edits a select. Forms, bulk edits, CSV
+  "Not set" and the options (a value the options no longer hold, which the rules above prevent but a
+  page read before a change can show, is listed first and disabled, so the select never hides it
+  and it cannot be chosen again); a saved contact page sends only the values the member changed, so
+  a value left alone is never checked again and never blocks saving the rest; bulk field edits a
+  select. Forms, bulk edits, CSV
   import, automation steps ("Set a contact field", whose builder now lists the options under the
   value) and Flow answers take an option whatever its case and store it as written; anything else is
   refused ("Tier must be one of its options."; a CSV row error; a run step `skipped` with
@@ -17828,7 +17835,8 @@ Decision: ADR-385's design, for contacts, through the same functions.
   could find nothing). `Contact.fields`, in the API and the contact webhooks, gives the option as a
   string; `GET /contact-fields` gives each field's `options` (null for other types) and the type
   `choice`; the OpenAPI document describes both, with schema tests.
-- **Reading:** the contacts CSV export writes the option as text (unchanged code). Segments, and
+- **Reading:** the contacts CSV export writes the option as text (unchanged code), and the company
+  data export carries each field's `options`. Segments, and
   contact searches through the API (ADR-117), compare a choice as they compare text: is, is not
   (also contacts without a value), set and not set, whatever its case; a value that is no option is
   accepted and matches nobody, so a segment saved before an unused option was removed still reads.
@@ -17849,9 +17857,10 @@ contact; a CSV import reads its rows against the fields before its transaction, 
 compares each mapped field with what it read (`sameFieldShape`: id, type, options as written) and is
 refused ("The custom fields changed while the file was read. Import it again.") rather than store a
 value read against options since replaced. Field deletion keeps ADR-112's order (the field row, then
-the values) and takes no advisory lock, unlike deal deletion, which takes the deal-field lock: a
-writer that already holds a contact (an automation run, which holds the conversation and keys the
-contact) would otherwise wait for a deletion that waits for that contact. Contact fields are defined
+the values) and takes no advisory lock, unlike deal deletion, which takes the deal-field lock; the
+writers lock the field rows instead, as the API did since ADR-112 (an automation run reads its
+field after taking a key share lock on the contact, which a deletion's removal of values does not
+wait for). Contact fields are defined
 through the API too (ADR-115), so options are given and changed there, and the API filters contacts
 by a value (ADR-113), which takes the option in any case. Segments accept a value that is no option,
 where the deals board's filter (ADR-391) offers only options.

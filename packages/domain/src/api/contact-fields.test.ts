@@ -200,6 +200,7 @@ describe('defining contact fields through the API (ADR-115)', () => {
     expect(schemas.ContactFieldCreate?.required).toEqual(['label', 'type']);
     // Either the label or the options, or both (ADR-407).
     expect(schemas.ContactFieldUpdate?.required).toBeUndefined();
+    expect(schemas.ContactFieldUpdate).toMatchObject({ minProperties: 1 });
     const field = doc.components.schemas as Record<
       string,
       { properties?: Record<string, { enum?: string[] }>; required?: string[] }

@@ -954,7 +954,10 @@ async function applyContactEffect(
       options: contactFields.options,
     })
     .from(contactFields)
-    .where(and(eq(contactFields.tenantId, run.tenantId), eq(contactFields.key, effect.field)));
+    .where(and(eq(contactFields.tenantId, run.tenantId), eq(contactFields.key, effect.field)))
+    // Locked against a deletion, as other writers lock it (ADR-112); the contact holds only a key
+    // share lock, which a deletion's removal of values does not wait for.
+    .for('share');
   if (!field) return 'field_missing';
   const coerced = coerceFieldValue(field, effect.value);
   if (!coerced.ok) return 'invalid_value';

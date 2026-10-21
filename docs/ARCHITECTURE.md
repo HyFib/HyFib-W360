@@ -1609,11 +1609,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `setContactFieldOptions` (`field-definitions.ts`, for Settings and `PATCH /contact-fields/{key}`)
   takes the `contact-fields:<company>` advisory lock exclusively, reads the distinct values
   (`attributes ->> key`) and refuses a list that drops or rewrites a chosen one. Every write of
-  values takes that lock shared (`lockContactFieldValues`) before it reads the fields and before
-  it locks a contact: the contacts service (create, change, bulk edit, import, whose rows are read
-  before its transaction and whose mapped fields are compared again under the lock,
-  `sameFieldShape`), the API's `lockFields`, the automation runner's `set_field`, Flow answers and
-  merges. Deletions keep ADR-112's row order and do not take it. Segments compare a choice as text
+  values takes that lock shared (`lockContactFieldValues`), then reads the fields `FOR SHARE`, both
+  before it locks a contact: the contacts service (create, change, bulk edit, import, whose rows
+  are read before its transaction and whose mapped fields are compared again under the lock,
+  `sameFieldShape`), the API's `lockFields`, the automation runner's `set_field` (after a key share
+  lock on the contact, which a deletion does not wait for) and Flow answers; merges (the service's
+  and the API's) take the advisory lock only. Deletions keep ADR-112's row order and do not take
+  it; the row locks make them wait for writers, or writers for them. The contact page sends only
+  changed values (`changedAttributes`, `lib/contact-fields.ts`). The company export carries
+  `options`. Segments compare a choice as text
   (`FIELD_OPS.choice`: equals, not equals, set, not set); webhook field value filters tick options.
 - **Following message changes (0093, ADR-116):** triggers on `messages` (insert, and an update that
   changes the status, status time, error or content) call `app.message_changes_capture`, a SECURITY

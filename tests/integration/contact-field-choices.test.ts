@@ -390,6 +390,54 @@ describe('choice-type custom contact fields (ADR-407)', () => {
     expect(await optionsOf(tier.id)).toEqual(['Gold', 'Silver', 'Bronze']);
   });
 
+  it('a member’s write waits for a field being deleted, then refuses it, so no value outlives its field', async () => {
+    const { c, owner, tier } = await setup();
+    const { id } = await contactsSvc().createContact(owner, { phone: nextPhone() });
+    const agent = await fx.ctx(c, c.agent);
+    const holder = await fx.dbs.adminPool.connect();
+    let outcome: Promise<string> | undefined;
+    try {
+      // A deletion in the service's order: the field's row, then the values.
+      await holder.query('BEGIN');
+      await holder.query('DELETE FROM app.contact_fields WHERE id = $1', [tier.id]);
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      outcome = contactsSvc()
+        .updateContact(agent, id, { attributes: { tier: 'gold' } })
+        .then(
+          () => 'saved',
+          (error: unknown) => (isAppError(error) ? error.publicMessage : String(error)),
+        );
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+            [lock!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the write is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+      // The write waits on the field's row without holding the contact, so the deletion goes on.
+      await holder.query(
+        `UPDATE app.contacts SET attributes = attributes - 'tier'
+          WHERE tenant_id = $1 AND attributes ? 'tier'`,
+        [c.tenant.id],
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    expect(await outcome).toBe('Unknown custom field.');
+    expect(await attributesOf(id)).toEqual({});
+    // A field added again with the key finds no value left behind.
+    await contactsSvc().createField(owner, {
+      label: 'Tier',
+      type: 'choice',
+      options: ['Platinum'],
+    });
+    expect(await attributesOf(id)).toEqual({});
+  });
+
   it('compare a choice in segments as text, whatever its case', async () => {
     const { owner } = await setup();
     await contactsSvc().createContact(owner, { phone: nextPhone(), attributes: { tier: 'Gold' } });
