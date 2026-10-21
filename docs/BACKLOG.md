@@ -1153,7 +1153,9 @@ verification, app review, Embedded Signup configuration).
   `deals.write` and `orders.read` and `DELETE /deals/{id}/items/{itemId}` with `deals.write`, as
   members change them on the deal page; recorded under P4-04).
   Remaining: call-to-action messages through the API, taking
-  reactions back,
+  reactions back (both researched for ADR-412: Meta's OpenAPI description, M-203, gives neither a
+  call-to-action URL interactive type nor a removal form, so neither is built until a readable
+  source does),
   changing a field's type,
   resuming what members or HyFib paused, limits per endpoint, availability per single endpoint
   (plans choose per scope since ADR-092), a bound on a pipeline's archived stages (kept without one

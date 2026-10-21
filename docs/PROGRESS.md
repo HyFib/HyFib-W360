@@ -1,5 +1,44 @@
 # Progress
 
+## 2026-10-21 — Call-to-action URL buttons and taking reactions back: researched, not built (P5-08, ADR-412)
+
+Status: **Not built: Meta's OpenAPI description supports neither part (M-203).** Unit tests run
+locally; no integration or e2e test was added (no database or interface behaviour changed); no
+live Meta traffic. P5-08's remaining list names both; they stay on it.
+
+### Completed
+
+- **Research (M-203):** `business-messaging-api_v23.0.yaml` is the only description Meta publishes
+  (v24.0 to v26.0 answer 404; the file matches the copy read for ADR-082). It lists no `cta_url`
+  interactive type and no action with a display text and a link; its outbound reaction gives no
+  removal form; its status webhook names no message type. Recorded with what it does and does not
+  say, open question 23 and a "must not assume" line.
+- **API behaviour kept honest:** `POST /messages` still refuses every call-to-action type name as an
+  unknown `type` (422, path `type`) and every reaction-removal form (empty, blank, null or missing
+  `emoji`, a lone joiner or selector, a remove flag). OpenAPI's send description now says both are
+  unavailable and why (additive; no schema, field, status or webhook change).
+- **Inbox:** the composer sends text, files and templates only, not buttons, lists or reactions,
+  so nothing was added there.
+- **No migration** (0322 unused), no setting, no scope or permission change.
+- **Docs:** ADR-412, research M-203, THREAT-MODEL T361, BACKLOG P5-08, ARCHITECTURE.
+
+### Tests
+
+| Suite               | Files             | Result                                    |
+| ------------------- | ----------------- | ----------------------------------------- |
+| Unit (new, ADR-412) | `api/api.test.ts` | 3 tests, passed locally                   |
+| Unit (whole suite)  | 186 files         | 2,143 tests, passed locally (`pnpm test`) |
+| Integration         | none added        | nothing database-side changed             |
+| E2E                 | none added        | no page changed                           |
+
+- Hand mutation of 18 guards that keep both parts unavailable (call-to-action names dispatched to
+  buttons, a list or a template; the unknown type's field; the emoji accepting empty, trimmed,
+  optional or null values; the reaction schema not strict; `isSingleEmoji` accepting an empty
+  string, whitespace, a lone joiner or selector, or being unanchored; the OpenAPI sentences removed
+  or `cta_url` listed): **18 of 18 caught by unit tests**, 17 by the new ADR-412 tests alone and
+  the unanchored pattern by ADR-082's existing emoji test. No survivor needed an integration or
+  e2e test.
+
 ## 2026-10-21 — Campaigns that test up to five templates (P3-04, ADR-410)
 
 Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI

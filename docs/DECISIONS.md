@@ -18172,3 +18172,45 @@ from one gap: readiness still built each variant's audience for an invalid store
 error from an inverted range; readiness now builds them only for a valid set, `variantRanges`
 refuses an invalid one in words, and the test covers both. A Low: the e2e's `PATCH` now grows the
 draft, so it exercises the limit the API routes pass on. All were fixed.
+
+## ADR-412 Call-to-action URL buttons and taking reactions back: not built, no source (P5-08) (2026-10-21)
+
+Context: P5-08's remaining list names "call-to-action messages through the API" and "taking
+reactions back". ADR-080 and ADR-086 left call-to-action URL buttons out because `cta_url` is not
+in the spec's list of interactive types (M-043), and ADR-082 left taking a reaction back out
+because the empty `emoji` form is only recalled from Meta's prose documentation (M-185), which this
+project cannot read. This slice was to build both, through `POST /api/v1/messages` and the inbox,
+if Meta's OpenAPI description supports them.
+
+Decision:
+
+- **Research first, and it does not support either part (M-203).** Meta's repository holds one
+  description, `business-messaging-api_v23.0.yaml` (v24.0, v25.0 and v26.0 answered 404; the file is
+  byte-identical to the copy read for ADR-082). Its `InteractiveObject.type` lists `button`,
+  `call_permission_request`, `catalog_message`, `list`, `product`, `product_list` and `flow` only;
+  `ActionObject` has no branch with a display text and a link, and no example sends one. Its
+  outbound `ReactionMessage` gives `emoji` and `message_id` with no removal form and no example of
+  one; a schema without `minLength` does not say what an empty emoji does. Its status webhook names
+  no message type, so it says nothing about either kind's statuses. Building a `cta` type would mean
+  choosing Meta's type name, action name, parameter names, URL rules and header options from memory,
+  and sending an empty emoji would rely on behaviour no readable source gives, which the project's
+  rules forbid. So neither is built.
+- **What a caller gets stays honest.** `POST /messages` keeps refusing any call-to-action type
+  (`cta_url`, `cta`, `call_to_action`, `url_button`, a bare `interactive`) as an unknown `type`
+  (422 `validation_failed`, path `type`, never sent as a template), and a reaction whose `emoji` is
+  empty, blank, null, missing, a lone joiner or variation selector, or that carries a remove flag
+  (422, path `emoji` or the unknown key; the schema stays strict). OpenAPI's description of the send
+  now says both are unavailable and why (an additive description change; no schema, field, status
+  or webhook changes). The inbox composer sends text, files and templates only (no buttons, lists or
+  reactions), so nothing is added there either.
+- **No migration (0322 unused), no setting, no permission or scope change.**
+- **Pinned by unit tests** so a partial build cannot slip in unnoticed: each call-to-action name
+  refused by its field before anything is read, no `cta_url` in the OpenAPI document, and every
+  removal form refused by the schema and by `apiSendMessage`.
+
+Not built: call-to-action URL button messages (API, inbox, storage, rendering, export) and taking
+a reaction back (API, stored state, inbox), both until a readable Meta source (a newer OpenAPI
+description, an official SDK or sample) gives their shape; M-203 records what to look for. A
+customer's reaction webhook that carries no `emoji` at all is already stored with the preview
+"Reaction removed" (`meta-webhook.ts`); that reading is kept as it was, and this research neither
+confirms nor refutes it.

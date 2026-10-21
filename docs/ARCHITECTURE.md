@@ -2199,7 +2199,8 @@ true`); the same key with another request (method, path and body hashed) answers
   reached, changed in a dialog); creation with the scopes the member may grant, allowed addresses
   and a monthly limit; the new token shown once with a copy button (kept only in the page's
   memory); rotation with an overlap; revocation.
-- **Not built yet:** media and call-to-action messages, taking reactions back, assigning many
+- **Not built yet:** media and call-to-action messages, taking reactions back (neither is in Meta's
+  OpenAPI description, ADR-412), assigning many
   conversations or starting many runs in one call, bulk sends, media downloads, statuses changed
   since a time, defining contact fields, changing numbers or many contacts in one call, limits and
   availability per endpoint and OAuth apps (BACKLOG P5-08). Packs of extra API requests are plan add-ons (ADR-110, section 7). Outgoing
