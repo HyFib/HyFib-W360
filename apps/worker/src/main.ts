@@ -43,7 +43,7 @@ import {
   templateSyncHandler,
 } from './handlers/templates';
 import { deadLetterHandler } from './handlers/dead-letters';
-import { tenantDeleteHandler } from './handlers/tenancy';
+import { companyExportHandler, tenantDeleteHandler } from './handlers/tenancy';
 import { whatsappAccessCheckHandler } from './handlers/whatsapp-access';
 import { webhookDeliverHandler } from './handlers/webhooks';
 import { logFailures } from './job-log';
@@ -278,6 +278,13 @@ async function main(): Promise<void> {
     QUEUES.tenantDelete.name,
     { localConcurrency: 1, batchSize: 1 },
     logFailures(rt, QUEUES.tenantDelete.name, tenantDeleteHandler(rt)),
+  );
+  // Stored company exports (ADR-415): long jobs, two at a time (their pool holds two runs); the
+  // billing sweep signals them.
+  await rt.boss.work(
+    QUEUES.companyExport.name,
+    { localConcurrency: 2, batchSize: 1 },
+    logFailures(rt, QUEUES.companyExport.name, companyExportHandler(rt)),
   );
   // Jobs that failed all their retries: recorded for the platform operations console (ADR-054).
   await rt.boss.work(

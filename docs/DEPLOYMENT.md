@@ -63,7 +63,8 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 
 `DATABASE_POOL_MAX_APP` (default 10) + `DATABASE_POOL_MAX_AUTH` (5) + `DATABASE_POOL_MAX_PLATFORM` (2)
 
-- pg-boss producer (2) per web replica; worker: app pool 10 + pg-boss `max(4, concurrency+2)`.
+- pg-boss producer (2) per web replica; worker: app pool 10 + pg-boss `max(4, concurrency+2)` +
+  the stored-export pool (4, ADR-415).
   Keep the sum across replicas below the database's `max_connections` minus 20% headroom. LISTEN
   connections (pg-boss notify, SSE hints) must connect directly, not through a transaction-mode pooler.
 
@@ -2019,6 +2020,36 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    deleted (which removes their values and leaves those segments refused as naming a field that does
    not exist).
 
+   Migrations 0323 and 0328 (ADR-413, shipment messages) are expand only. 0323 creates
+   `app.commerce_store_shipments` (empty; tenant row security, grants, a company deletion step
+   between the store messages and the orders, and `w360_definer` policies limited to the company
+   being erased or deleted), a trigger on `app.commerce_store_orders` that clears shipments' tracking
+   when an order is redacted, and gives `app.commerce_store_messages` the null columns `shipment_id`,
+   `dedupe_key` and `tracking_revision`. It replaces the event and subject checks of
+   `app.commerce_store_messages`, the event and action checks of `app.commerce_store_message_rules`
+   (validated: at most nine rows a store) and the `store_event` check of `app.automation_runs` with
+   wider ones; every value the old checks allowed is still allowed. Those on the large tables are
+   left `NOT VALID` (new and changed rows are checked; rows already there passed the narrower
+   check), so nothing is scanned. Locks: `ALTER TABLE` takes `ACCESS EXCLUSIVE` on
+   `app.commerce_store_messages`, `app.commerce_store_message_rules` and `app.automation_runs`
+   (reads included) and creating the trigger `SHARE ROW EXCLUSIVE` on `app.commerce_store_orders`,
+   each held until 0323 commits; with no scan and no index build that is the time to change the
+   catalogue, but a long transaction on one of those tables makes the migration wait for it, and
+   everything after it wait behind the migration (set a `lock_timeout` for the run, as for other
+   migrations). 0328 (`-- migrate:no-transaction`) then builds the unique index
+   `(tenant_id, shipment_id, event, dedupe_key)` with `CREATE UNIQUE INDEX CONCURRENTLY`: order
+   messages keep being written and read while it builds. It must succeed before the new release
+   serves, since recording shipment messages relies on it (`ON CONFLICT` infers it); if it fails,
+   drop the `INVALID` index it leaves (RUNBOOKS §10J) and run the migrations again.
+   Rollout: apply 0323 and 0328, then roll out workers and web as usual. A server of the release
+   before ignores the new table and columns: shipment rules cannot be switched on from it, and it
+   never writes a second message per order and event (shipment messages name no order). Switch
+   shipment rules on only after **both** the worker and the web rollouts end: an old worker skips a
+   shipment message it meets for good (as "The order was deleted", having no order id), and an old
+   web server showing a store's report fails to render a shipment message's event. Rolling back an
+   image leaves the table, trigger, columns, index and checks; older code ignores them, and shipment
+   messages still waiting are skipped by older workers as above, so switch shipment rules off first.
+
    ADR-410 (campaigns that test up to five templates) has no migration: the labels B to Z, the
    shares of 10% to 90% in steps of 5, the unique label per campaign and the grants of 0317 already
    take variants C to E, and the recipients' check takes any label A to Z. It adds the web setting
@@ -2083,6 +2114,115 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
       back.
 
    Rolling forward needs no step; raise the setting again once every server runs the release.
+
+   Migration 0321 (ADR-411) creates `app.saved_reply_files` (a saved reply's file, its bytes in a
+   `bytea` column, checked against its length and SHA-256) and `app.saved_reply_attachments` (which
+   reply carries which file), both new and empty, with row security, grants (`SELECT`, `INSERT`,
+   `DELETE`, no `UPDATE`) and the company deletion's steps 125 and 126. Nothing is rewritten:
+   `app.saved_replies` is not altered, and the attachments' foreign key to it only takes a brief
+   lock on it while the empty table is created. Workers do not use the tables. It is additive: web
+   servers of the release before know nothing of files and keep listing, inserting and sending
+   saved replies as text. Two things they do differently: deleting a reply removes its attachment
+   row (the cascade) but leaves the file, which the next file a supervisor stores for the company
+   deletes (no file stays without a reply for longer than that, and such files are exported); and
+   changing the text of a reply that carries a photo, video or document past 1,024 characters is
+   not refused, so a new server cuts the caption to 1,024 characters when the reply is inserted and
+   says so. Apply 0321, then roll out web servers. There is no switch: supervisors can attach files
+   as soon as the first new web server serves them, so while older ones still run, the two cases
+   above can happen; both stay safe (no file is sent that a member did not review, and a leftover
+   file is deleted later). Storage: files live in PostgreSQL (there is no object storage), at most
+   16 MB each and 100 MB a company in all, so database size, backups and replicas grow with them;
+   watch `pg_total_relation_size('app.saved_reply_files')` and its TOAST table. The column is
+   stored uncompressed out of line (`STORAGE EXTERNAL`), so a range of a file reads only its own
+   chunks. Memory per request on the web servers: node-postgres receives `bytea` as hex text (twice
+   the bytes) and decodes it into a buffer, so reading a whole 16 MB file holds about 48 MB at its
+   peak; that happens when a supervisor attaches a file (the posted body, up to 16 MB, plus the
+   insert's hex text), when a member sends one (read, then uploaded to Meta from the same buffer),
+   when an export writes one (plus its base64 text, about 21 MB) and when a preview is opened
+   without a Range header. A Range request (what browsers' media players send) reads only its part.
+   Nothing bounds how many such requests run at once beyond the web server's own concurrency, so
+   size web memory for a few at a time. A company's export carries each file as base64 (about a
+   third larger than the file), two files a page. Rolling an image
+   back leaves the tables and grants in place; the older release ignores them, and the files stay
+   until a release with ADR-411 deletes their replies or the company is deleted.
+
+   Migration 0324 (ADR-414, automations started by replies to a campaign) runs in one transaction.
+   It replaces `automation_runs_trigger_type_check` with one that also takes `campaign_reply`,
+   `NOT VALID`, so `app.automation_runs` is not read under the migration's brief exclusive lock
+   (every stored row passed the check it replaces, validated by 0054, whose values are a subset;
+   the check stays unvalidated and nothing relies on `convalidated`). It creates the empty table
+   `app.automation_run_campaigns` (row security forced, `SELECT` and `INSERT` for the runtime role,
+   an update-rejecting trigger, deletion step 688), whose foreign keys take a brief lock on
+   `app.automation_runs` and `app.campaigns` (no rows to check). No index is built on a large
+   table: the reply lookup uses `messages_external_uq` and `campaign_recipients_message_uq`, which
+   exist. No setting is added.
+
+   Migration 0327 (ADR-414) replaces `webhook_endpoints_run_triggers` with one taking six
+   triggers, `campaign_reply` among them, validated at once (at most 10 endpoints a company). It is
+   a file and a transaction of its own because a run event's delivery reads
+   `app.webhook_endpoints` before `app.automation_runs`: one transaction locking the runs (0324)
+   and then the endpoints could deadlock with a delivery, so no transaction holds both. Both run in
+   the same deployment, 0324 first; 0325 and 0326 belong to other changes and may run between them.
+
+   Order: apply 0324 and 0327, roll out **workers first**, then web servers (the usual order), and publish
+   automations started by replies to a campaign only once both rollouts end. A worker of the release
+   before skips such automations when a reply arrives (it cannot parse the trigger), so nothing
+   starts from it; but if a new worker started a run and an older worker took its next step, the
+   older runner would send `{{campaign.name}}`, `{{campaign.variant}}` and `{{campaign.button}}`
+   as written, not knowing them. Workers first avoids that during the rollout. Rolling **workers**
+   back once such automations are published is not safe for the same reason: first pause them
+   (Automations → the automation → Pause), listed for each company with the runtime role's own
+   credentials, in its own transaction:
+
+   ```sql
+   BEGIN;
+   SELECT set_config('app.tenant_id', '<company id>', true);
+   SELECT a.id, a.name, a.status FROM app.automations a
+     JOIN app.automation_versions v ON v.tenant_id = a.tenant_id AND v.id = a.active_version_id
+    WHERE a.status = 'active' AND v.trigger ->> 'type' = 'campaign_reply';
+   COMMIT;
+   ```
+
+   and let their running runs end (or stop them from the run pages). Webhook deliveries are built
+   when they are sent, so a delivery of such a run still pending when workers are rolled back is
+   built by the older payload code: `run.trigger` `campaign_reply`, a value its schema does not
+   list, and no `run.campaign`. After the pause, wait until the endpoints that take run events
+   have no pending delivery (an endpoint's Deliveries page lists them; run events are captured
+   when a run starts or ends, so none are added once the runs ended), then roll back. An endpoint
+   whose receiver must not see such a body can be disabled instead, which ends its pending
+   deliveries unsent (`endpoint_disabled`). Rolling **web servers** back
+   makes such drafts fail to parse in the editor (shown as an invalid trigger), and Settings →
+   Webhooks of the release before shows an endpoint that chose `campaign_reply` with a blank label
+   and refuses to save it until it is unticked. The table, the runs' check and the endpoints' check can stay
+   after a rollback; older code never writes `campaign_reply`.
+
+   Migration 0325 (ADR-415) creates `app.company_exports` and `app.company_export_parts` (new,
+   empty tables, with their row level security, grants, deletion steps 37 and 38 and policies),
+   the sweep's `ops.company_exports_due`, and replaces `ops.sealed_value_keys` (dropped as
+   `w360_definer` and created again, as in 0288) with the stored exports' parts added. It is
+   additive and quick. A web server of the release before neither offers nor serves stored
+   exports, and its streamed export does not see a stored export waiting (it takes the same export
+   lock, so the two are still never read at once; only the "being prepared" refusal is new). A worker
+   of the release before neither runs `company.export` jobs nor sweeps them: deploy workers first,
+   as usual, so an export asked for on a new web server is prepared. The queue `company.export` is
+   created by the migration command from the queue list.
+
+   Space: stored exports live in PostgreSQL, sealed (about a third larger than the compressed
+   file), at most 512 MiB compressed per export and one ready file per company, kept 7 days (a
+   replaced one 30 minutes). Plan for the database, its write-ahead log and its backups to hold up to
+   about 700 MB for each company that keeps an export, up to twice that while a new one is written
+   and three times for the 30 minutes after a replacement; most companies' exports are a few
+   megabytes. A company may ask 3 times a day. Expired parts are deleted by the minute sweep, and the
+   space is reused after vacuum.
+   `SELECT pg_size_pretty(pg_total_relation_size('app.company_export_parts'))` shows the total.
+
+   Connections: each worker replica opens a second pool of 4 connections (`w360-worker-exports`)
+   for stored export runs, beside its app pool; add it to the connection budget.
+
+   Vacuum: a run reads from one repeatable-read snapshot for its whole length, which holds back
+   vacuum across the database (messages, pg-boss's job table) while it runs. Runs are bounded to 30
+   minutes (then the export fails as `timed_out`), two per worker replica at a time. RUNBOOKS §10Q
+   says how to see and stop one.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
@@ -2185,6 +2325,16 @@ path, status, company and key of each request, never its query string or body.
   number, email address and part of a name (ADR-113, ADR-124). Load-balancer or CDN access logs must
   leave out the query strings of `/api/v1/*`, or be kept short-lived and named in the privacy
   notice.
+- **MCP endpoint** (`/api/mcp`, ADR-416, no migration and no setting). It answers through the same
+  request pipeline and log as `/api/v1/*`, so its requests count against the same limits. Its
+  `Origin` check compares the header with the origin of `APP_BASE_URL`, which must therefore be the
+  public origin users and assistants reach. A proxy in front must pass `/api/mcp` POSTs with their
+  `Authorization`, `Origin`, `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` headers unchanged,
+  and must not add CORS headers or answer OPTIONS itself. The endpoint never streams (no SSE), so
+  no proxy buffering change is needed. Its arguments are in the body, never the query string.
+  Its log lines are the REST `api request` lines with an `mcp` object: alert on
+  `mcp.mirroredStatus` 500 (an unexpected tool failure, answered as a JSON-RPC error over HTTP 200,
+  with an `mcp tool call failed` error line carrying the request id), as on status 500 for REST.
 
 ## Razorpay
 
@@ -2246,8 +2396,11 @@ Optional: without it, the Stores page says Shopify is not set up and WooCommerce
    distribution through Shopify's app review (SH-001); custom distribution only reaches one store or
    one Plus organization, which is enough for a pilot.
 2. Allowed redirection URL: `https://<app host>/api/stores/shopify/callback` (the whole address must
-   be listed, SH-003). Scopes: `read_orders,read_products` only; HyFib asks for exactly these and
-   fails a connection that is not granted both.
+   be listed, SH-003). Scopes: `read_orders,read_products,read_fulfillments`. HyFib fails a
+   connection that is not granted `read_orders` and `read_products`; `read_fulfillments` (ADR-413,
+   research SH-044) only lets it subscribe to Shopify's shipment webhooks, and a store works without
+   it. If the Partner Dashboard asks for the app's access scopes, list all three (and
+   `read_customers` as optional, step 9).
 3. Compliance webhooks (set on the app, not per shop, SH-027): `customers/data_request`,
    `customers/redact` and `shop/redact` to `https://<app host>/api/webhooks/shopify`. HyFib creates
    the per-shop order, product and uninstall subscriptions itself.
@@ -2266,9 +2419,18 @@ Optional: without it, the Stores page says Shopify is not set up and WooCommerce
    lifetimes, the retry schedule and the `shop/redact` timing listed as unconfirmed in
    `docs/research/store-connectors.md`.
 8. Order messages (P4-06c) need no other scope or setting: shipments, tracking and payment gateways
-   are read with `read_orders` (research SH-030, SH-031). The fulfillment webhooks would need
-   `read_fulfillments` (SH-033), so the worker finds deliveries by reading orders in transit again
-   every three hours. Each message is a `commerce.store-message` job scheduled for its send time
+   are read with `read_orders` (research SH-030, SH-031), and the worker finds deliveries by
+   reading orders in transit again every three hours. Shipment messages (ADR-413) also read
+   shipments with the order; with `read_fulfillments` the store's webhook check subscribes
+   `fulfillments/create` and `fulfillments/update` (SH-044), whose deliveries make HyFib read the
+   order at once. Rollout: new connections ask for the scope from this release on; a store
+   connected before keeps its token (no re-approval is forced, nothing breaks) and reads shipments
+   as before until a manager allows shipment updates on its Order messages page, after which the
+   same run subscribes the two topics. The six-hourly check creates only topics missing for HyFib's
+   address, so it is safe to run any number of times, and a Shopify refusal of a shipment topic is
+   shown on the store, not a failed sync. Before launch, on a development store: approve the new
+   scope on an installed store, receive a `fulfillments/create` delivery and check its body has
+   `order_id` (research SH-048). Each message is a `commerce.store-message` job scheduled for its send time
    (the queue is created by `pnpm db:migrate` with the others), and the worker's minute sweep
    queues again any message that is due but lost its job.
 9. Cart reminders (P4-06d) read checkouts with `read_orders` (research SH-037). Customer access is

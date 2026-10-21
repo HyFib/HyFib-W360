@@ -17,6 +17,7 @@ import {
   type StoreOrderItemRecord,
   type StoreOrderRecord,
   type StoreProductRecord,
+  type StoreShipmentRecord,
 } from './model';
 
 /**
@@ -127,6 +128,7 @@ fragment W360Order on Order {
   statusPageUrl
   paymentGatewayNames
   fulfillments(first: ${STORE_LIMITS.shopifyFulfillments}) {
+    id
     status
     displayStatus
     createdAt
@@ -256,17 +258,29 @@ export const SHOPIFY_WEBHOOK_TOPICS = [
   'PRODUCTS_DELETE',
   'APP_UNINSTALLED',
 ] as const;
-export type ShopifyWebhookTopic = (typeof SHOPIFY_WEBHOOK_TOPICS)[number];
+
+/**
+ * Shipment webhooks (ADR-413, SH-044): subscribed only while the store's token was granted
+ * `read_fulfillments` (or `read_marketplace_orders`). A delivery only asks HyFib to read the
+ * fulfillment's order again, like an order webhook.
+ */
+export const SHOPIFY_SHIPMENT_TOPICS = ['FULFILLMENTS_CREATE', 'FULFILLMENTS_UPDATE'] as const;
+export type ShopifyWebhookTopic =
+  (typeof SHOPIFY_WEBHOOK_TOPICS)[number] | (typeof SHOPIFY_SHIPMENT_TOPICS)[number];
 
 /**
  * Deliveries only name what changed (SH-023): `updated_at` keeps Shopify from dropping repeated
- * deliveries as duplicates. Deletions and uninstalls keep Shopify's own small payloads.
+ * deliveries as duplicates. Deletions and uninstalls keep Shopify's own small payloads. A
+ * fulfillment delivery keeps its own id, its order's id and its update time: the fields of the REST
+ * Fulfillment resource (SH-048); that a delivery's body is that resource is unconfirmed.
  */
 export const SHOPIFY_INCLUDE_FIELDS: Partial<Record<ShopifyWebhookTopic, string[]>> = {
   ORDERS_CREATE: ['id', 'admin_graphql_api_id', 'updated_at'],
   ORDERS_UPDATED: ['id', 'admin_graphql_api_id', 'updated_at'],
   PRODUCTS_CREATE: ['id', 'admin_graphql_api_id', 'updated_at'],
   PRODUCTS_UPDATE: ['id', 'admin_graphql_api_id', 'updated_at'],
+  FULFILLMENTS_CREATE: ['id', 'order_id', 'updated_at'],
+  FULFILLMENTS_UPDATE: ['id', 'order_id', 'updated_at'],
 };
 
 const GID_RE = /^gid:\/\/shopify\/([A-Za-z]+)\/([0-9]{1,20})$/;
@@ -477,6 +491,14 @@ export class ShopifyAdmin {
         `Shopify did not create the ${topic} subscription: ${typeof message === 'string' ? message.slice(0, 200) : 'unknown error'}`,
       );
     }
+    // No subscription in the answer (for example withheld with ACCESS_DENIED beside the data):
+    // nothing was created, whatever else the answer says.
+    if (typeof asRecord(payload?.webhookSubscription)?.id !== 'string') {
+      throw new StoreApiError(
+        'rejected',
+        `Shopify did not create the ${topic} subscription: its answer named no subscription`,
+      );
+    }
   }
 
   /** Uninstalls HyFib from the shop (SH-028); an app that is already gone is fine. */
@@ -545,8 +567,41 @@ const FAILED_FULFILLMENT_DISPLAY = new Set(['CANCELED', 'FAILURE']);
 
 type ShipmentFacts = Pick<
   StoreOrderRecord,
-  'shippedAt' | 'deliveredAt' | 'trackingCompany' | 'trackingNumber' | 'trackingUrl'
+  'shippedAt' | 'deliveredAt' | 'trackingCompany' | 'trackingNumber' | 'trackingUrl' | 'shipments'
 >;
+
+/**
+ * Each fulfillment Shopify returned with the order (SH-045), at most STORE_LIMITS.shopifyFulfillments:
+ * its id, statuses, times and the first of its tracking entries. One without an id or times is
+ * left out; a cancelled or failed one is kept, marked `failed`, so a shipment that is cancelled
+ * later stops its messages.
+ */
+export function shopifyShipmentRecords(order: Record<string, unknown>): StoreShipmentRecord[] {
+  const list = Array.isArray(order.fulfillments) ? order.fulfillments : [];
+  const records: StoreShipmentRecord[] = [];
+  for (const raw of list.slice(0, STORE_LIMITS.shopifyFulfillments)) {
+    const f = asRecord(raw);
+    const externalId = gidNumber(f?.id, 'Fulfillment');
+    const createdAt = storeDate(f?.createdAt);
+    const updatedAt = storeDate(f?.updatedAt) ?? createdAt;
+    if (!f || !externalId || !createdAt || !updatedAt) continue;
+    const tracking = asRecord(Array.isArray(f.trackingInfo) ? f.trackingInfo[0] : null);
+    records.push({
+      externalId,
+      status: statusWord(f.status, 30),
+      displayStatus: statusWord(f.displayStatus, 30),
+      failed:
+        FAILED_FULFILLMENT_STATUS.has(String(f.status)) ||
+        FAILED_FULFILLMENT_DISPLAY.has(String(f.displayStatus)),
+      createdAt,
+      updatedAt,
+      trackingCompany: clip(tracking?.company, 100),
+      trackingNumber: clip(tracking?.number, 100),
+      trackingUrl: httpsUrl(tracking?.url),
+    });
+  }
+  return records;
+}
 
 /**
  * What an order's shipments say (SH-030): shipped at the first shipment that was not cancelled or
@@ -591,6 +646,7 @@ export function shopifyShipments(order: Record<string, unknown>): ShipmentFacts 
     trackingCompany: tracked?.company ?? null,
     trackingNumber: tracked?.number ?? null,
     trackingUrl: tracked?.url ?? null,
+    shipments: shopifyShipmentRecords(order),
   };
 }
 

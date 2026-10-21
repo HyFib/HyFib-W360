@@ -192,6 +192,7 @@ import { apiUpdateMemberSchema } from './members';
 import { apiCreateClosedDaySchema, apiUpdateBusinessHoursSchema } from './business-hours';
 import { MAX_RANGES_PER_DAY } from '../inbox/business-hours';
 import { MAX_SAVED_REPLIES } from '../inbox/saved-replies';
+import { REPLY_FILE_MAX_BYTES } from '../messaging/file-replies';
 import { GROWTH_LIMITS } from '../growth/model';
 import {
   SATISFACTION_SURVEY_STATUSES,
@@ -895,6 +896,23 @@ export const apiSavedReplySchema = z.object({
   updatedByApiKeyId: z.uuid().nullable(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
+  attachment: z
+    .object({
+      id: z.uuid(),
+      type: z.enum(['image', 'video', 'audio', 'document']),
+      mimeType: z.string(),
+      filename: z.string().describe('The name it was added under, as a document is sent with it.'),
+      sizeBytes: z.number().int().min(1).max(REPLY_FILE_MAX_BYTES),
+      caption: z
+        .boolean()
+        .describe(
+          'Whether the reply’s text goes as the file’s caption: true for a photo, video or document, whose text is then at most 1,024 characters; false for a recording, which takes no caption, so its text stays a text message.',
+        ),
+    })
+    .nullable()
+    .describe(
+      'The file the reply carries, added by members in Settings → Saved replies, which the reply box attaches when a member inserts the reply; null when it carries none. Its details only: the API gives neither its content nor where it is kept, and keys cannot add or remove it.',
+    ),
 });
 
 /** A template's content as HyFib represents it (ADR-294). */
@@ -2695,7 +2713,7 @@ export function buildOpenApiDocument(serverUrl: string) {
             'A template (`type` `template` or left out): utility templates need `messages.send`, marketing templates `messages.send_marketing`. The contact is created when new; consent, the suppression list and the marketing frequency cap are checked.',
             'A reply (`type` `text`, `buttons`, `list`, `product`, `product_list`, `catalog`, `reaction`, `image`, `video`, `audio`, `document`, `sticker`, `location` or `contacts`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. Any reply but a reaction stops an automation answering the conversation, and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
             'Products (`product`: one; `product_list`: up to 30 in sections, with a header; `catalog`: the catalog, opened from a product’s picture) need Commerce in the company’s plan (403, reason `not_in_plan`, otherwise). They are named by their content ids (`retailerId`) in a catalog HyFib has read from Meta for the WhatsApp number (Commerce → Catalogs), still connected, and not removed at Meta; all from one catalog, which `catalogId` names when more than one has them all. Unknown ids are refused by name (422, `products`).',
-            'A text, buttons, a list, products, media, a location or contacts can quote a message of the conversation with `replyTo`, its id from `GET /conversations/{id}/messages`, the `message.received` webhook or a send’s response: a message the contact sent, or one the business sent that WhatsApp accepted. A reaction (`type` `reaction`) puts one emoji on a message the contact sent in the last 30 days; reactions cannot be taken back through the API. A message of another conversation, or one that cannot be quoted or reacted to, is refused (422, `replyTo`).',
+            'A text, buttons, a list, products, media, a location or contacts can quote a message of the conversation with `replyTo`, its id from `GET /conversations/{id}/messages`, the `message.received` webhook or a send’s response: a message the contact sent, or one the business sent that WhatsApp accepted. A reaction (`type` `reaction`) puts one emoji on a message the contact sent in the last 30 days; reactions cannot be taken back through the API, as Meta’s API description gives no form for it. A message with a call-to-action URL button cannot be sent: Meta’s API description lists no such interactive type. A message of another conversation, or one that cannot be quoted or reacted to, is refused (422, `replyTo`).',
             'Media (`image`, `video`, `audio`, `document` or `sticker`) is sent from an https:// `link` that WhatsApp fetches when it sends the message, reachable from the internet without signing in; HyFib neither fetches nor keeps the media, and stores the link with the message. A photo, a video or a document may carry a `caption` of up to 1,024 characters; audio and stickers take none, and WhatsApp decides whether a file can be a sticker. A link WhatsApp cannot fetch, or media it does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error. In place of a link, a photo, a video, audio or a document may name a file uploaded with `POST /media` for the number it is sent from in the last 30 days (`mediaId`); the file is sent as WhatsApp keeps it, a document under the name it was uploaded with.',
             'A template whose header is a photo, a video or a document (its `headerMedia` in GET /templates) needs the file in `headerMedia`: an https:// `link` that WhatsApp fetches when it sends the message, as for media below, shown without a caption. Documents must be PDF files. HyFib neither fetches nor keeps the file, and stores the link with the message. Other templates take no file (422, `headerMedia`). A file WhatsApp cannot fetch, or does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
             'A template whose website buttons’ links end with a value (its `links` in GET /templates) needs the end of each link in `variables.buttons`, in the order of `links`: it replaces the link’s {{1}}, holds no spaces and cannot change the website the button opens (422, naming the value, as `variables.buttons.0`). The message keeps the links as sent. Other templates take none.',
@@ -3313,7 +3331,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listSavedReplies',
           summary: 'Saved replies, by shortcut',
-          description: `${scopeNote('messages.reply', 'saved_replies.manage')} The company’s saved replies, the answers members put in the reply box, all of them (a company keeps at most ${MAX_SAVED_REPLIES}), by shortcut. A reply’s placeholders are left as written: fill {{name}}, {{agent}} and {{company}} before sending it. Reading works while the company is suspended.`,
+          description: `${scopeNote('messages.reply', 'saved_replies.manage')} The company’s saved replies, the answers members put in the reply box, all of them (a company keeps at most ${MAX_SAVED_REPLIES}), by shortcut. A reply’s placeholders are left as written: fill {{name}}, {{agent}} and {{company}} before sending it. Each reply names the file it carries, if any, in \`attachment\`. Reading works while the company is suspended.`,
           responses: {
             '200': {
               description: 'The saved replies.',
@@ -3342,7 +3360,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         patch: {
           operationId: 'updateSavedReply',
           summary: 'Change a saved reply',
-          description: `${scopeNote('saved_replies.manage')} As members save one in Settings → Saved replies: what is given changes and the rest stays as it is, with the same checks as when adding one. A change that leaves the reply as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          description: `${scopeNote('saved_replies.manage')} As members save one in Settings → Saved replies: what is given changes and the rest stays as it is, with the same checks as when adding one. The file a member attached stays; while it is a photo, video or document, the text is its caption and is refused over 1,024 characters (422 naming \`body\`). A change that leaves the reply as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('UpdateSavedReply')) },
           responses: {
@@ -3356,7 +3374,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         delete: {
           operationId: 'deleteSavedReply',
           summary: 'Delete a saved reply',
-          description: `${scopeNote('saved_replies.manage')} As members do in Settings → Saved replies. One already deleted answers 404. The audit log names the key.`,
+          description: `${scopeNote('saved_replies.manage')} As members do in Settings → Saved replies. One already deleted answers 404. Its file is deleted with it unless another saved reply carries the same file. The audit log names the key.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': {

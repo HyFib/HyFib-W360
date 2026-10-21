@@ -18172,3 +18172,668 @@ from one gap: readiness still built each variant's audience for an invalid store
 error from an inverted range; readiness now builds them only for a valid set, `variantRanges`
 refuses an invalid one in words, and the test covers both. A Low: the e2e's `PATCH` now grows the
 draft, so it exercises the limit the API routes pass on. All were fixed.
+
+## ADR-411 Saved replies that carry a file (P3-06, W-087) (2026-10-21)
+
+Context: saved replies were text only (ADR-291 kept them that way through the API), so a member who
+answered "here is our price list" every day typed the text from a saved reply, then found the PDF
+on their computer and sent it from the "Send a file" card (ADR-218). WATI's reply materials hold
+media as well as text (research W-087). HyFib has no object storage (ADR-218, ADR-219): a member's
+file passes through memory and is uploaded to Meta when sent, and Meta keeps an upload only 30 days
+and for one number (research M-046), so a Meta media id cannot be the stored copy of a reply that
+any number sends for months. Private object storage is planned (ARCHITECTURE) but not built:
+`app.media_objects.storage_key` and its key scheme were planned in 0003 and never written.
+
+Decision:
+
+- **One file per reply, kept in the database.** A saved reply may carry one file of the types and
+  size members send from the inbox (`checkReplyFile`: JPEG or PNG photos, MP4 or 3GPP videos, AAC,
+  AMR, MP3, MP4 or OGG recordings, PDF, text and Office documents, up to 16 MB). Its bytes are kept
+  in `app.saved_reply_files` (`bytea`), once per company: the same bytes, type and cleaned name
+  (`mediaFilename`) are one row, which any number of replies name through
+  `app.saved_reply_attachments` (one row per reply). A stored file is never changed. A company keeps
+  at most 100 MB of files in all (`SAVED_REPLY_FILES_MAX_TOTAL_BYTES`; a shared file counts once),
+  a bound chosen so that 500 replies cannot put gigabytes per company into the database, backups
+  and exports; a file being replaced counts as freed only when no other reply has it. This is a
+  stopgap until object storage exists, stated in DEPLOYMENT (size to watch) and BACKLOG.
+- **The text becomes the caption.** With a photo, video or document the reply's text is the file's
+  caption, so it is held to 1,024 characters, the caption limit the inbox's file path already
+  applies (`fileReplySchema`, research M-191): attaching such a file to a longer reply, and changing
+  such a reply's text past it (in Settings or through the API), are refused naming `body`. A
+  recording takes no caption (M-191), so with one the text keeps the 4,096 characters of a text
+  message and is inserted into the reply box as text, sent separately.
+- **Sharing and deletion under one lock.** Every write of saved replies and their files (adding,
+  changing and deleting replies, attaching, replacing and removing files, in Settings and through
+  the API) takes the company's saved-replies advisory lock first, before any row lock (the API's
+  change now takes it before its row lock, so the two orders never meet). Under it, a file is
+  deleted as soon as no attachment names it: when its reply is deleted (the attachment goes by
+  `ON DELETE CASCADE`), when the reply's file is removed or replaced, and, before each new file is
+  stored, any file no reply names (a server of the release before deletes replies without knowing
+  of files). The attachments' foreign key to the file has no cascade, so the database refuses
+  deleting a file a reply still names. This follows how the codebase treats shared rows elsewhere
+  (references counted by existence under a lock, never a stored counter); media rows of messages
+  are never shared, each message has its own (ADR-219).
+- **Migration 0321:** the two tables, new and empty, with `tenant_id NOT NULL`, `UNIQUE (tenant_id,
+id)`, composite foreign keys to the company's replies (cascade), files and members, forced row
+  security, the runtime role holding `SELECT`, `INSERT` and `DELETE` only, and checks of each
+  file's (kind, MIME type) pair against `REPLY_FILE_TYPES` (a unit test keeps them equal), its size
+  (1 byte to 16 MB), its name (1 to 150 characters) and its SHA-256 against its bytes. They join the
+  company deletion as steps 125 (attachments) and 126 (files), before the replies (130) and the
+  members (810), with w360_definer's policies limited to the company being deleted. The company
+  export carries both, the files two rows a page with their bytes as base64 (`exportRow`,
+  `ExportTableSpec.pageSize`). `app.saved_replies` is not altered.
+- **Managing (Settings → Saved replies):** members with `inbox.supervise` attach, replace and
+  remove a reply's file in its edit panel, posted to `/api/c/<company>/saved-replies/<id>/file`
+  (under /api so Next's proxy neither buffers nor cuts 16 MB; trusted origin, the member's
+  session). The list shows each reply's file with a link to it. Audit entries
+  (`saved_reply.file_attached`, `saved_reply.file_removed`) record the shortcut, kind and size and
+  whether the file was shared, replaced or deleted, never its name or content, as saved replies'
+  entries never record the text.
+- **Using (the conversation page):** members with `inbox.reply` who cannot manage saved replies use
+  them, as before. Choosing a reply with a file ("/prices · Price list (with a photo)") first asks
+  the server, in a conversation the member can see, whether the file is still there and reads back
+  whole (`savedReplyFileForInsert`: its length and SHA-256 computed from the stored bytes in SQL,
+  its type still one members send); if not, the member is told now ("was removed after the page
+  loaded", "can no longer be read") and nothing is inserted. Otherwise `ReplyTools`, which now holds
+  the composer and the file card together, gives the card the file (a preview for a photo, a link
+  otherwise) with the text, placeholders filled, as its caption (cut to 1,024 characters with a
+  notice if the filled text is longer). Nothing is sent: the member reviews it and presses Send
+  file, or removes it. A file is inserted only into an empty card: when the card already holds a
+  file or a caption the member chose, the reply is not inserted and the member is told, so nothing
+  they chose is discarded. Both stay editable while the file is checked, so its answer is applied
+  to what they hold when it comes back: text typed meanwhile stays, with the reply's text after it,
+  and a file or caption given to the card meanwhile stops the insertion the same way. The card posts `savedReplyId` and `savedReplyFileId` in place of a file;
+  `queueSavedReplyFileReply` reads the bytes only while that reply still carries that very file
+  (otherwise 409: insert it again) and sends them through `queueFileReply`'s own path: the reply's
+  checks (window, number, the collision warning), the upload to Meta for the conversation's number,
+  the queued reply and its retry key. Each send uploads the file again.
+- **Preview route:** `/c/<company>/settings/saved-replies/files/<id>` gives a file to members who
+  reply or supervise, with `FILE_POLICY` (proxy.ts's `FILE_ROUTE` now matches it), `nosniff`, no
+  caching, and only photos, recordings and videos inline (`mediaPresentation`). It answers a single
+  byte range (ADR-382's `byteRange`, 206 or 416) as media players ask, reading only that part from
+  the database (`substring` on the column); the column is stored uncompressed out of line
+  (`STORAGE EXTERNAL` in 0321), so a slice reads only its own TOAST chunks. The files are mostly
+  compressed formats already, so little is lost; a plain-text document loses its compression,
+  within the 16 MB and 100 MB bounds. Bytes are passed on as the driver decoded them, without
+  another copy; a whole 16 MB file still holds about 48 MB on the web server at its peak (the
+  driver's hex text and the decoded buffer), which DEPLOYMENT states.
+- **API (additive, P5-08):** each saved reply carries `attachment` (its id, `type`, MIME type,
+  name, size and `caption`, whether the text goes as its caption) or null; never the content, a
+  storage key or a link. Keys cannot add or remove files; `PATCH` keeps the file and refuses a text
+  over 1,024 characters while it is a photo, video or document; `DELETE` deletes the file with the
+  reply unless another reply carries it. Webhooks have no saved-reply events, so none change.
+- **Automations are out.** No automation step uses saved replies today (send-message steps carry
+  their own text), so none was extended.
+
+Not built: automations (keyword or routing) drawing on saved replies or their files, templates or
+bots stored as reply material (the rest of W-087), keys adding or removing files, more than one
+file per reply, stickers, files over 16 MB, object storage (and with it moving these bytes out of
+PostgreSQL), reusing one upload to Meta for repeated sends of the same file, a bound on how many
+whole-file reads run at once, and any verification against Meta (the Graph stand-in only).
+
+Review (before merge): an independent review found the design safe and no further problem in
+research M-202. One High issue: the integration test of the company's 100 MB total inserted its
+filler files without replies, so the sweep of files no reply names deleted them and the test could
+not pass; the fillers now belong to replies, and the test also checks the limit exactly, a shared
+file counted once, and a replaced file freed only when unshared. One Medium issue: the preview read
+and copied whole files and ignored Range requests, which media players need (Safari often will not
+play a video without them); it now answers ranges reading only the part, the column is stored
+uncompressed, the extra copies are gone on the preview and send paths, and DEPLOYMENT states the
+per-request memory. Lows: DEPLOYMENT implied a switch for offering files (none exists; reworded);
+a change of only the title or shortcut was refused when an older server had stored a long text
+with a photo (the caption limit is now checked only when the text changes); a reply deleted by an
+older server during an attach was a server error (now not found, from the foreign key's
+violation); and inserting a reply replaced a file or caption the member had already put in the
+card (now refused with a message). All were fixed. Codex's review of PR #107 found the same loss
+while the check runs: its answer used the reply box and the card as they were when it started, so
+it overwrote text typed meanwhile and replaced a file chosen meanwhile; it now reads them as they
+are when it comes back.
+
+## ADR-412 Call-to-action URL buttons and taking reactions back: not built, no source (P5-08) (2026-10-21)
+
+Context: P5-08's remaining list names "call-to-action messages through the API" and "taking
+reactions back". ADR-080 and ADR-086 left call-to-action URL buttons out because `cta_url` is not
+in the spec's list of interactive types (M-043), and ADR-082 left taking a reaction back out
+because the empty `emoji` form is only recalled from Meta's prose documentation (M-185), which this
+project cannot read. This slice was to build both, through `POST /api/v1/messages` and the inbox,
+if Meta's OpenAPI description supports them.
+
+Decision:
+
+- **Research first, and it does not support either part (M-203).** Meta's repository holds one
+  description, `business-messaging-api_v23.0.yaml` (v24.0, v25.0 and v26.0 answered 404; the file is
+  byte-identical to the copy read for ADR-082). Its `InteractiveObject.type` lists `button`,
+  `call_permission_request`, `catalog_message`, `list`, `product`, `product_list` and `flow` only;
+  `ActionObject` has no branch with a display text and a link, and no example sends one. Its
+  outbound `ReactionMessage` gives `emoji` and `message_id` with no removal form and no example of
+  one; a schema without `minLength` does not say what an empty emoji does. Its status webhook names
+  no message type, so it says nothing about either kind's statuses. Building a `cta` type would mean
+  choosing Meta's type name, action name, parameter names, URL rules and header options from memory,
+  and sending an empty emoji would rely on behaviour no readable source gives, which the project's
+  rules forbid. So neither is built.
+- **What a caller gets stays honest.** `POST /messages` keeps refusing any call-to-action type
+  (`cta_url`, `cta`, `call_to_action`, `url_button`, a bare `interactive`) as an unknown `type`
+  (422 `validation_failed`, path `type`, never sent as a template), and a reaction whose `emoji` is
+  empty, blank, null, missing, a lone joiner or variation selector, or that carries a remove flag
+  (422, path `emoji` or the unknown key; the schema stays strict). OpenAPI's description of the send
+  now says both are unavailable and why (an additive description change; no schema, field, status
+  or webhook changes). The inbox composer sends text, files and templates only (no buttons, lists or
+  reactions), so nothing is added there either.
+- **No migration (0322 unused), no setting, no permission or scope change.**
+- **Pinned by unit tests** so a partial build cannot slip in unnoticed: each call-to-action name
+  refused by its field before anything is read, no `cta_url` in the OpenAPI document, and every
+  removal form refused by the schema and by `apiSendMessage`.
+
+Not built: call-to-action URL button messages (API, inbox, storage, rendering, export) and taking
+a reaction back (API, stored state, inbox), both until a readable Meta source (a newer OpenAPI
+description, an official SDK or sample) gives their shape; M-203 records what to look for. A
+customer's reaction webhook that carries no `emoji` at all is already stored with the preview
+"Reaction removed" (`meta-webhook.ts`); that reading is kept as it was, and this research neither
+confirms nor refutes it.
+
+## ADR-413 Store follow-ups per shipment (P4-06f) (2026-10-21)
+
+Context: an order message rule (ADR-048) fires at most once per order and event, so an order
+shipped in three parcels got one "Order shipped" message, at the first, with the tracking of
+whichever shipment last had one, and a tracking number added or corrected later sent nothing.
+BACKLOG P4-06f listed "messages per shipment or on tracking changes" as not built. Shopify gives
+each shipment as a fulfillment with its own id, statuses, times and tracking (research SH-045 to
+SH-047), already read with every order (`Order.fulfillments`, `read_orders`), and has webhooks for
+fulfillments that need a scope HyFib did not ask for (SH-044). WooCommerce core has no shipments:
+its tracking comes from extensions, and its own Order Fulfillments feature is off by default with
+no setting to turn it on (WC-022, WC-024).
+
+Decision:
+
+- **Two events, about a shipment.** `shipment_created` ("Shipment sent") fires once for each
+  shipment HyFib sees for the first time, dated when Shopify created it; `tracking_updated`
+  ("Tracking updated") fires once for each tracking a shipment changes to that HyFib had not seen
+  for that shipment, dated by the shipment's `updatedAt` ("when the fulfillment was last modified",
+  SH-045). Shopify only (`eventAvailable`); a WooCommerce store's page says why not. A shipment is
+  a fulfillment that is not `CANCELLED`, `ERROR` or `FAILURE` (nor displayed `CANCELED` or
+  `FAILURE`), the same rule as "Order shipped" (SH-030). Both follow ADR-048's rules unchanged:
+  nothing about what happened before the rule was switched on (from its second), test orders
+  (unless allowed) and events first seen over 48 hours late recorded as skipped, a delay of 0 to 24
+  hours, the store's sending hours, and every send-time check again (store, opt-in, plan, rule,
+  order, number, template, variables, suppression, erasure, opt-out, marketing opt-in and cap).
+  Nothing for a shipment first seen cancelled or failed, nor for a cancelled order. "Order
+  shipped" is kept as it was; the page says to switch on one of the two, since both on gives the
+  first shipment two messages (not suppressed automatically: that would add a skip reason to
+  `store_order.message_skipped`, whose meaning ADR-354 fixed).
+- **What counts as a tracking change.** A shipment's tracking is its first tracking entry's number
+  and link (Shopify allows several; the first is what the order's copy already used). It is
+  identified by a digest (`shipmentTrackingKey`: SHA-256 of the number, upper case with spaces
+  collapsed, and the link as `URL` gives it); the carrier's name is not part of it, so a new carrier
+  name alone is no change, and an empty tracking is none. A shipment seen for the first time
+  remembers its tracking without it counting as a change (its "Shipment sent" message carries it);
+  after that, a tracking not remembered is a change, numbered by its place (`nextTrackingKeys`), so
+  going back to a number the shipment had before sends nothing. At most ten trackings are
+  remembered per shipment (`trackingKeysPerShipment`); an eleventh sends nothing. A quick
+  correction gives the customer the newest values once, whichever message it lands on
+  (`trackingUpdateDecision`): a "Tracking updated" message goes only while its tracking is still
+  the shipment's current one (a newer one, or a return to one the customer already had, skips it
+  as `tracking_replaced`); it waits five minutes past a "Shipment sent" message of the shipment
+  that is still waiting, because that message carries whatever tracking is current when it goes;
+  and a sent "Shipment sent" records the tracking it carried (`tracking_revision`, its place among
+  the remembered ones), so an update for that tracking or an earlier one is skipped
+  (`tracking_already_sent`). Only a queued template carries the shipment's tracking: a "Shipment
+  sent" rule that starts an automation records none, and never stops an update (Codex's review of
+  PR #107 found that an automation start first counted as carrying it, which skipped updates no
+  message had carried).
+- **One message per shipment and key, in the database.** Migration 0323 adds
+  `app.commerce_store_shipments` (one row per Shopify fulfillment and store, under its order: the
+  statuses as status words, `failed`, the times, the first tracking entry, and `tracking_keys`, the
+  digests, at most ten, checked hex) and gives store messages `shipment_id` and `dedupe_key`
+  (`created` or `tracking:<n>`), unique per `(tenant_id, shipment_id, event, dedupe_key)` through
+  an index migration 0328 builds `CONCURRENTLY` (a unique constraint added in 0323 would have held
+  `ACCESS EXCLUSIVE` on the table, reads included, for the whole build).
+  Shipment messages name the shipment, not the order (`num_nonnulls(order_id, checkout_id,
+shipment_id) = 1`): the old unique key of one message per order and event stays untouched, so
+  the migration is expand only and a server of the release before never meets a second message per
+  order and event. The order read saves each shipment in its own transaction with the order,
+  never backwards (an older `updatedAt` is ignored), after locking the copies it holds, and records
+  the messages with `ON CONFLICT DO NOTHING` on the new key: a fulfillment webhook delivered twice
+  (the second is a duplicate by its delivery id), delivered again under another id, or read by the
+  webhook and the transit check at once still gives one message per key. Whether a row was new is
+  read from the upsert itself (`xmax = 0`), so the losing reader of a race never calls it new.
+- **Variables.** The rule editor's mapping is ADR-048's: the order's fields with fallbacks or fixed
+  text. For a shipment message the carrier, tracking number and tracking link are that shipment's
+  own (`processStoreMessage`), each only as Shopify returns it (HyFib never builds a link, SH-047);
+  a missing one uses the variable's fallback or the message is skipped (`missing_variable`), as
+  for missing order data. The message keeps the shipment's id with the order's.
+- **Shipment webhooks, asked for and rolled out safely.** Every authorization now asks for
+  `read_fulfillments` too (`shopifyScopesFor`); it is not required (a grant without it connects,
+  `SHOPIFY_SCOPES` stays the connector's own two). When a store's granted scopes include it or
+  `read_marketplace_orders` (`hasShipmentAccess`, SH-044), the webhook check subscribes
+  `FULFILLMENTS_CREATE` and `FULFILLMENTS_UPDATE` with `includeFields` `id`, `order_id`,
+  `updated_at`; a delivery only signals a read of the order its `order_id` names (`fulfillmentOrderId`;
+  `order_id` is the only part of the body used, and a body without a usable one is answered 200
+  and logged as `ignored_no_order`: its shape is unconfirmed (SH-048), and a 400 would count as a
+  failed delivery, after enough of which Shopify deletes the subscription, SH-025). The same
+  six-hourly check that re-creates lost subscriptions brings older stores up to date: it creates
+  only topics missing for HyFib's address, so running it again never subscribes twice, and a
+  shipment topic Shopify refuses leaves a reason on the store (`webhook_error`) instead of failing
+  its sync. How Shopify refuses one is unconfirmed (research §5), so every shape counts: `userErrors`,
+  an answer naming no created subscription (as when the payload is withheld with `ACCESS_DENIED`
+  beside the data), and `ACCESS_DENIED` without data for a shipment topic. A store connected before this release has no `read_fulfillments`, which only Shopify's
+  approval can add (SH-042): its Order messages page offers "Allow shipment updates in Shopify"
+  (`startShipmentAccess`, `commerce.manage`), the customer-access handshake of ADR-049 for the same
+  scopes plus `read_fulfillments` (and `read_customers` only if it was asked for before); after the
+  worker exchanges the approval it checks webhooks in the same run. Until then shipments are read
+  with the order: by an order's own webhooks, the hourly read and the transit check, which now
+  reads orders in transit again every three hours while a delivered or shipment rule is on (a
+  later shipment of a partly shipped order, or a new tracking that changes no order, SH-034). An
+  approval that does not grant a scope says which (`accessShortfall`: customers only when asked for).
+  Audited as `commerce.store_shipment_access_requested` and `..._approved`.
+- **Automations.** A shipment rule may start a published automation instead (ADR-050's path is
+  generic): the run keeps the shipment's order and its event (`store_event`, check widened). Its
+  `{{order.tracking_*}}` placeholders read the order's copy, which holds the latest shipment's
+  tracking, not necessarily the one that started the run, and only when a step runs, so HyFib
+  cannot know which tracking, if any, a run sent.
+- **Reports and privacy.** The store's report and the order page list shipment messages with their
+  order. A tracking number and its link go with the customer's details: whenever an order is
+  written as redacted (erasure as `w360_definer`, Shopify's `customers/redact`, or a read of an
+  order whose number was erased) a trigger clears its shipments' tracking and digests at once, and
+  later reads keep them empty. Shipment messages send no outgoing webhook event: the
+  `store_order.message_*` triggers watch messages with an order, so the five order events of
+  ADR-352 keep their meaning; their skip reasons `shipment_cancelled` and `tracking_replaced` are
+  never in those events. No public API or OpenAPI change. The company export has the shipments
+  without their digests, and company deletion deletes them (a step between the store messages and
+  the orders). `w360_definer`'s policies on the table reach only the company an erasure runs for
+  (`app.current_tenant_id()`) or the one being deleted.
+
+Not built: WooCommerce shipments (core has none a merchant can turn on, WC-024, and extensions are
+not read); tracking from a shipment's other tracking entries; messages for each delivery event of
+a shipment (in transit, out for delivery, delivered per shipment: `fulfillment_events/create` needs
+`read_fulfillments` and its payload was not read); outgoing webhook events for shipment messages;
+shipment tracking in automation placeholders; suppressing "Order shipped" when "Shipment sent" is
+on; validating the widened checks of `commerce_store_messages` and `automation_runs` (left NOT
+VALID, see 0323); and any check against a real Shopify store (the stand-in only): the body of a
+fulfillment delivery, the order of an order's fulfillments past ten and links Shopify builds itself
+are unconfirmed (research §5).
+
+Review (before merge): an independent review found the isolation design, the dedupe and the
+redaction trigger sound, and one High issue: the new table had no company deletion step or
+deletion policies, so deleting a company would fail on it (the step, grants and tenant-limited
+policies were added, and the erasure policy, at first open to every company's rows for the
+definer, was limited to the erased contact's company). Medium issues: a tracking that arrived while
+"Shipment sent" waited went out twice, in that message and in its own update (now the update waits
+for it and is skipped once it carried the tracking); the unique constraint held `ACCESS EXCLUSIVE`
+for its whole build (now a concurrent index in 0328, and DEPLOYMENT states 0323's locks exactly);
+and only `userErrors` counted as a refused topic (a withheld answer was taken for a success and
+`ACCESS_DENIED` failed the check; both now count, and the stand-in models them). Low issues: a body
+without `order_id` got a 400 (now 200); a return to an earlier tracking still sent a waiting
+update (now skipped); DEPLOYMENT now waits for both rollouts before shipment rules go on; the
+research cites both library versions read; and the rule editor notes that automations read the
+order's latest tracking. All were fixed.
+
+## ADR-414 Automations started by replies to a campaign (P4-01) (2026-10-21)
+
+Context: P4-01's Remaining listed "starting runs from campaigns". A company that sends a campaign
+with quick-reply buttons ("Interested", "Not now") wants the customers who tap one to get a
+follow-up at once: a question, a hand-off to sales, a tag. The only way was a keyword automation on
+the button's words, which also fired for anyone who typed them, could not tell one campaign from
+another, and lost to nothing more specific. HyFib already stores what it needs: each inbound
+message keeps the WAMID it quotes or whose button it taps (`messages.context_external_id`, from
+`context.id`: research M-178 for quick-reply taps, which Meta's description requires, and M-186
+for a quoting reply, which pywa reads and the spec does not describe), a tap's button text
+(`content.text`, `button.text` in M-178), and each campaign recipient keeps the message it was sent
+(`campaign_recipients.message_id`, unique per company since 0006) and its variant (0317, ADR-405
+and ADR-410). No Meta field is used that was not parsed before, so no research row is added.
+
+Decision:
+
+- **A trigger, `campaign_reply`.** "A customer replies to a campaign message": any campaign
+  (`campaignId` null) or one chosen campaign; any reply or, when `button` is given, only a tap on a
+  quick-reply button with that text (at most 25 characters, `TEMPLATE_LIMITS.buttonText`, trimmed
+  with runs of spaces joined). It is a message trigger like the others: business hours, the
+  cooldown per conversation, the automation's number, unassigned conversations without an active
+  run, 10 runs per conversation per hour and the plan's runs all apply unchanged. A button is
+  compared apart from case, surrounding spaces and runs of spaces, after Unicode NFC
+  (`campaignButtonKey`), so an emoji or punctuation counts (a keyword's normalisation would drop
+  them and could match "Yes!" to "Yes"). A quoting reply has no button, so it never starts an
+  automation that names one, whatever its text says.
+- **What counts as a reply to a campaign.** The message has a `context.id`; an outbound message of
+  the same number has that WAMID (`messages_external_uq`); a campaign recipient row names that
+  message (`campaign_recipients_message_uq`), is of the same contact and was queued at most 72
+  hours before the customer sent the reply (Meta's timestamp, compared at second precision as
+  attribution does). Two unique-index lookups, made only when an active automation of the company
+  starts from replies to a campaign and the message names one (`findCampaignReply`; an integration
+  test checks the plan uses the index and no sequential scan). A member's, a bot's, a key's or an
+  order message's template is not a campaign's: it has no recipient row. Another contact's message
+  named by its WAMID, or one of another number, is not found. CSAT and cash on delivery taps are
+  taken by their own features first, as before, and start no automation.
+- **Old campaigns: 72 hours after queueing.** `CAMPAIGN_REPLY_HOURS` equals campaign attribution's
+  window (`ATTRIBUTION_WINDOW_HOURS`, a unit test keeps them equal), so a reply older than the
+  campaign's results would count never starts its automation either. They share the bound, not the
+  rule: attribution is last touch (the most recent campaign message to the contact on that number
+  within 72 hours, delivered, counted once), while the trigger follows the message the reply quotes
+  or whose button it taps. A customer sent Diwali on Monday and Winter on Tuesday who taps a
+  Diwali button on Wednesday starts the Diwali automation, while attribution counts the reply for
+  Winter. Within the bound, a tap is almost always a direct answer to the offer; a tap days
+  later on an old message, or a quote while scrolling back, is more likely about something else, and
+  the follow-up (built for that campaign's offer, perhaps ended) would then mislead. The customer
+  service window a reply opens is 24 hours from the reply either way, so the bound does not limit
+  what the run may send. A later reply starts what any other message would (a keyword, any message);
+  nothing is refused. Queueing time rather than delivery time: it is recorded for every recipient
+  sent, whereas delivery receipts can be missing.
+- **Ranking (ADR-240's extended).** Every campaign reply outranks every keyword: WhatsApp ties the
+  reply to a message the business sent, which says more about what the customer answers than
+  matching their words, and a quick-reply tap's text is the template's, not the customer's, so a
+  keyword automation matching it ("yes") would be an accident. Among campaign replies the chosen
+  campaign and button come first, then the chosen campaign, then any campaign with the button, then
+  any campaign: a chosen campaign is more specific than a button text, which campaigns often share
+  ("Yes"). Then exact keyword, contained keyword, keyword with typos, new conversation, any message,
+  as before (`TriggerRank` 0 to 8; `TRIGGER_TYPE_OF_RANK` records each run's trigger). Ties go to
+  the name, as before, and exactly one automation starts per message: dispatch runs under the
+  conversation's lock and one active run per conversation is a unique index, so a tap and a quoting
+  reply arriving together, or the same webhook twice, start one run (integration test). Opt-out
+  keywords still stop and never start runs, before any trigger.
+- **What the run keeps.** `app.automation_run_campaigns` (migration 0324), one row per run,
+  written with it: the campaign, the variant the recipient row recorded, and the button's text as
+  WhatsApp sent it, trimmed and clipped to 60 characters (null for a quoting reply). Insert-only,
+  deleted with its run. A table of its own rather than columns on `app.automation_runs`, so that
+  table's guard function (0311) and its lock are untouched; the runs' trigger check is replaced
+  `NOT VALID` (every stored row passed the check it replaces), and no index is built on a large
+  table. Steps read it as `{{campaign.name}}` (the name as it is when the step runs, as order fields
+  are read), `{{campaign.variant}}` and `{{campaign.button}}` (empty for a quoting reply), only in
+  automations started this way (`checkGraph` refuses them elsewhere, naming the rule), in texts,
+  template variables and web requests alike.
+- **Pages and permissions.** The editor offers "Any campaign" and the company's 200 most recent
+  campaigns with their status (and the chosen one when older), then, for a chosen campaign, "Any
+  reply" or each quick-reply button of its templates (every variant's); for any campaign, a text
+  field. Checks with the server's code: the chosen campaign must be the company's, and send from the
+  automation's number when both name one (an error: replies would never reach it); a button none of
+  its templates has is a warning (templates change at Meta). Saving, publishing and testing such an
+  automation need `campaigns.read` besides the automations permissions; every role that holds those
+  holds it today, so nobody loses anything, and the editor lists no campaign to a member without it.
+  Saving refuses another company's campaign id as an unknown one. A member without the permission
+  never reads a campaign's name: the editor's checks then leave the campaign out (as the browser
+  does without the list), and publishing and testing check the permission before the draft's own
+  checks, whose messages name the campaign. The run's page says "A reply to
+  Diwali launch, variant B, tapping “Interested”." with a link to the campaign, the campaign only to
+  members with `campaigns.read` (others read that it was a reply to a campaign they cannot see),
+  the button only to members who can see the conversation, as the run's answers. A test run of a
+  draft that names a campaign acts as a reply to it with the trigger's button and no variant (no
+  campaign message was answered). The simulator answers as a reply to the chosen campaign (or
+  "Sample campaign"), variant A, with the trigger's button.
+- **Webhooks and API, additive.** `run.trigger` takes `campaign_reply` in `automation.run_started`,
+  `automation.run_ended` and `automation.run_step`, and the first two give `run.campaign` (id,
+  name when delivered, variant), null for every other run. The button is not given: like a
+  question's answer (ADR-326), it is the customer's reply. Endpoints' run trigger filters
+  (`runTriggers`, ADR-183) take `campaign_reply` (the database check now takes six, in migration 0327: a transaction of its own, since a run event's delivery reads the endpoints before the runs and 0324 locks the runs); a stored list
+  never held it, so an endpoint that chose some triggers keeps receiving exactly those, and one
+  that takes every run receives these too. OpenAPI and its schema tests follow. Automations
+  themselves are exposed through the API only for those started by the API (ADR-077), so no API
+  route changes.
+- **Rolling deploy.** Workers first, then web, and such automations published only after both;
+  before a worker rollback they are paused, since an older runner would send `{{campaign.*}}` as
+  written (DEPLOYMENT).
+
+Not built: starting runs when a campaign message is sent rather than answered; a trigger for
+replies to template messages that are not a campaign's (a key's send, an order message); a window
+other than 72 hours or chosen per automation; matching a quick-reply payload rather than its text;
+choosing several campaigns or buttons in one trigger; the button in webhooks; reading an inbound
+reply that arrives before the send worker records WhatsApp's acceptance of the campaign message
+(it names a WAMID not stored yet, so it starts what any other message would); any verification
+against Meta (the Graph stand-in only).
+
+## ADR-415 Stored company exports, kept encrypted in PostgreSQL for 7 days (P5-11) (2026-10-21)
+
+Context: Settings → Company data streams the company export (ADR-055) from one read-only
+transaction straight to the browser. For a large company the download can outlast a browser or
+proxy timeout, and a file that broke, or was lost afterwards, can only be fetched again by reading
+the whole company again. ADR-055 chose not to store it: "no object storage exists, and a stored copy
+of a whole company would be one more thing to protect and expire". P5-11 lists "stored exports" as
+remaining. HyFib still has no object storage (the `S3_*` settings are parsed by `s3ConfigFrom` and
+read by nothing; no S3 client is a dependency), so this slice stores the file where the data already
+is, and answers ADR-055's objection rather than setting it aside.
+
+Decision:
+
+- **Asking.** An owner (`tenant.export`, also while suspended, restricted or pending deletion, as
+  for the streamed export) with a sign-in in the last 15 minutes (ADR-056) presses "Prepare a stored
+  export". `requestStoredExport` records an `app.company_exports` row (`queued`), audits
+  `tenant.export_requested`, emails every owner and administrator and queues a signed
+  `company.export` job keyed by the export, in one transaction. Administrators hold no
+  `tenant.export`, as before: they are told, they cannot ask or download.
+- **The same export.** The run opens the company's read-only, repeatable-read snapshot and writes
+  exactly the streamed export's lines (`writeExportLines`, now shared by both: the same header,
+  tables, listed columns, exclusions and end line). Both stored-export tables are excluded from the
+  export with a reason (an export never holds another, and the audit log, which is exported,
+  records each request and download).
+- **Stored in PostgreSQL, sealed, in bounded parts.** The gzip output is cut into parts of 1 MiB of
+  compressed bytes (`CompressedParts`, which hands each part on before compressing more, so a run
+  holds about two parts in memory), each sealed with the keyring like every other value HyFib keeps
+  sealed (AES-256-GCM, associated data
+  `company-export-part:<company>:<export>:<attempt>:<seq>:<part id>`, so a part moved to another
+  company, export, run or position does not open) and inserted in its own short transaction into
+  `app.company_export_parts`. The sealed text is the keyring's base64url format (a third larger than
+  the bytes) so the keyring sweep re-seals parts like other sealed values (`company_export_part` in
+  `ops.sealed_value_keys`, migration 0325): an old key is removed only once no part uses it. Its
+  column is stored out of line uncompressed (`STORAGE EXTERNAL`: sealed bytes do not compress), so
+  the sweep's look at a value's first 40 characters reads one slice. The row records the size, the
+  SHA-256 of the whole file and the part count.
+- **Bounded per company: 512 MiB.** A file past 512 MiB compressed stops as soon as the next part
+  would pass it, keeps no part and fails with `too_large`, whose words (on the page and in the
+  owners' email) send the owner to the streamed export. A run deletes earlier runs' parts when it
+  claims the export (the export lock it holds proves they are dead), so an export holds one run's
+  parts. A company keeps one ready file: when a new export is ready, an older ready one is no longer
+  offered (not listed for download, refused when opened) and expires 30 minutes later
+  (`STORED_EXPORT_REPLACED_MINUTES`), so a download already under way can finish; the minute sweep
+  then deletes it. So a company holds normally 512 MiB, up to 1 GiB while a new one is written, and
+  at most 1.5 GiB in the 30 minutes after a replacement if a third is asked for meanwhile. Why 512 MiB: a
+  message line is a few hundred bytes of JSON that gzip shrinks several times, so 512 MiB holds
+  millions of messages, far beyond the companies whose streamed download a timeout cuts; a larger
+  bound would put gigabytes of write-ahead log and backup per request on the shared database for
+  the rare company that can still stream. The bound is a constant, as ADR-411's file limits are.
+- **ADR-055's objection, answered.** Protection: the copy is ciphertext at rest and in backups
+  (sealed with the deployment's keys, which the database never holds), in the company's own rows
+  under forced row level security; only an owner of that company who signed in recently can
+  download it, every download is audited (`tenant.export_downloaded`) and emailed to owners and
+  administrators, and no email carries a link that downloads (they link to Settings → Company data).
+  Expiry: 7 days after it is ready (a week covers a weekend and an owner who is away for days; more
+  would keep a whole-company copy longer than its purpose needs), or 30 minutes after a newer one is
+  ready; the minute sweep deletes the parts and records the export as `expired` with `deleted_at`.
+  Why the database is acceptable: the copy is bounded (512 MiB a company), short-lived (7 days),
+  encrypted, and of data the same database already holds in the clear to its runtime role; it adds
+  no new place holding company data, no new credentials and no new provider. Company deletion
+  removes it (`tenant.delete` steps 37 and 38, parts before exports). What remains true from ADR-055:
+  backups keep the ciphertext until they expire (DATA-RETENTION), as they keep every deleted row.
+- **One export of a company at a time, stored and streamed together.** The streamed export and the
+  stored run both read under the company's export lock (an advisory lock held for their snapshot
+  transaction), so no two exports of a company are ever read at once. A unique index allows one
+  stored export `queued` or `running` per company, so of several owners asking at once one is
+  recorded and the rest are refused (409). Asking takes the lock too, so it is refused while a
+  streamed export runs; the streamed export is refused while a stored export waits or is written
+  ("being prepared"). A run that meets the lock (a stream that started between the stored export's
+  request and its run) leaves the export queued and the minute sweep signals it again. The streamed
+  export itself is otherwise unchanged.
+- **Crashes never block for good.** A run claims the export (`attempts` + 1, `running`, a 5-minute
+  lease from the database's clock), renews the lease with every part and at least every minute,
+  and writes parts and finishes only while the export's `attempts` is still its own (a fencing
+  token: a run that lost its lease writes parts nobody reads and cannot mark the export ready; the
+  part key includes the attempt). A crashed run's lease runs out; the job's retry or the minute
+  sweep, which signals every waiting export and every running one whose lease ran out, starts a new
+  run, which deletes the earlier runs' parts and starts the file again. The
+  fourth start fails the export as `interrupted`; an export that could not start in 24 hours fails
+  as `timed_out`; an owner who stopped being one before the run fails it as `requester_not_allowed`.
+  A transient database error (a serialization failure or deadlock, a cancelled statement, the server
+  shutting down or out of connections, a connection error, the pool timing out:
+  `isTransientDatabaseError`) does not fail the export: the run throws it on, the job is retried, and
+  once the lease runs out the next run takes over (within the attempts limit); any other error fails
+  it as `error`.
+- **A bounded run, on its own pool.** A run's repeatable-read snapshot holds back vacuum across the
+  whole database (messages, pg-boss's tables) while it runs, so a run that passes 30 minutes
+  (`STORED_EXPORT_MAX_RUN_MINUTES`; a 512 MiB export reads and compresses in a few minutes) fails as
+  `timed_out`, checked as it writes (each page read is bounded by the 15-second statement timeout).
+  The `company.export` job expires after an hour, past the run's bound, so pg-boss does not start a
+  second run beside one still working. Runs use a pool of their own in the worker (four connections:
+  two runs at a time, a snapshot and a part each), so they never take the shared pool's connections
+  from other jobs. DEPLOYMENT and RUNBOOKS say what to watch and how to stop a run.
+- **Limits per company.** Asking: 3 at once, then one every 8 hours (`STORED_EXPORT_REQUEST_LIMIT`);
+  each request can write up to 512 MiB into the database and emails every owner and administrator,
+  so a loop, an owner's or a stolen fresh session's, is bounded, while an owner who needs a new copy
+  or asks again after a failure has room. Downloading: 20 at once, then one every 72 minutes
+  (`STORED_EXPORT_DOWNLOAD_LIMIT`), enough for several owners and retried downloads the same day,
+  while bounding how often each part is opened and how often a whole-company copy can leave. Both
+  are token buckets in `ops.rate_limit_buckets` (as the public API's), taken after the permission and
+  step-up checks; a refusal is 429 `rate_limited` and writes, audits and emails nothing.
+- **Failures recorded and visible, with no data.** A failure stores a reason code and, for a
+  database error, its SQLSTATE only (ADR-129), deletes the export's parts, emails the owners and
+  administrators the reason in words and shows it on the page; the error itself goes to the
+  worker's log. The owner can ask again at once.
+- **Downloading.** `GET /c/{slug}/settings/data/exports/{id}` re-checks the session, the permission
+  and the step-up itself, finds the export in the company's scope only (another company's id, an
+  expired, failed or unknown one: 404), audits and emails, then streams the parts through the app,
+  each read and opened in its own short read-only transaction, checking each part's size and, before
+  the last part is sent, the whole file's size and SHA-256 against the record: a mismatch stops the
+  download with an error, so a client is left with an incomplete file, never a complete wrong one.
+  The page shows the SHA-256 to compare. The link carries no `download` attribute, so a refusal (a
+  sign-in window that lapsed) is shown, not saved as a file. No storage-signed or bearer link exists.
+- **Migration 0325.** `app.company_exports` and `app.company_export_parts`: `tenant_id NOT NULL`,
+  `UNIQUE (tenant_id, id)`, composite foreign keys (the requester's membership, the export),
+  `ops.apply_tenant_rls`, the runtime role granted select and insert and only the state columns'
+  updates (no delete of an export record; parts are inserted, deleted and re-sealed), a check that
+  each status carries exactly its columns, the deletion steps and policies, the sweep's
+  `ops.company_exports_due` (SECURITY DEFINER, search path pinned, ids only, executable by the
+  runtime role only) and `ops.sealed_value_keys` again with the parts.
+
+Not built: object storage (a separate decision), formats other than JSON Lines, choosing tables,
+more than one ready file per company, a size estimate before the run (the size is known only as the
+file is written; the run stops at the bound), and resuming a run from its last part (a takeover
+starts the file again).
+
+Review (before merge): an independent review found no High issue. Three Medium issues: a crashed
+run's parts stayed until the export was ready or failed, so three killed runs could leave about
+2 GiB (a new run now deletes earlier runs' parts when it claims the export, and the bounds above
+are restated); asking and downloading had no limit (now 3 requests and 20 downloads a company a
+day); and a run held a connection of the shared pool for its whole length, failed the export on any
+error, transient ones included, and held back vacuum for as long as it ran (runs now have their own
+pool, transient errors are left to the lease, a run is bounded to 30 minutes, and DEPLOYMENT and
+RUNBOOKS say what to watch). Low issues: the file's SHA-256 was checked after its last byte was
+sent (now before the last part); a part's associated data did not name its export, run or position
+(it does now, and the keyring sweep reads them); a newer file deleted the older one under a download
+(the older now expires 30 minutes later); the job's expiry is now stated against the run's bound; the
+link's `download` attribute saved a refusal as a file (removed); a failed export sweep skipped the
+rest of the minute's billing sweep (the rest now runs, and the failure is logged and thrown at the
+end); and the sweep function had no specific grant check (added to the isolation suite). All were
+fixed.
+
+## ADR-416 A hosted MCP server over the public API (W-141, P5-08) (2026-10-21)
+
+Context: AI assistants that speak the Model Context Protocol can call tools a server lists. WATI
+hosts such a server (benchmark rows W-141 and W-142). HyFib's public API (ADR-052) already has
+everything such tools need: company keys with scopes, the plan's scopes and monthly requests,
+rate limits, idempotent sends with the 24-hour window and consent checks, and a request log. The
+matrix row W-141 asked for scoped, audited tools over it. The specification's latest revision,
+2026-07-28 (docs/research/mcp.md MCP-001), removed the `initialize` handshake, `ping`, sessions and
+the GET stream that the earlier revisions have, and lets a server serve both kinds of client
+(MCP-004).
+
+Decision:
+
+- **One endpoint, the stateless JSON subset of Streamable HTTP.** `POST /api/mcp` takes one
+  JSON-RPC message and answers one JSON object, or 202 with no body for a notification (MCP-010);
+  never an SSE stream. GET, DELETE and OPTIONS get 405 with `Allow: POST` (MCP-011); no session id
+  is minted or read. A batch (a JSON array) is refused with 400 and -32600, since no revision served
+  allows one (MCP-015), and so is a JSON-RPC response, since the server sends no requests.
+- **Dual-era, served statelessly** (`api/mcp-protocol.ts`). A request whose `_meta` carries
+  `io.modelcontextprotocol/protocolVersion` is served as 2026-07-28: the `MCP-Protocol-Version`
+  header must match it, `Mcp-Method` must equal the method exactly and `Mcp-Name` (for
+  `tools/call`, its Base64 sentinel decoded: the sentinel is defined for `Mcp-Name` only) the
+  tool's name, else 400 with -32020 (MCP-012, MCP-013); another version gets 400 with
+  -32022 listing 2026-07-28, 2025-11-25 and 2025-06-18; the client capabilities are required
+  (-32602, MCP-007); results carry `resultType: "complete"` and the server's identity in `_meta`;
+  `server/discover`, `tools/list` and `tools/call` are served, and anything else is 404 with -32601.
+  An `initialize` request is answered as 2025-11-25 or 2025-06-18 (the version asked when it is one
+  of those, else 2025-11-25, MCP-005), and later legacy requests (`ping`, `tools/list`,
+  `tools/call`) take their version from the header alone, as no session holds it: without the
+  header a server would assume 2025-03-26, which is not served, so the request is refused with 400
+  (MCP-012). Results of legacy requests have the legacy shapes (no `resultType`, `ttlMs` or
+  `cacheScope`). The tool list is the same for every key, in a fixed order, `cacheScope` private
+  with `ttlMs` of five minutes (MCP-009). No SDK: the subset is small and has to run inside the
+  REST pipeline below; the SDK was not installed (MCP-021).
+- **The REST API's pipeline, not a fork.** After the Origin check, the route hands the request to
+  `handleApiRequest`, the function every REST route uses: the bearer key and its addresses, failed
+  authentication per address, the key's and the company's rate limits, the plan's monthly requests
+  and the key's own limit, the plan's scopes, the JSON body within 64 KB and the request log.
+  Three additive options let it carry another protocol: `errorBody`, so its refusals keep their
+  status, headers and message but are written as a JSON-RPC error whose code is the HTTP status
+  (or -32700 for a body that is not JSON) and whose data is the REST code, reason and request id,
+  with the request's id once the body was read and its id can be (MCP-006, MCP-010); `nulCheck:
+false`, because the NUL refusal moves into the tools' argument schemas (`parseInput` refuses the
+  character naming its path, a tool error the model can correct) and nothing else of a message is
+  stored; and a `json` result with fields for the log. Every authenticated POST counts as one request, so a tool
+  call is accounted as exactly the one REST call it mirrors, and `initialize`, its notification and
+  `tools/list` count too (a client's connection costs about three requests). The log line is the
+  REST one (`api request`, path `/api/mcp`) with `mcp`: the method, the version, the tool, the REST
+  call it mirrors (`mirrors`), the status that call would have answered (`mirroredStatus`, 500
+  for an unexpected failure, which operators alert on as the HTTP line says 200) and whether a send
+  was replayed; the method is logged at most 128 characters long. Unauthenticated requests, other origins and other methods are refused before anything
+  is counted, as for REST.
+- **Nine tools on the domain services** (`api/mcp-tools.ts`, `api/mcp-model.ts`): search_contacts
+  (`GET /contacts`), get_contact, list_conversations, list_conversation_messages, list_templates
+  (approved, sendable), list_campaigns, get_campaign, send_text_reply and send_template (both
+  `POST /messages`). Each calls the service its REST call calls, with the same input, never HTTP
+  to HyFib. A call checks the scopes first (`assertAnyScope`, any one of the tool's: send_template
+  takes `messages.send` or `messages.send_marketing`, the template's category deciding in the
+  service as for REST), then the arguments against the tool's schema, then runs the service, which
+  checks the scope, the company's status and its input again. Input schemas are JSON Schema 2020-12
+  generated from the REST API's zod schemas (`z.toJSONSchema`, input side); the id tools take
+  `contactId`, `conversationId` or `campaignId`, and every schema is closed to unknown arguments,
+  so a `tenantId` argument is refused, never read. Tenant scope comes only from the verified key's
+  context, bound into the runner before any message is read.
+- **Results and errors.** A result is the REST response body as JSON text content; a send's also
+  says `replayed`. Everything the REST call refuses is a tool error (`isError: true`) whose text is
+  the REST error body with its status, code, message, reason and field issues, so the model can
+  correct itself (MCP-008), except that arguments failing the tool's schema are -32602 for
+  2025-06-18, whose tools page lists invalid arguments among protocol errors (the move to tool
+  errors came in 2025-11-25); an unknown tool or malformed params are JSON-RPC errors; an unexpected
+  error is -32603 with the REST API's generic message and the request id only, its cause logged.
+  Nothing secret is in a result: the bodies are the public API's, which hold no token or secret.
+- **Sends, idempotent as REST's.** The send tools require an `idempotencyKey` argument under the
+  header's rule (1 to 255 visible ASCII characters) and use the REST idempotency store, per key
+  for 24 hours: the same key and arguments (in any order: the hash is over canonical JSON) return
+  the first answer without sending, other arguments are refused with `idempotency_key_reused`. The
+  hash names the tool, so a key used by a REST request is never replayed by a tool send or the
+  other way round (refused instead). The 24-hour window, consent, the frequency cap and template
+  checks are the services' own. Sends are recorded as REST sends are, as the key's (`api_key_id`,
+  sender `api`); reads write no audit rows, as REST reads do not.
+- **Untrusted text.** Each tool returning customer-written text (message text, names, notes,
+  fields) says in its description that it is untrusted and never to be followed as instructions,
+  and so do the server's instructions, which also ask for the user's confirmation before a send
+  (T365, MCP-017). The send tools are hinted as not read-only and open-world, the reads as
+  read-only; hints are not a control.
+- **Origin check, no CORS.** Every method checks `Origin` first (MCP-014): none, or exactly the
+  app's own origin; anything else gets 403 with a JSON-RPC error and is neither counted nor logged
+  as an API request. The route sends no CORS headers, and its OPTIONS answers 405, so no browser
+  preflight succeeds.
+- **Authorization by API key.** The specification makes its OAuth framework a SHOULD for HTTP
+  servers and allows custom strategies (MCP-016); the key as `Authorization: Bearer` is HyFib's
+  strategy, exactly as for REST. Settings → API keys shows the endpoint, a table of the tools with
+  the scope each needs, a client configuration with a placeholder instead of a key (its format
+  varies by client, MCP-022) and a `curl` of `tools/list`, and recommends a key with read scopes
+  only unless sending is wanted; it says when the plan leaves the API out (the endpoint then
+  refuses requests) and marks tools whose scopes the plan leaves out.
+
+Not built: OAuth (authorization server discovery, protected resource metadata, client
+registration) and therefore the connectors of assistants that require it; SSE response streams,
+progress notifications and `subscriptions/listen`; resources, prompts, completions, logging and
+the tasks extension; `structuredContent` and output schemas; tools beyond the nine (contact
+writes, conversation changes, other message types, campaign changes, the rest of the API); a
+tool list narrowed to the key's scopes; the 2025-03-26 and 2024-11-05 revisions (with batches);
+sessions; a separate rate limit or quota for MCP; and verification with a real assistant client.
+
+Review (before merge): an independent review checked the specification claims against the
+specification's files and found no High issue. One Medium: `Mcp-Method` was compared after
+Base64-sentinel decoding, which the specification defines for `Mcp-Name` and `Mcp-Param-*` only,
+so an encoded method was accepted (now compared exactly, unsafe characters refused, unit test
+added). Low issues: a body that was not JSON got code 400 instead of -32700; errors after the body
+was read had no id, and the NUL refusal of the whole body was a transport error rather than a tool
+error (now `nulCheck: false` and the tools' schemas); the method was logged whole; an unexpected
+tool failure needed a field to alert on (`mcp.mirroredStatus` 500, documented in DEPLOYMENT and
+RUNBOOKS); 2025-06-18's invalid arguments must be protocol errors (now -32602 for that revision,
+and MCP-008 corrected); PROGRESS overstated what the integration tests showed; the settings card
+ignored the plan; and a token-shaped literal in a unit test (now a token generated at run time).
+All were fixed.

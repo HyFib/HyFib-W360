@@ -1,7 +1,11 @@
 'use client';
 import { useState } from 'react';
 import { Field, Input } from '@w360/ui';
-import { cancelCompanyDeletionAction, requestCompanyDeletionAction } from '@/app/actions/tenancy';
+import {
+  cancelCompanyDeletionAction,
+  requestCompanyDeletionAction,
+  requestStoredExportAction,
+} from '@/app/actions/tenancy';
 import { ActionFailure, type ActionFailureState } from '@/components/action-failure';
 import { ClientButton, ClientForm } from '@/components/client-form';
 
@@ -63,6 +67,29 @@ export function CancelDeletionButton({ slug }: { slug: string }) {
       <div>
         <ClientButton onClick={cancel} disabled={busy}>
           {busy ? 'Cancelling…' : 'Cancel the deletion'}
+        </ClientButton>
+      </div>
+    </div>
+  );
+}
+
+/** Asks for a stored export, which the worker prepares (ADR-415). */
+export function RequestStoredExportButton({ slug, pending }: { slug: string; pending: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<ActionFailureState | null>(null);
+  async function request() {
+    setBusy(true);
+    setError(null);
+    const result = await requestStoredExportAction(slug);
+    setBusy(false);
+    if (!result.ok) setError(result);
+  }
+  return (
+    <div className="grid gap-2">
+      <ActionFailure failure={error} />
+      <div>
+        <ClientButton onClick={request} disabled={busy || pending} variant="outline">
+          {busy ? 'Asking…' : 'Prepare a stored export'}
         </ClientButton>
       </div>
     </div>

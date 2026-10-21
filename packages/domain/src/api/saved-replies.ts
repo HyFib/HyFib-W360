@@ -10,6 +10,11 @@ import {
   writeDeleteSavedReply,
   writeUpdateSavedReply,
 } from '../inbox/saved-replies';
+import {
+  listSavedReplyAttachments,
+  lockSavedReplies,
+  type SavedReplyAttachmentView,
+} from '../inbox/saved-reply-files';
 import type { OutboundDeps } from '../messaging/outbound';
 import { parseInput } from '../validation';
 import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
@@ -42,6 +47,37 @@ export interface ApiSavedReply {
   updatedByApiKeyId: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * The file it carries (ADR-411), which the reply box attaches when a member inserts it, or null:
+   * its details only, never its content or where it is kept.
+   */
+  attachment: ApiSavedReplyAttachment | null;
+}
+
+/** A saved reply's file as the API describes it (ADR-411). */
+export interface ApiSavedReplyAttachment {
+  id: string;
+  type: 'image' | 'video' | 'audio' | 'document';
+  mimeType: string;
+  filename: string;
+  sizeBytes: number;
+  /** Whether the reply's text goes as the file's caption (not for a recording). */
+  caption: boolean;
+}
+
+/** A saved reply's file as the API gives it. */
+export function toApiSavedReplyAttachment(
+  view: SavedReplyAttachmentView | null | undefined,
+): ApiSavedReplyAttachment | null {
+  if (!view) return null;
+  return {
+    id: view.fileId,
+    type: view.kind,
+    mimeType: view.mimeType,
+    filename: view.filename,
+    sizeBytes: view.sizeBytes,
+    caption: view.kind !== 'audio',
+  };
 }
 
 /** What `POST /saved-replies` takes: a reply as members add one in Settings. */
@@ -71,17 +107,20 @@ const replyColumns = {
  * A saved reply row as the API gives it. The last editor is the member when one is named, otherwise
  * the key: a server from before ADR-291 names its member and leaves the key's column as it was.
  */
-export function toApiSavedReply(row: {
-  id: string;
-  shortcut: string;
-  title: string;
-  body: string;
-  createdByApiKeyId: string | null;
-  updatedByMembershipId: string | null;
-  updatedByApiKeyId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}): ApiSavedReply {
+export function toApiSavedReply(
+  row: {
+    id: string;
+    shortcut: string;
+    title: string;
+    body: string;
+    createdByApiKeyId: string | null;
+    updatedByMembershipId: string | null;
+    updatedByApiKeyId: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  },
+  attachment: SavedReplyAttachmentView | null = null,
+): ApiSavedReply {
   return {
     id: row.id,
     shortcut: row.shortcut,
@@ -93,6 +132,7 @@ export function toApiSavedReply(row: {
     updatedByApiKeyId: row.updatedByMembershipId ? null : row.updatedByApiKeyId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    attachment: toApiSavedReplyAttachment(attachment),
   };
 }
 
@@ -102,7 +142,8 @@ async function readApiSavedReply(tx: Tx, tenantId: string, id: string): Promise<
     .from(savedReplies)
     .where(and(eq(savedReplies.tenantId, tenantId), eq(savedReplies.id, id)));
   if (!row) throw notFound('Saved reply');
-  return toApiSavedReply(row);
+  const files = await listSavedReplyAttachments(tx, tenantId, [id]);
+  return toApiSavedReply(row, files.get(row.id) ?? null);
 }
 
 const isUuid = (id: string) => z.uuid().safeParse(id).success;
@@ -125,7 +166,8 @@ export async function apiListSavedReplies(
         .where(eq(savedReplies.tenantId, ctx.tenant.id))
         .orderBy(asc(savedReplies.shortcut))
         .limit(MAX_SAVED_REPLIES);
-      return { data: rows.map(toApiSavedReply) };
+      const files = await listSavedReplyAttachments(tx, ctx.tenant.id);
+      return { data: rows.map((row) => toApiSavedReply(row, files.get(row.id) ?? null)) };
     },
     { accessMode: 'read only' },
   );
@@ -194,6 +236,8 @@ export async function apiUpdateSavedReply(
   const change = parseInput(apiUpdateSavedReplySchema, input);
   try {
     return await deps.db.run(ctx.scope, async (tx) => {
+      // The company's lock before the reply's row lock, as every saved-reply write takes them.
+      await lockSavedReplies(tx, ctx.tenant.id);
       const [current] = await tx
         .select({
           shortcut: savedReplies.shortcut,

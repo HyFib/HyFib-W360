@@ -11,6 +11,7 @@ import {
   RESEAL_SKIP_LIMIT,
   advanceAutomationRun,
   alertChannelAad,
+  companyExportPartAad,
   createAutomationService,
   createPlatformOpsService,
   createWebRequestService,
@@ -417,6 +418,35 @@ async function sealEverything(c: Company, ring: Keyring): Promise<Seeded[]> {
       }),
     ],
   );
+  // A ready stored export's part (ADR-415), kept 7 days.
+  const exportId = uuidv7();
+  const partId = uuidv7();
+  const partPlain = '{"format":"hyfib-w360-company-export"}';
+  await fx.query(
+    `INSERT INTO app.company_exports (id, tenant_id, requested_by_membership_id, status, attempts,
+       started_at, finished_at, expires_at, byte_size, sha256, part_count)
+     VALUES ($1, $2, $3, 'ready', 1, now(), now(), now() + interval '7 days', $4, $5, 1)`,
+    [exportId, t, member, partPlain.length, 'a'.repeat(64)],
+  );
+  await fx.query(
+    `INSERT INTO app.company_export_parts (id, tenant_id, export_id, attempt, seq, byte_size,
+       ciphertext)
+     VALUES ($1, $2, $3, 1, 0, $4, $5)`,
+    [
+      partId,
+      t,
+      exportId,
+      partPlain.length,
+      seal({
+        kind: 'company_export_part',
+        table: 'app.company_export_parts',
+        column: 'ciphertext',
+        id: partId,
+        plain: partPlain,
+        aad: companyExportPartAad(t, exportId, 1, 0, partId),
+      }),
+    ],
+  );
   return seeded;
 }
 
@@ -635,7 +665,7 @@ describe('re-encrypting under the primary key', () => {
       aad: alertChannelAad(channelId),
     });
     const kinds = new Set(seeded.map((s) => s.kind));
-    expect(kinds.size).toBe(19);
+    expect(kinds.size).toBe(20);
     for (const s of seeded) expect(keyOf(await storedValue(s)), s.kind).toBe(r.ids.old);
 
     const console = await ops(r.during).keyring(staff);

@@ -891,6 +891,7 @@ test('automation run events reach an endpoint: a live run starts and ends, a mem
     'New conversation (conversation_started)',
     'Any message (any_message)',
     'Order messages (store_event)',
+    'Reply to a campaign (campaign_reply)',
   ]) {
     await triggerBox(name).uncheck();
   }

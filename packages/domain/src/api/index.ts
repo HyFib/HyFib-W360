@@ -47,3 +47,6 @@ export * from './campaigns';
 export * from './segments';
 export * from './media';
 export * from './tags';
+export * from './mcp-model';
+export * from './mcp-tools';
+export * from './mcp-protocol';

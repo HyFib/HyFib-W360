@@ -59,6 +59,7 @@ import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
 import { emitTenantEvent } from '../messaging/events';
 import { STATUS_RANK } from '../messaging/status';
 import { orderPlaceholderValues } from '../stores/order-values';
+import { campaignPlaceholderValues, runCampaignOf } from './run-campaigns';
 import {
   TEMPLATE_LIMITS,
   buildTemplateSend,
@@ -256,6 +257,13 @@ async function loadFacts(
     run.storeOrderId && node && stepRendersPlaceholders(node)
       ? await orderPlaceholderValues(tx, run.tenantId, run.storeOrderId)
       : null;
+  // The campaign a run started by a reply to a campaign answers (ADR-414), for steps with texts.
+  const campaign =
+    (run.triggerType === 'campaign_reply' || run.triggerType === 'test') &&
+    node &&
+    stepRendersPlaceholders(node)
+      ? campaignPlaceholderValues(await runCampaignOf(tx, run.tenantId, run.id))
+      : null;
   return {
     contactName: contact?.name ?? null,
     companyName: tenant?.name ?? '',
@@ -264,6 +272,7 @@ async function loadFacts(
     fields: contact?.attributes ?? {},
     businessOpen,
     order,
+    campaign,
     ...dealFacts,
   };
 }

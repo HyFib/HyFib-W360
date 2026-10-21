@@ -5,6 +5,7 @@ import {
   channelAccounts,
   commercePaymentAccounts,
   commerceStores,
+  companyExportParts,
   emailOutbox,
   flowKeys,
   platformAlertChannel,
@@ -27,6 +28,7 @@ import { flowKeyAad } from '../flows/model';
 import { credentialAad } from '../messaging/credentials';
 import { registrationPinAad } from '../messaging/onboarding';
 import { receiptAad } from '../messaging/receipts';
+import { companyExportPartAad } from '../tenancy/stored-export';
 import { storeAccessCodeAad, storeCredentialsAad, storeWebhookSecretAad } from '../stores/model';
 import {
   webhookOAuthKeyAad,
@@ -41,7 +43,7 @@ import { webhookHeadersAad, webhookSecretAad } from '../webhooks/service';
  * with (the same functions, so the two cannot drift). While more than one key is configured, the
  * minute sweep re-encrypts the values sealed with a configured key other than the primary, so that
  * key can be removed once nothing is sealed with it. The latest migration that defines
- * `ops.sealed_value_keys` (0101, then 0121, 0258, 0287 and 0288) lists the same columns, in the same
+ * `ops.sealed_value_keys` (0101, then 0121, 0258, 0287, 0288 and 0325) lists the same columns, in the same
  * order.
  */
 export const SEALED_VALUE_KINDS = [
@@ -64,6 +66,7 @@ export const SEALED_VALUE_KINDS = [
   'provider_receipt',
   'queued_email',
   'alert_channel',
+  'company_export_part',
 ] as const;
 export type SealedValueKind = (typeof SEALED_VALUE_KINDS)[number];
 
@@ -87,6 +90,7 @@ export const SEALED_VALUE_LABELS: Record<SealedValueKind, string> = {
   provider_receipt: 'Provider webhook bodies (kept 7 days)',
   queued_email: 'Emails waiting to be sent',
   alert_channel: 'The operations alerts’ chat channel address',
+  company_export_part: 'Stored company exports (kept 7 days)',
 };
 
 /** A sealed value the sweep found: its kind, its row and its company (null for operations rows). */
@@ -308,6 +312,38 @@ const SEALED_VALUES: Record<SealedValueKind, SealedValueSpec> = {
         sql`select ops.reseal_platform_alert_channel(${ref.id}::uuid, ${stored.sealed}, ${next}) as swapped`,
       );
       return res.rows[0]?.swapped === true;
+    },
+  },
+  // A part's associated data names its export, run and position too (ADR-415), read from its row.
+  company_export_part: {
+    async read(tx, ref) {
+      const res = await tx.execute<{
+        sealed: string;
+        export_id: string;
+        attempt: number;
+        seq: number;
+      }>(
+        sql`select ${companyExportParts.ciphertext} as sealed, ${companyExportParts.exportId} as export_id,
+                   ${companyExportParts.attempt} as attempt, ${companyExportParts.seq} as seq
+              from ${companyExportParts}
+             where ${companyExportParts.id} = ${ref.id}
+               and ${companyExportParts.tenantId} = ${ref.tenantId}`,
+      );
+      const row = res.rows[0];
+      if (!row || !ref.tenantId) return null;
+      return {
+        sealed: row.sealed,
+        aad: companyExportPartAad(ref.tenantId, row.export_id, row.attempt, row.seq, ref.id),
+      };
+    },
+    async write(tx, ref, stored, next) {
+      const res = await tx.execute(
+        sql`update ${companyExportParts} set ciphertext = ${next}
+             where ${companyExportParts.id} = ${ref.id}
+               and ${companyExportParts.tenantId} = ${ref.tenantId}
+               and ${companyExportParts.ciphertext} = ${stored.sealed}`,
+      );
+      return res.rowCount === 1;
     },
   },
 };

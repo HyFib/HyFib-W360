@@ -2,7 +2,13 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
-import { STORE_MESSAGE_SKIP_REASONS, can, formatMinor, isCartEvent } from '@w360/domain';
+import {
+  STORE_MESSAGE_SKIP_REASONS,
+  can,
+  formatMinor,
+  isCartEvent,
+  isShipmentEvent,
+} from '@w360/domain';
 import {
   Alert,
   Badge,
@@ -22,6 +28,7 @@ import {
   StoreCartSettings,
   StoreMessageRuleForm,
   StoreMessageSettingsForm,
+  StoreShipmentAccess,
 } from '@/components/stores/store-messages';
 import { RUN_STATUS } from '@/lib/automation-labels';
 import { COD_ANSWER, STORE_MESSAGE_STATUS } from '@/lib/commerce-labels';
@@ -64,7 +71,8 @@ export default async function StoreMessagesPage({
     timezone,
     cart,
   } = data;
-  const orderRules = rules.filter((r) => !isCartEvent(r.event));
+  const orderRules = rules.filter((r) => !isCartEvent(r.event) && !isShipmentEvent(r.event));
+  const shipmentRules = rules.filter((r) => isShipmentEvent(r.event));
   const cartRules = rules.filter((r) => isCartEvent(r.event));
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/commerce/stores`;
@@ -176,6 +184,35 @@ export default async function StoreMessagesPage({
       </Card>
 
       {orderRules.map(ruleCard)}
+
+      <Card className="min-w-0">
+        <CardHeader>
+          <CardTitle>Shipment messages</CardTitle>
+          <CardDescription>
+            An order can ship in several shipments. These messages go out once for each shipment,
+            and once each time a shipment’s tracking number or tracking link changes to one HyFib
+            has not seen for it, with that shipment’s carrier, tracking number and tracking link
+            where Shopify gives them. A missing value uses the variable’s fallback, or the message
+            is not sent.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 text-sm">
+          {store.platform !== 'shopify' ? (
+            <p className="text-muted-foreground">
+              Not available for this store: WooCommerce orders have no shipments HyFib can read.
+            </p>
+          ) : (
+            <StoreShipmentAccess
+              slug={ctx.tenant.slug}
+              storeId={store.id}
+              shipmentAccess={store.shipmentAccess}
+              canManage={canManage && store.state === 'connected'}
+            />
+          )}
+        </CardContent>
+      </Card>
+
+      {shipmentRules.map(ruleCard)}
 
       <Card className="min-w-0">
         <CardHeader>

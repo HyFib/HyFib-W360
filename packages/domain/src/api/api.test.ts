@@ -1390,6 +1390,63 @@ describe('quotes and reactions (ADR-082)', () => {
   });
 });
 
+describe('call-to-action messages and taking reactions back stay unavailable (ADR-412)', () => {
+  const messageId = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+  const ctx = {
+    tenant: { id: 't', status: 'active' },
+    key: { id: 'k', scopes: new Set(['messages.send', 'messages.reply']) },
+    planScopes: null,
+  } as unknown as ApiContext;
+  const send = (body: unknown) =>
+    apiSendMessage({} as never, ctx, body, { key: 'k-1', requestHash: 'h' }).catch(
+      (caught: unknown) => caught,
+    );
+
+  it('refuse a call-to-action type by its field, before anything is read', async () => {
+    // Meta's OpenAPI description (v23.0, M-203) lists no `cta_url` interactive type, so no name
+    // a caller might try is sent on: each is refused as an unknown type, never as a template.
+    const cta = {
+      to: '+919876543210',
+      body: 'Track your order',
+      displayText: 'Track',
+      url: 'https://example.com/orders/1',
+    };
+    for (const type of ['cta_url', 'cta', 'call_to_action', 'url_button', 'interactive']) {
+      const error = await send({ ...cta, type });
+      expect(isAppError(error) && error.code, type).toBe('validation_failed');
+      expect(isAppError(error) && error.issues, type).toEqual([
+        expect.objectContaining({ path: 'type' }),
+      ]);
+    }
+  });
+
+  it('name no call-to-action type among the reply types the API documents', () => {
+    const doc = JSON.stringify(buildOpenApiDocument('https://app.example.com/api/v1'));
+    expect(doc).not.toMatch(/"cta_url"|`cta_url`/);
+    expect(doc).toContain('A message with a call-to-action URL button cannot be sent');
+    expect(doc).toContain('reactions cannot be taken back through the API');
+  });
+
+  it('refuse every form that could take a reaction back', async () => {
+    const reaction = { type: 'reaction', to: '+919876543210', replyTo: messageId };
+    // An empty emoji is the form Meta's prose documentation is recalled as using (M-185); the
+    // OpenAPI description does not give it (M-203), so it is refused rather than sent.
+    for (const emoji of ['', ' ', null, undefined, '‍', '️']) {
+      const body = emoji === undefined ? reaction : { ...reaction, emoji };
+      expect(apiSendReactionSchema.safeParse(body).success, JSON.stringify(emoji)).toBe(false);
+      const error = await send(body);
+      expect(isAppError(error) && error.code, JSON.stringify(emoji)).toBe('validation_failed');
+      expect(isAppError(error) && error.issues, JSON.stringify(emoji)).toEqual([
+        expect.objectContaining({ path: 'emoji' }),
+      ]);
+    }
+    for (const extra of [{ remove: true }, { action: 'remove' }, { emoji: '👍', remove: true }]) {
+      const error = await send({ ...reaction, emoji: '👍', ...extra });
+      expect(isAppError(error) && error.code, JSON.stringify(extra)).toBe('validation_failed');
+    }
+  });
+});
+
 describe('webhook endpoints through the API (ADR-081)', () => {
   it('take an address, events and a description, events in the settings order and once each', () => {
     expect(
@@ -3079,6 +3136,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'any_message',
       'store_event',
       'api',
+      'campaign_reply',
     ]);
     expect(answered.required).toContain('runTriggers');
     expect(

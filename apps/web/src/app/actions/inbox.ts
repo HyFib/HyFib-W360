@@ -153,3 +153,28 @@ export async function showTypingAction(
     return { outcome: await readReceipts.showTyping(ctx, String(conversationId)) };
   });
 }
+
+/**
+ * The file of a saved reply a member inserts (ADR-411): checked to be there and readable now, so a
+ * missing file is reported when the reply is inserted rather than when it is sent.
+ */
+export async function savedReplyFileForInsertAction(
+  slug: string,
+  conversationId: string,
+  savedReplyId: string,
+): Promise<
+  ActionResult<{
+    fileId: string;
+    kind: 'image' | 'video' | 'audio' | 'document';
+    mimeType: string;
+    filename: string;
+    sizeBytes: number;
+    caption: boolean;
+  }>
+> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { savedReplies } = await getRuntime();
+    return savedReplies.savedReplyFileForInsert(ctx, String(conversationId), String(savedReplyId));
+  });
+}

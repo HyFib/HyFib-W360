@@ -6,7 +6,13 @@ const ID = '0192f3a4-5b6c-7d8e-9f00-112233445566';
 describe('the policy each answer is given', () => {
   it('gives the inbox’s files a policy under which nothing runs (ADR-382)', () => {
     expect(FILE_POLICY).toBe("default-src 'none'; sandbox");
-    for (const path of [`/c/acme/inbox/${ID}/media/${ID}`, `/c/acme/inbox/${ID}/media/${ID}/`]) {
+    for (const path of [
+      `/c/acme/inbox/${ID}/media/${ID}`,
+      `/c/acme/inbox/${ID}/media/${ID}/`,
+      // Saved replies' files (ADR-411).
+      `/c/acme/settings/saved-replies/files/${ID}`,
+      `/c/acme/settings/saved-replies/files/${ID}/`,
+    ]) {
       expect(FILE_ROUTE.test(path), path).toBe(true);
     }
     for (const path of [
@@ -16,6 +22,10 @@ describe('the policy each answer is given', () => {
       `/c/acme/inbox/${ID}/transcript`,
       `/api/v1/messages/${ID}/media`,
       `/x/c/acme/inbox/${ID}/media/${ID}`,
+      `/c/acme/settings/saved-replies`,
+      `/c/acme/settings/saved-replies/files`,
+      `/c/acme/settings/saved-replies/files/${ID}/more`,
+      `/api/c/acme/saved-replies/${ID}/file`,
     ]) {
       expect(FILE_ROUTE.test(path), path).toBe(false);
     }

@@ -38,12 +38,21 @@ import {
   type WebhookEgressClient,
 } from '@w360/domain';
 
+/** Connections of the stored-export pool: two runs at a time, two connections each (ADR-415). */
+export const STORED_EXPORT_POOL_CONNECTIONS = 4;
+
 export interface WorkerRuntime {
   config: WorkerConfig;
   logger: Logger;
   clock: Clock;
   keyring: Keyring;
   db: Database;
+  /**
+   * A small pool of its own for stored company export runs (ADR-415): a run holds one connection
+   * for its snapshot and uses a second for each part, so two runs never take the shared pool's
+   * connections from other jobs.
+   */
+  exportDb: Database;
   boss: PgBoss;
   jobs: JobQueue;
   signer: JobSigner;
@@ -111,6 +120,18 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
     warn: (m) => logger.warn(m),
   });
   const db = createDatabase(pool);
+  // Two export runs at a time (the queue's local concurrency) of two connections each.
+  const exportPool = createPool({
+    connectionString: config.DATABASE_URL_APP,
+    max: STORED_EXPORT_POOL_CONNECTIONS,
+    applicationName: 'w360-worker-exports',
+    statementTimeoutMs: config.DATABASE_STATEMENT_TIMEOUT_MS,
+  });
+  await assertRuntimeRoleSafety(exportPool, {
+    strict: config.NODE_ENV === 'production',
+    warn: (m) => logger.warn(m),
+  });
+  const exportDb = createDatabase(exportPool);
 
   const boss = new PgBoss({
     connectionString: config.DATABASE_URL_APP,
@@ -161,6 +182,7 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
     clock: systemClock,
     keyring,
     db,
+    exportDb,
     boss,
     jobs,
     signer,
@@ -195,7 +217,7 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
     shopify,
     webhookOAuthTokens: new WebhookOAuthTokenCache(),
     async close() {
-      await pool.end();
+      await Promise.all([pool.end(), exportPool.end()]);
     },
   };
 }

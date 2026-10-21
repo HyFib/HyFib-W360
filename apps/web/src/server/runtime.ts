@@ -81,6 +81,11 @@ import {
   createCompanyDeletionService,
   createWebRequestService,
   writeCompanyExport,
+  listStoredExports,
+  openStoredExport,
+  requestStoredExport,
+  type StoredExportDownload,
+  type StoredExportView,
   type AccountService,
   type CompanyDeletionService,
   type RequestMeta,
@@ -176,6 +181,12 @@ export interface Runtime {
     write: (chunk: string) => Promise<void>,
     meta?: RequestMeta,
   ) => Promise<{ counts: Record<string, number> }>;
+  /** Stored company exports: asked for, listed and downloaded in Settings → Company data. */
+  storedExports: {
+    request(ctx: TenantContext, meta?: RequestMeta): Promise<{ id: string }>;
+    list(ctx: TenantContext): Promise<StoredExportView[]>;
+    open(ctx: TenantContext, exportId: string, meta?: RequestMeta): Promise<StoredExportDownload>;
+  };
   platform: PlatformService;
   /** The platform operations console (/platform/ops): content-free facts and two audited repairs. */
   platformOps: PlatformOpsService;
@@ -359,6 +370,12 @@ async function init(): Promise<Runtime> {
   const exportDeps = { ...outbox, db, clock: systemClock, appBaseUrl: config.APP_BASE_URL };
   const companyExport: Runtime['companyExport'] = (ctx, write, meta) =>
     writeCompanyExport(exportDeps, ctx, write, meta);
+  const storedExportDeps = { ...exportDeps, keyring };
+  const storedExports: Runtime['storedExports'] = {
+    request: (ctx, meta) => requestStoredExport(storedExportDeps, ctx, meta),
+    list: (ctx) => listStoredExports(storedExportDeps, ctx),
+    open: (ctx, exportId, meta) => openStoredExport(storedExportDeps, ctx, exportId, meta),
+  };
   const account = createAccountService({ db });
   const platform = createPlatformService({ db, platformDb, clock: systemClock });
   const platformOps = createPlatformOpsService({
@@ -598,6 +615,7 @@ async function init(): Promise<Runtime> {
     tenancy,
     companyDeletion,
     companyExport,
+    storedExports,
     platform,
     platformOps,
     alertChannel,

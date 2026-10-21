@@ -10,14 +10,16 @@ import { EXPORT_TABLES, MEMBER_ACCOUNT_COLUMNS, type ExportTableSpec } from './e
 /**
  * The company export (P5-11, ADR-055): gzip-compressed JSON Lines, streamed from one read-only,
  * repeatable-read transaction in the company's scope, so every table is read as of the same
- * moment. Nothing is stored. Lines:
+ * moment. The streamed export stores nothing; a stored export (ADR-415, `stored-export.ts`) writes
+ * the same lines into the company's sealed parts. Lines:
  *
  * - `{"format": "hyfib-w360-company-export", "version": 1, "company": {...}, "exportedAt": ...,
  *   "tables": [...]}`
  * - `{"table": "app.contacts", "row": {...}}`, one per row, with the columns of the export spec;
  * - `{"end": true, "counts": {"app.contacts": 12, ...}}`: a file without it is incomplete.
  *
- * 64-bit integers (money in minor units) are strings; times are ISO 8601 in UTC.
+ * 64-bit integers (money in minor units) are strings; times are ISO 8601 in UTC; bytes (saved
+ * replies' files, ADR-411) are base64 text.
  */
 export const EXPORT_FORMAT = 'hyfib-w360-company-export';
 export const EXPORT_VERSION = 1;
@@ -32,6 +34,20 @@ const PAGE_SIZE = 1_000;
 
 const identifier = (name: string) => `"${name.replace(/"/g, '""')}"`;
 const qualified = (table: string) => table.split('.').map(identifier).join('.');
+
+const pageSizeOf = (spec: ExportTableSpec) => spec.pageSize ?? PAGE_SIZE;
+
+/** A row as the export writes it: bytes (a bytea column) as base64 text. */
+export function exportRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    out[key] =
+      value instanceof Uint8Array
+        ? Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('base64')
+        : value;
+  }
+  return out;
+}
 
 /** The SQL selecting one page of a table's rows, keyset-paged by id. */
 function pageQuery(spec: ExportTableSpec, afterId: string | null) {
@@ -49,7 +65,7 @@ function pageQuery(spec: ExportTableSpec, afterId: string | null) {
   }
   const hasId = spec.columns.includes('id');
   const keyset = hasId && afterId !== null ? sql` AND t.id > ${afterId}::uuid` : sql``;
-  const order = hasId ? sql.raw(` ORDER BY t.id LIMIT ${PAGE_SIZE}`) : sql``;
+  const order = hasId ? sql.raw(` ORDER BY t.id LIMIT ${pageSizeOf(spec)}`) : sql``;
   return sql`${sql.raw(`SELECT ${columns.join(', ')} FROM ${from} WHERE t.tenant_id = `)}${sql`(SELECT app.current_tenant_id())`}${keyset}${order}`;
 }
 
@@ -65,11 +81,12 @@ async function writeTable(
       pageQuery(spec, afterId),
     );
     for (const row of result.rows) {
-      await write(`${JSON.stringify({ table: spec.table, row })}\n`);
+      await write(`${JSON.stringify({ table: spec.table, row: exportRow(row) })}\n`);
       count += 1;
     }
     const last: Record<string, unknown> | undefined = result.rows.at(-1);
-    if (!spec.columns.includes('id') || result.rows.length < PAGE_SIZE || !last) return count;
+    if (!spec.columns.includes('id') || result.rows.length < pageSizeOf(spec) || !last)
+      return count;
     afterId = String(last.id);
   }
 }
@@ -77,7 +94,8 @@ async function writeTable(
 /**
  * Writes the company's export through `write` (which should wait while the reader is slow). The
  * start is audited and every owner and administrator is emailed first (so an export that is then
- * refused or cut short is still reported); only one export of a company runs at a time.
+ * refused or cut short is still reported); only one export of a company runs at a time, and none
+ * while a stored export waits or is being written (ADR-415).
  */
 export async function writeCompanyExport(
   deps: CompanyExportDeps,
@@ -117,31 +135,77 @@ export async function writeCompanyExport(
   return deps.db.run(
     ctx.scope,
     async (tx) => {
-      const lock = await tx.execute<{ locked: boolean }>(
-        sql`select pg_try_advisory_xact_lock(hashtextextended(${`company-export:${ctx.tenant.id}`}, 0)) as locked`,
-      );
-      if (lock.rows[0]?.locked !== true) {
+      if (!(await takeExportLock(tx, ctx.tenant.id))) {
         throw conflict('An export of this company is already running. Try again when it ends.');
       }
-      await write(
-        `${JSON.stringify({
-          format: EXPORT_FORMAT,
-          version: EXPORT_VERSION,
-          company: {
-            id: ctx.tenant.id,
-            name: ctx.tenant.name,
-            slug: ctx.tenant.slug,
-            timezone: ctx.tenant.timezone,
-          },
-          exportedAt: exportedAt.toISOString(),
-          tables: EXPORT_TABLES.map((spec) => spec.table),
-        })}\n`,
-      );
-      const counts: Record<string, number> = {};
-      for (const spec of EXPORT_TABLES) counts[spec.table] = await writeTable(tx, spec, write);
-      await write(`${JSON.stringify({ end: true, counts })}\n`);
+      // A stored export waiting or being written counts as one running (ADR-415).
+      if (await storedExportPending(tx)) {
+        throw conflict(
+          'A stored export of this company is being prepared. Try again when it is ready.',
+        );
+      }
+      const counts = await writeExportLines(tx, ctx.tenant, exportedAt, write);
       return { counts };
     },
     { isolationLevel: 'repeatable read', accessMode: 'read only' },
   );
+}
+
+/** The company an export's header names. */
+export interface ExportCompany {
+  id: string;
+  name: string;
+  slug: string;
+  timezone: string;
+}
+
+/**
+ * Takes the company's export lock for the rest of the transaction, if no other export holds it:
+ * the streamed export and a stored export's run both read the company under it, so no two exports
+ * of a company are read at once (ADR-055, ADR-415).
+ */
+export async function takeExportLock(tx: Tx, tenantId: string): Promise<boolean> {
+  const lock = await tx.execute<{ locked: boolean }>(
+    sql`select pg_try_advisory_xact_lock(hashtextextended(${`company-export:${tenantId}`}, 0)) as locked`,
+  );
+  return lock.rows[0]?.locked === true;
+}
+
+/** Whether a stored export of the scoped company is waiting or being written (ADR-415). */
+export async function storedExportPending(tx: Tx): Promise<boolean> {
+  const res = await tx.execute<{ pending: boolean }>(
+    sql`select exists (select 1 from app.company_exports where status in ('queued', 'running')) as pending`,
+  );
+  return res.rows[0]?.pending === true;
+}
+
+/**
+ * Writes the export's lines (header, every table's rows, the end line) through `write`, reading in
+ * `tx`, which should be the scoped company's read-only repeatable-read snapshot. The streamed and
+ * the stored export both write exactly this (ADR-415).
+ */
+export async function writeExportLines(
+  tx: Tx,
+  company: ExportCompany,
+  exportedAt: Date,
+  write: (chunk: string) => Promise<void>,
+): Promise<Record<string, number>> {
+  await write(
+    `${JSON.stringify({
+      format: EXPORT_FORMAT,
+      version: EXPORT_VERSION,
+      company: {
+        id: company.id,
+        name: company.name,
+        slug: company.slug,
+        timezone: company.timezone,
+      },
+      exportedAt: exportedAt.toISOString(),
+      tables: EXPORT_TABLES.map((spec) => spec.table),
+    })}\n`,
+  );
+  const counts: Record<string, number> = {};
+  for (const spec of EXPORT_TABLES) counts[spec.table] = await writeTable(tx, spec, write);
+  await write(`${JSON.stringify({ end: true, counts })}\n`);
+  return counts;
 }

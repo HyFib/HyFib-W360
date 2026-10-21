@@ -14,6 +14,7 @@ import {
   authenticateApiRequest,
   bearerToken,
   type ApiContext,
+  type ApiErrorBody,
   type ApiResponse,
   type IdempotencyInput,
 } from '@w360/domain';
@@ -41,7 +42,18 @@ interface FileResult {
   file: { body: ReadableStream<Uint8Array>; headers: Record<string, string> };
 }
 
-type HandlerResult = ApiResponse | { status: number; body: Record<string, unknown> } | FileResult;
+/**
+ * Any JSON body, or none (null), with fields the request log records beside its own: the answer of
+ * a protocol that is not REST, such as MCP's JSON-RPC (ADR-416).
+ */
+interface JsonResult {
+  status: number;
+  json: Record<string, unknown> | null;
+  log: Record<string, unknown>;
+}
+
+type HandlerResult =
+  ApiResponse | { status: number; body: Record<string, unknown> } | FileResult | JsonResult;
 
 // Responses are never cached: next.config sets `Cache-Control: private, no-store` for them.
 const baseHeaders = (requestId: string): HeadersInit => ({
@@ -77,12 +89,36 @@ export async function handleApiRequest(
     idempotency?: 'required' | 'optional';
     /** A multipart body of at most this many bytes, such as a file upload (ADR-219). */
     multipartBytes?: number;
+    /**
+     * The body of an error response in another protocol's shape (ADR-416); the status, headers and
+     * message stay the REST API's. `request` says whether the body was not valid JSON and holds the
+     * parsed body once it was read (undefined before).
+     */
+    errorBody?: (
+      status: number,
+      body: ApiErrorBody,
+      request: { invalidJson: boolean; parsed: unknown },
+    ) => unknown;
+    /**
+     * Whether the whole body and query are refused for a NUL character before the handler runs
+     * (ADR-124); true unless the handler checks the text it stores itself (ADR-416).
+     */
+    nulCheck?: boolean;
   } = {},
 ): Promise<Response> {
   const requestId = crypto.randomUUID();
   const runtime = await getRuntime();
   const log = runtime.logger;
   const path = request.nextUrl.pathname;
+  // What the error body of another protocol needs to know of the request (ADR-416).
+  const read = { invalidJson: false, parsed: undefined as unknown };
+  const fail = (e: { status: number; body: ApiErrorBody }, extra: Record<string, string> = {}) =>
+    respond(
+      e.status,
+      options.errorBody ? options.errorBody(e.status, e.body, read) : e.body,
+      requestId,
+      extra,
+    );
   try {
     const token = bearerToken(request.headers.get('authorization'));
     const ip = resolveClientIp(
@@ -94,7 +130,7 @@ export async function handleApiRequest(
     if (!auth || 'refused' in auth) {
       if (!(await admitFailedApiAuthentication(runtime.db, ip))) {
         const e = apiRequestError(429, 'rate_limited', 'Too many failed attempts.', requestId);
-        return respond(e.status, e.body, requestId, { 'Retry-After': '60' });
+        return fail(e, { 'Retry-After': '60' });
       }
       if (auth) {
         log.info(
@@ -116,7 +152,7 @@ export async function handleApiRequest(
           requestId,
           'ip_not_allowed',
         );
-        return respond(e.status, e.body, requestId);
+        return fail(e);
       }
       const e = apiRequestError(
         401,
@@ -124,13 +160,13 @@ export async function handleApiRequest(
         'Send a valid API key as "Authorization: Bearer <key>".',
         requestId,
       );
-      return respond(e.status, e.body, requestId, { 'WWW-Authenticate': 'Bearer' });
+      return fail(e, { 'WWW-Authenticate': 'Bearer' });
     }
     const key = auth.authenticated;
 
     if (!(await admitApiRate(runtime.db, { keyId: key.key.id, tenantId: key.tenant.id }))) {
       const e = apiRequestError(429, 'rate_limited', 'Too many requests. Slow down.', requestId);
-      return respond(e.status, e.body, requestId, { 'Retry-After': '1' });
+      return fail(e, { 'Retry-After': '1' });
     }
 
     // The plan's monthly API requests (ADR-061): counted here, before the request is read. The
@@ -144,10 +180,8 @@ export async function handleApiRequest(
         requestId,
         admission.reason,
       );
-      return respond(
-        e.status,
-        e.body,
-        requestId,
+      return fail(
+        e,
         admission.retryAfterSeconds === null
           ? {}
           : { 'Retry-After': String(admission.retryAfterSeconds) },
@@ -166,19 +200,21 @@ export async function handleApiRequest(
           'Send the body as JSON with Content-Type: application/json.',
           requestId,
         );
-        return respond(e.status, e.body, requestId);
+        return fail(e);
       }
       const bytes = await readLimitedBody(request, API_LIMITS.bodyBytes);
       if (!bytes) {
         const e = apiRequestError(413, 'bad_request', 'The body is larger than 64 KB.', requestId);
-        return respond(e.status, e.body, requestId);
+        return fail(e);
       }
       raw = bytes.toString('utf8');
       try {
         body = JSON.parse(raw);
+        read.parsed = body;
       } catch {
         const e = apiRequestError(400, 'bad_request', 'The body is not valid JSON.', requestId);
-        return respond(e.status, e.body, requestId);
+        read.invalidJson = true;
+        return fail(e);
       }
     }
 
@@ -192,12 +228,12 @@ export async function handleApiRequest(
           'Send the body as multipart/form-data.',
           requestId,
         );
-        return respond(e.status, e.body, requestId);
+        return fail(e);
       }
       const bytes = await readLimitedBody(request, options.multipartBytes);
       if (!bytes) {
         const e = apiRequestError(413, 'bad_request', 'The body is larger than 16 MB.', requestId);
-        return respond(e.status, e.body, requestId);
+        return fail(e);
       }
       try {
         form = await new Response(new Uint8Array(bytes), {
@@ -210,7 +246,7 @@ export async function handleApiRequest(
           'The body is not valid form data.',
           requestId,
         );
-        return respond(e.status, e.body, requestId);
+        return fail(e);
       }
     }
 
@@ -224,7 +260,7 @@ export async function handleApiRequest(
           'The Idempotency-Key header must be 1 to 255 visible ASCII characters.',
           requestId,
         );
-        return respond(e.status, e.body, requestId);
+        return fail(e);
       }
       idempotency = {
         key: idempotencyKey,
@@ -237,17 +273,19 @@ export async function handleApiRequest(
         'Send an Idempotency-Key header (for example a UUID) so a retry never does the work twice.',
         requestId,
       );
-      return respond(e.status, e.body, requestId);
+      return fail(e);
     }
 
     const query = Object.fromEntries(request.nextUrl.searchParams.entries());
     // Text PostgreSQL cannot store is refused here, naming where it is, not failed in a query.
-    assertNoNulCharacter(
-      query,
-      form
-        ? Object.fromEntries([...form.entries()].filter(([, value]) => typeof value === 'string'))
-        : body,
-    );
+    if (options.nulCheck !== false) {
+      assertNoNulCharacter(
+        query,
+        form
+          ? Object.fromEntries([...form.entries()].filter(([, value]) => typeof value === 'string'))
+          : body,
+      );
+    }
     const result = await handler({ ctx, runtime, body, form, idempotency, query });
     const replayed = 'replayed' in result && result.replayed;
     log.info(
@@ -259,9 +297,15 @@ export async function handleApiRequest(
         tenantId: ctx.tenant.id,
         apiKeyId: ctx.key.id,
         replayed,
+        ...('json' in result ? result.log : {}),
       },
       'api request',
     );
+    if ('json' in result) {
+      return result.json === null
+        ? new Response(null, { status: result.status, headers: { 'X-Request-Id': requestId } })
+        : respond(result.status, result.json, requestId);
+    }
     if ('file' in result) {
       return new Response(result.file.body, {
         status: result.status,
@@ -282,6 +326,6 @@ export async function handleApiRequest(
         'api request failed',
       );
     }
-    return respond(mapped.status, mapped.body, requestId);
+    return fail(mapped);
   }
 }

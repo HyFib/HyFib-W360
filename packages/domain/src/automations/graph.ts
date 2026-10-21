@@ -670,6 +670,12 @@ export type ProductStepKind = (typeof PRODUCT_STEP_KINDS)[number];
 export const PRODUCT_PICKER_LIMIT = 500;
 
 /**
+ * Campaigns the automation builder offers a trigger started by replies to a campaign (ADR-414): the
+ * most recently created, and the chosen one when it is older.
+ */
+export const CAMPAIGN_PICKER_LIMIT = 200;
+
+/**
  * Products of one of the company's catalogs sent in the conversation (ADR-383), a session message
  * like a text: one product, a list of products (one section), or the catalog shown with one of its
  * products. Products are named by HyFib's ids and sent by their retailer ids in their catalog. The
@@ -1000,6 +1006,7 @@ export const TRIGGER_TYPES = [
   'any_message',
   'store_event',
   'api',
+  'campaign_reply',
 ] as const;
 export type TriggerType = (typeof TRIGGER_TYPES)[number];
 export const TRIGGER_HOURS = ['any', 'open', 'closed'] as const;
@@ -1030,6 +1037,39 @@ const triggerCommon = {
     .min(0)
     .max(AUTOMATION_LIMITS.cooldownMinutes, 'At most 24 hours (1440 minutes).'),
 };
+
+/**
+ * How long after a campaign message was queued a reply to it may start an automation (ADR-414): the
+ * same 72-hour bound as campaign attribution's (`ATTRIBUTION_WINDOW_HOURS`, campaigns/attribution.ts;
+ * a unit test keeps the two equal). They share the bound, not the rule: attribution is last touch
+ * (the most recent delivered campaign message to the contact on the number), while the trigger
+ * follows the message the reply quotes, so a tap on an older campaign's message within the bound
+ * starts that campaign's automation while attribution counts the newer campaign. A reply quoting a
+ * message queued earlier starts what any other message would start.
+ */
+export const CAMPAIGN_REPLY_HOURS = 72;
+
+/**
+ * A quick-reply button's text as a campaign reply trigger compares it (ADR-414): exact apart from
+ * case, surrounding spaces and runs of spaces (Unicode NFC), so an emoji or punctuation in a
+ * button's text counts.
+ */
+export function campaignButtonKey(text: string): string {
+  return text.normalize('NFC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en');
+}
+
+const campaignButtonSchema = z
+  .string()
+  .transform((raw) => raw.normalize('NFC').trim().replace(/\s+/g, ' '))
+  .pipe(
+    z
+      .string()
+      .min(1, 'Enter the button’s text, or choose any reply.')
+      .max(
+        TEMPLATE_LIMITS.buttonText,
+        `A quick-reply button’s text has at most ${TEMPLATE_LIMITS.buttonText} characters.`,
+      ),
+  );
 
 export const triggerSchema = z.discriminatedUnion('type', [
   z.object({
@@ -1073,6 +1113,18 @@ export const triggerSchema = z.discriminatedUnion('type', [
       .max(AUTOMATION_LIMITS.apiInputs, `At most ${AUTOMATION_LIMITS.apiInputs} inputs.`)
       .transform((list) => [...new Set(list)]),
   }),
+  /**
+   * A customer's message that answers a campaign message (ADR-414): a reply quoting it, or a tap on
+   * one of its template's quick-reply buttons, within `CAMPAIGN_REPLY_HOURS` of its queueing. Any
+   * campaign (`campaignId` null) or one chosen campaign; and, when `button` is given, only a tap on
+   * a quick-reply button with that text (`campaignButtonKey`).
+   */
+  z.object({
+    type: z.literal('campaign_reply'),
+    campaignId: z.uuid('Choose a campaign, or any campaign.').nullable(),
+    button: campaignButtonSchema.nullable(),
+    ...triggerCommon,
+  }),
 ]);
 export type AutomationTrigger = z.infer<typeof triggerSchema>;
 /** Triggers that start from customer messages (with business hours and cooldowns). */
@@ -1084,40 +1136,82 @@ export const TRIGGER_LABELS: Record<TriggerType, string> = {
   any_message: 'Any customer message',
   store_event: 'An order event in a store (chosen in the store’s Order messages)',
   api: 'A member’s enrolment, or a call from your systems through the HyFib W360 API',
+  campaign_reply: 'A customer replies to a campaign message',
 };
 
 /**
- * How strongly a trigger matched; lower wins: the message is a keyword, contains one, matches one
- * only with typos (ADR-240), a new conversation, any message.
+ * How strongly a trigger matched; lower wins (ADR-240, ADR-414): a reply to the chosen campaign with
+ * the chosen button (0), to the chosen campaign (1), to any campaign with the chosen button (2), to
+ * any campaign (3); then the message is a keyword (4), contains one (5), matches one only with
+ * typos (6), a new conversation (7), any message (8). Every campaign reply outranks every keyword:
+ * WhatsApp ties the reply to a message the business sent, which says more about what the customer
+ * answers than matching words does.
  */
-export type TriggerRank = 0 | 1 | 2 | 3 | 4;
+export type TriggerRank = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+
+/** The run's trigger type for each rank (the run records what started it). */
+export const TRIGGER_TYPE_OF_RANK = [
+  'campaign_reply',
+  'campaign_reply',
+  'campaign_reply',
+  'campaign_reply',
+  'keyword',
+  'keyword',
+  'keyword',
+  'conversation_started',
+  'any_message',
+] as const satisfies readonly TriggerType[];
+
+/**
+ * The campaign message a customer's message answers (ADR-414), as the dispatcher found it: the
+ * campaign, and the tapped quick-reply button's text (null for a quoting reply).
+ */
+export interface CampaignReplyContext {
+  campaignId: string;
+  buttonText: string | null;
+}
 
 /**
  * Whether a customer message starts this trigger. `text` is the message text (or the tapped
  * button's text); `newCase` is true for the first message of a new conversation or of a reopened
- * one. Business hours and cooldowns are checked by the dispatcher.
+ * one; `campaign` is the campaign message it answers within `CAMPAIGN_REPLY_HOURS`, if any.
+ * Business hours and cooldowns are checked by the dispatcher.
  */
 export function matchTrigger(
   trigger: AutomationTrigger,
-  message: { text: string | null; newCase: boolean },
+  message: { text: string | null; newCase: boolean; campaign?: CampaignReplyContext | null },
 ): TriggerRank | null {
   switch (trigger.type) {
+    case 'campaign_reply': {
+      const campaign = message.campaign;
+      if (!campaign) return null;
+      if (trigger.campaignId !== null && trigger.campaignId !== campaign.campaignId) return null;
+      if (trigger.button !== null) {
+        if (
+          campaign.buttonText === null ||
+          campaignButtonKey(campaign.buttonText) !== campaignButtonKey(trigger.button)
+        )
+          return null;
+        return trigger.campaignId !== null ? 0 : 2;
+      }
+      return trigger.campaignId !== null ? 1 : 3;
+    }
     case 'keyword': {
       if (!message.text) return null;
       const text = message.text;
-      if (trigger.keywords.some((k) => equalsKeyword(text, k))) return 0;
+      if (trigger.keywords.some((k) => equalsKeyword(text, k))) return 4;
       if (trigger.match === 'contains' && trigger.keywords.some((k) => matchesKeyword(text, k))) {
-        return 1;
+        return 5;
       }
       // A match only with typos ranks below every match without them, of any automation.
       if (!trigger.typos) return null;
       const near = trigger.match === 'exact' ? equalsKeywordWithTypos : matchesKeywordWithTypos;
-      return trigger.keywords.some((k) => near(text, k)) ? 2 : null;
+      return trigger.keywords.some((k) => near(text, k)) ? 6 : null;
     }
     case 'conversation_started':
-      return message.newCase ? 3 : null;
+      return message.newCase ? 7 : null;
     case 'any_message':
-      return 4;
+      return 8;
     case 'store_event':
     case 'api':
       return null;
@@ -1146,6 +1240,10 @@ export function describeTrigger(trigger: AutomationTrigger): string {
       return `A customer starts a conversation${hours}`;
     case 'any_message':
       return `Any customer message${hours}`;
+    case 'campaign_reply':
+      return `A customer replies to ${trigger.campaignId ? 'the chosen campaign' : 'any campaign'}${
+        trigger.button ? ` by tapping “${trigger.button}”` : ''
+      }${hours}`;
   }
 }
 
@@ -1179,12 +1277,30 @@ export type OrderPlaceholderValues = Readonly<Partial<Record<OrderPlaceholder, s
 const isOrderPlaceholder = (field: string): field is OrderPlaceholder =>
   Object.hasOwn(ORDER_PLACEHOLDERS, field);
 
+/**
+ * What {{campaign.<field>}} stands for in a run started by a reply to a campaign (ADR-414): the
+ * campaign's name as it is when the step runs, the variant the customer was sent (A to E, ADR-405,
+ * ADR-410), and the text of the quick-reply button they tapped (empty for a quoting reply).
+ */
+export const CAMPAIGN_PLACEHOLDERS = {
+  name: 'Campaign name',
+  variant: 'Variant the customer was sent (A to E)',
+  button: 'Quick-reply button tapped (empty for a quoting reply)',
+} as const;
+export type CampaignPlaceholder = keyof typeof CAMPAIGN_PLACEHOLDERS;
+export type CampaignPlaceholderValues = Readonly<Record<CampaignPlaceholder, string>>;
+
+const isCampaignPlaceholder = (field: string): field is CampaignPlaceholder =>
+  Object.hasOwn(CAMPAIGN_PLACEHOLDERS, field);
+
 export interface TextValues {
   contactName: string | null;
   companyName: string;
   variables: Readonly<Record<string, string>>;
   /** The order of a run started by order messages (null otherwise, or when it is gone). */
   order?: OrderPlaceholderValues | null;
+  /** The campaign a run started by a reply to a campaign answers (ADR-414); null otherwise. */
+  campaign?: CampaignPlaceholderValues | null;
 }
 
 export function renderText(template: string, values: TextValues): string {
@@ -1224,6 +1340,8 @@ function placeholderValue(name: string, values: TextValues): string | null {
     return VARIABLE_RE.test(name.slice(7)) ? (values.variables[name.slice(7)] ?? '') : null;
   if (name.startsWith('order.') && isOrderPlaceholder(name.slice(6)))
     return values.order?.[name.slice(6) as OrderPlaceholder] ?? '';
+  if (name.startsWith('campaign.') && isCampaignPlaceholder(name.slice(9)))
+    return values.campaign?.[name.slice(9) as CampaignPlaceholder] ?? '';
   // A run started through the API keeps the call's inputs with its answers (ADR-077); answer names
   // have no dot, so a step never overwrites them.
   if (name.startsWith('input.') && VARIABLE_RE.test(name.slice(6)))
@@ -1339,12 +1457,18 @@ export function httpPathTemplate(url: string): string {
  */
 function placeholdersIn(
   text: string,
-  allow: { secrets?: boolean; order?: boolean; inputs?: ReadonlySet<string> } = {},
+  allow: {
+    secrets?: boolean;
+    order?: boolean;
+    campaign?: boolean;
+    inputs?: ReadonlySet<string>;
+  } = {},
 ): {
   unknown: string[];
   answers: string[];
   secrets: string[];
   misplacedOrder: string[];
+  misplacedCampaign: string[];
   misplacedInputs: string[];
   undeclaredInputs: string[];
   literal: boolean;
@@ -1353,6 +1477,7 @@ function placeholdersIn(
   const answers: string[] = [];
   const secrets: string[] = [];
   const misplacedOrder: string[] = [];
+  const misplacedCampaign: string[] = [];
   const misplacedInputs: string[] = [];
   const undeclaredInputs: string[] = [];
   for (const match of text.matchAll(PLACEHOLDER_RE)) {
@@ -1363,13 +1488,24 @@ function placeholdersIn(
       secrets.push(name.slice(7));
     else if (name.startsWith('order.') && isOrderPlaceholder(name.slice(6))) {
       if (!allow.order) misplacedOrder.push(match[0]);
+    } else if (name.startsWith('campaign.') && isCampaignPlaceholder(name.slice(9))) {
+      if (!allow.campaign) misplacedCampaign.push(match[0]);
     } else if (name.startsWith('input.') && VARIABLE_RE.test(name.slice(6))) {
       if (!allow.inputs) misplacedInputs.push(match[0]);
       else if (!allow.inputs.has(name.slice(6))) undeclaredInputs.push(match[0]);
     } else unknown.push(match[0]);
   }
   const literal = text.replace(PLACEHOLDER_RE, '').trim().length > 0;
-  return { unknown, answers, secrets, misplacedOrder, misplacedInputs, undeclaredInputs, literal };
+  return {
+    unknown,
+    answers,
+    secrets,
+    misplacedOrder,
+    misplacedCampaign,
+    misplacedInputs,
+    undeclaredInputs,
+    literal,
+  };
 }
 
 /** Problems with an HTTP step's address and body (placeholders are checked separately). */
@@ -1582,6 +1718,67 @@ export function triggerIssues(
   return [];
 }
 
+/**
+ * What the checks of a trigger started by replies to a campaign need to know about a campaign
+ * (ADR-414): its number, and the quick-reply button texts of its templates (variant A's and every
+ * other variant's, as synced from Meta).
+ */
+export interface CampaignReference {
+  id: string;
+  name: string;
+  channelAccountId: string | null;
+  buttons: readonly string[];
+}
+
+/**
+ * Problems with a trigger started by replies to a campaign (ADR-414), given the company's campaigns
+ * by id (undefined: not known here, as in the editor of a member who cannot see campaigns; the
+ * server checks them): the chosen campaign must exist, and send from the automation's number when
+ * both are limited to one (a reply reaches only automations of the number it came to); a chosen
+ * button that none of the campaign's templates has is a warning (templates can change at Meta).
+ */
+export function campaignTriggerIssues(
+  trigger: AutomationTrigger,
+  channelAccountId: string | null,
+  campaigns: ReadonlyMap<string, CampaignReference> | undefined,
+): GraphIssue[] {
+  if (trigger.type !== 'campaign_reply' || trigger.campaignId === null || !campaigns) return [];
+  const campaign = campaigns.get(trigger.campaignId);
+  if (!campaign) {
+    return [
+      {
+        level: 'error',
+        nodeId: null,
+        message: 'The chosen campaign is not one of this company’s. Choose another campaign.',
+      },
+    ];
+  }
+  const issues: GraphIssue[] = [];
+  if (
+    campaign.channelAccountId &&
+    channelAccountId &&
+    campaign.channelAccountId !== channelAccountId
+  ) {
+    issues.push({
+      level: 'error',
+      nodeId: null,
+      message: `“${campaign.name}” sends from another WhatsApp number, so replies to it never reach this automation. Choose its number or every number.`,
+    });
+  }
+  const button = trigger.button;
+  if (
+    button !== null &&
+    !campaign.buttons.some((b) => campaignButtonKey(b) === campaignButtonKey(button))
+  ) {
+    issues.push({
+      level: 'warning',
+      nodeId: null,
+      message: `None of the templates of “${campaign.name}” has a quick-reply button “${button}”: until one does, no reply starts this automation.`,
+    });
+  }
+  return issues;
+}
+
 /** Outgoing edges of a node with a label for each. */
 export function edgesOf(node: AutomationNode): { label: string; target: string | null }[] {
   switch (node.type) {
@@ -1739,6 +1936,11 @@ export interface GraphReferences {
    * follow a customer reply.
    */
   apiInputs?: ReadonlySet<string>;
+  /**
+   * The automation starts from a reply to a campaign (ADR-414): {{campaign.<field>}} is available.
+   * The reply opens the service window, so messages need no template first.
+   */
+  campaignReply?: boolean;
   /** The company's templates by id; when given, template steps must use one HyFib can send. */
   templates?: ReadonlyMap<string, TemplateReference>;
   /** The WhatsApp account of the automation's number, when it is limited to one. */
@@ -1800,7 +2002,13 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
     });
   }
 
-  const extra = refs.storeEvent ? '{{order.<field>}}' : refs.apiInputs ? '{{input.<name>}}' : null;
+  const extra = refs.storeEvent
+    ? '{{order.<field>}}'
+    : refs.apiInputs
+      ? '{{input.<name>}}'
+      : refs.campaignReply
+        ? '{{campaign.<field>}}'
+        : null;
   const known = extra
     ? `{{name}}, {{company}}, {{answer.<name>}} or ${extra}`
     : '{{name}}, {{company}} or {{answer.<name>}}';
@@ -1812,6 +2020,12 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
       level: 'error',
       nodeId,
       message: `${placeholder} is an order field: order fields work only in automations started by a store’s order messages.`,
+    });
+  const misplacedCampaign = (nodeId: string, placeholder: string) =>
+    issues.push({
+      level: 'error',
+      nodeId,
+      message: `${placeholder} is a campaign field: campaign fields work only in automations started by a reply to a campaign.`,
     });
   const misplacedInput = (nodeId: string, placeholder: string) =>
     issues.push({
@@ -1861,7 +2075,11 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
       }
     }
     for (const text of textsOf(node)) {
-      const found = placeholdersIn(text, { order: refs.storeEvent, inputs: refs.apiInputs });
+      const found = placeholdersIn(text, {
+        order: refs.storeEvent,
+        campaign: refs.campaignReply,
+        inputs: refs.apiInputs,
+      });
       for (const u of found.unknown) {
         issues.push({
           level: 'error',
@@ -1870,6 +2088,7 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
         });
       }
       for (const u of found.misplacedOrder) misplacedOrder(node.id, u);
+      for (const u of found.misplacedCampaign) misplacedCampaign(node.id, u);
       for (const u of found.misplacedInputs) misplacedInput(node.id, u);
       for (const u of found.undeclaredInputs) undeclaredInput(node.id, u);
       for (const a of found.answers) checkAnswerUse(node.id, a);
@@ -1905,6 +2124,7 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
         const found = placeholdersIn(text, {
           secrets: headers,
           order: refs.storeEvent,
+          campaign: refs.campaignReply,
           inputs: refs.apiInputs,
         });
         for (const u of found.unknown) {
@@ -1919,6 +2139,7 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
           });
         }
         for (const u of found.misplacedOrder) misplacedOrder(node.id, u);
+        for (const u of found.misplacedCampaign) misplacedCampaign(node.id, u);
         for (const u of found.misplacedInputs) misplacedInput(node.id, u);
         for (const u of found.undeclaredInputs) undeclaredInput(node.id, u);
         for (const a of found.answers) checkAnswerUse(node.id, a);
