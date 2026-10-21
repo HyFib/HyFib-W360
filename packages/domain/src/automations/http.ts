@@ -25,7 +25,7 @@ import {
   type Tx,
 } from '@w360/db';
 import type { JobSigner } from '../jobs/envelope';
-import { adjacentSecrets, echoMatcher } from './echo';
+import { echoMatcher, looseSecretValuesOf } from './echo';
 import type { JobQueue } from '../jobs/queue';
 import {
   AUTOMATION_LIMITS,
@@ -711,10 +711,7 @@ async function send(egress: EgressClient, claimed: Claimed): Promise<SendOutcome
             secretNames: claimed.secretNames,
             secretValues: claimed.secrets.values(),
             // Secrets a step published before the separator check sends touching other text.
-            looseSecretValues: [...adjacentSecrets(claimed.request.headers)].flatMap((name) => {
-              const value = claimed.secrets.get(name);
-              return value === undefined ? [] : [value];
-            }),
+            looseSecretValues: looseSecretValuesOf(claimed.request.headers, claimed.secrets),
           })
         : { values: {}, dropped: {} },
     };

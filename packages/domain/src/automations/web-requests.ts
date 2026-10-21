@@ -56,12 +56,12 @@ export const webRequestSecretSchema = z.object({
     .regex(SECRET_NAME_RE, 'Secret names start with a letter and use a-z, 0-9 and _ (at most 40).'),
   // Saved values that hold a secret the request carried are left out (ADR-406); a value of one to
   // three characters would match ordinary answers ("1" in "price 1.5"), so new values need four.
-  // Secrets saved shorter before keep working.
+  // Secrets saved shorter before keep working. Spaces around the value do not count.
   value: z
     .string()
     .min(1, 'Enter the secret value.')
-    .min(
-      WEB_REQUEST_LIMITS.secretValueMinLength,
+    .refine(
+      (v) => v.length === 0 || v.trim().length >= WEB_REQUEST_LIMITS.secretValueMinLength,
       `Secret values need at least ${WEB_REQUEST_LIMITS.secretValueMinLength} characters.`,
     )
     .max(

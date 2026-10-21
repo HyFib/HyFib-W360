@@ -64,6 +64,11 @@ beforeAll(async () => {
         // A server that echoes the request back as text, the secret's header included.
         res.writeHead(200, { 'content-type': 'text/plain' });
         res.end(`You sent ${String(req.headers.authorization ?? '')}`);
+      } else if (req.url === '/probe') {
+        // Echoes the request's X-Probe header back in X-Echo.
+        res.setHeader('x-echo', String(req.headers['x-probe'] ?? ''));
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
       } else if (req.url === '/hang') {
         // Never answers: the client's deadline ends the exchange.
       } else {
@@ -688,6 +693,78 @@ describe('automation HTTP step', () => {
       'precondition_failed',
       /X-Crm-Ref header is named like the secret “crm_ref”/,
     );
+  });
+
+  it('refuses at publish a secret touching other text in a step that saves values (ADR-406)', async () => {
+    const s = await setup();
+    const graph = orderGraph('/probe', {
+      headers: [{ name: 'X-Probe', value: 'q{{secret.shop_token}}q' }],
+    });
+    await expectAppError(
+      publish(s.owner, {
+        ...graph,
+        nodes: graph.nodes.map((n) =>
+          n.id === 'call'
+            ? { ...n, save: [{ from: 'header', header: 'X-Echo', saveAs: 'status' }] }
+            : n,
+        ),
+      }),
+      'precondition_failed',
+      /put a separator/,
+    );
+  });
+
+  it('drops the echo of a short secret a step published before the separator check sent beside text (ADR-406)', async () => {
+    const s = await setup();
+    await webRequests().saveSecret(s.owner, { name: 'crm_pin', domain: HOST, value: '4829' });
+    const withProbe = (probe: string) => {
+      const graph = orderGraph('/probe', { headers: [{ name: 'X-Probe', value: probe }] });
+      return {
+        ...graph,
+        nodes: graph.nodes.map((n) =>
+          n.id === 'call'
+            ? { ...n, save: [{ from: 'header', header: 'X-Echo', saveAs: 'status' }] }
+            : n,
+        ),
+      };
+    };
+    // Published as allowed now, then given a version written as a step could be before the check.
+    await publish(s.owner, withProbe('pin {{secret.crm_pin}}'));
+    const client = await fx.dbs.adminPool.connect();
+    try {
+      await client.query('BEGIN');
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO app.automation_versions (id, tenant_id, automation_id, kind, number, trigger,
+                graph, channel_account_id, definition_sha256, note, created_by_membership_id)
+         SELECT gen_random_uuid(), v.tenant_id, v.automation_id, 'published', v.number + 1,
+                v.trigger, $2::jsonb, v.channel_account_id,
+                encode(sha256(convert_to($2::text, 'UTF8')), 'hex'),
+                'written before the separator check', v.created_by_membership_id
+           FROM app.automation_versions v
+           JOIN app.automations a ON a.tenant_id = v.tenant_id AND a.active_version_id = v.id
+          WHERE a.tenant_id = $1 AND a.status = 'active'
+         RETURNING id`,
+        [s.c.tenant.id, JSON.stringify(withProbe('q{{secret.crm_pin}}q'))],
+      );
+      expect(inserted.rows).toHaveLength(1);
+      await client.query(
+        `UPDATE app.automations SET active_version_id = $2 WHERE tenant_id = $1 AND status = 'active'`,
+        [s.c.tenant.id, inserted.rows[0]!.id],
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    const { run, call } = await waitingAtCall(s);
+    expect(await processHttpCall(httpDeps(), scopeOf(s), call.id)).toBe('succeeded');
+    // The server received the secret beside the letters and echoed it; as a token it would pass.
+    expect(received.at(-1)?.headers['x-probe']).toBe('q4829q');
+    const done = await onlyCall(run.id);
+    expect(done.saved_values).toStrictEqual({});
+    expect(await droppedOf(call.id)).toStrictEqual({ status: 'echoed_secret' });
   });
 
   it('does not save a header named like a secret added after publishing, and says so (ADR-406)', async () => {

@@ -28,9 +28,9 @@ saved nothing. This closes P4-02's "response headers or non-JSON bodies as value
   the request carried (six characters or more anywhere; one to five as a whole token, or anywhere
   when the request sent it touching other text), checked on the whole value before clipping, as written and JSON-unescaped, URL- and
   form-decoded, with character references read, and for the secret in base64 or base64url at every
-  alignment in each of those forms (secrets of eight or more); a value ending with a long secret's
-  start (four or more characters after other text, eight or more on its own) is left out as a
-  possible cut echo. Secrets transformed otherwise are not recognised (T355). In a step that saves
+  alignment in each of those forms (secrets of eight or more); a value ending with the start of a
+  secret of six or more characters (four or more characters after other text; on its own, eight
+  or more or all but one or two of the secret) is left out as a possible cut echo. Secrets transformed otherwise are not recognised (T355). In a step that saves
   values, a secret placeholder touching a letter, a digit or another placeholder is refused; new
   secret values need four characters.
 - **Answers left out are recorded:** by name and reason (`refused_header`, `secret_header`,
@@ -68,16 +68,27 @@ unrecognised transform. 0319 was changed in place (unapplied): only its comment.
 ### Third review fixes (fourth commit)
 
 A third review found no High and two Mediums, fixed: a member could defeat a short secret's token
-match from the step's own header (`q{{secret.pin}}q`, the secret twice, `%41` or a fullwidth digit
-beside it), now refused by a separator check at save and publish (`secretAdjacencyProblem`) and,
+match from the step's own header (`q{{secret.pin}}q`, the secret twice, `%41` beside it), now
+refused by a separator check at save and publish (`secretAdjacencyProblem`) and,
 for steps published before, matched anywhere by the worker (`adjacentSecrets` over the rendered
 headers), with six- and seven-character secrets matched anywhere always; and a value that is a
 long secret's bare start was saved at any length (now dropped from eight characters; ADR-406 and
 T355 no longer claim a cut echo reveals at most three characters, and name truncated prefixes
 followed by an ellipsis as unrecognised). Also: new secret values need four characters; the token
 boundary applies only on a side where the secret's edge is a letter or digit; one matcher per
-response. The worker's passing of those secrets is not covered by a test (a published step with
-the adjacency can no longer be created through the service).
+response.
+
+### Fourth review fixes (fifth commit)
+
+A fourth review found no High or Medium. Fixed: cut echoes of six- to ten-character secrets could
+reveal almost all of them (cut-echo checks now cover secrets from six characters, and a bare start
+counts from eight characters or when it is at most two short of the secret; ADR-406 and T355 give
+the exact limit per secret length); the worker's passing of secrets sent beside text is now a
+helper (`looseSecretValuesOf`) with unit tests and an integration test that writes a version as a
+step could be before the separator check and expects the echo dropped; an integration test of
+the publish refusal; the fullwidth-digit case removed from the docs (header templates are
+printable ASCII and answers are percent-encoded); one shared `LETTER_OR_DIGIT`; a secret value
+of four spaces refused (spaces around a value do not count).
 
 ### Tests
 
@@ -96,7 +107,9 @@ the adjacency can no longer be created through the service).
   credential-like name refused at save; a secret's header and a secret's name refused at publish;
   an echoing server's text left out while the status is saved, recorded as `echoed_secret` and
   returned by `getRun`; a secret added after publishing makes the worker leave its header out
-  (`secret_header`).
+  (`secret_header`); a secret beside other text refused at publish; a version written as a step
+  could be before the separator check (`q{{secret.crm_pin}}q`) has its echo dropped
+  (`echoed_secret`).
 - E2e (`web-requests.spec.ts`, CI only): a header and the status code chosen in the editor, a
   refused Set-Cookie with its message, the simulator's labels and the live answer using them.
 - Manual mutation testing: 23/23 deliberate regressions caught by the unit tests in the first
@@ -104,7 +117,8 @@ the adjacency can no longer be created through the service).
   removed); for the first review's fixes 25/25 (24/25 first: base64url was not distinguished from
   base64 until the test used a secret whose encoding holds +); for the second review's fixes 14/14
   (13/14 first: the order of answers left out survived until the test's order differed from the
-  object's); for the third review's fixes 11/11. The worker's loading of secret names and
+  object's); for the third review's fixes 11/11; for the fourth review's fixes 6/6 (the worker's
+  call of `looseSecretValuesOf` is covered only by the integration test, in CI). The worker's loading of secret names and
   the column, its check and guard are covered by the integration tests only.
 
 ### Test commands and results (local, 2026-10-21)
@@ -112,7 +126,7 @@ the adjacency can no longer be created through the service).
 | Command                                            | Result                                                     |
 | -------------------------------------------------- | ---------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                      |
-| `pnpm test` (unit)                                 | 1,991 of 1,991 passed (180 files)                          |
+| `pnpm test` (unit)                                 | 1,993 of 1,993 passed (180 files)                          |
 | `pnpm build`                                       | passed                                                     |
 | migration 0319 parse check (pglast)                | parsed, PL/pgSQL included                                  |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: no local PostgreSQL or browser; CI runs them |

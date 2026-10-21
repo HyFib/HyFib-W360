@@ -17679,12 +17679,17 @@ Decision:
   secret part (a step published before the separator check below) counts anywhere instead, for
   that call (`adjacentSecrets` over the headers as rendered).
 - **Cut echoes:** a value whose last characters (an escape cut short ignored) are the start of a
-  secret of eight characters or more is left out as a possible cut echo: four or more characters
-  after other text ("Bearer sk_l"), or eight or more when nothing precedes them (a JSON field
-  holding the first 64 characters of a token). So a value of up to seven characters that is a
-  secret's bare start is saved ("live" against `live_9f8a…`), and a value ending in four to seven
-  characters of a secret's start after other text is dropped even when it is ordinary data
-  (`Environment: live`, `mode=live`): that fails safe, with its own reason.
+  secret of six characters or more is left out as a possible cut echo: four or more characters
+  after other text ("Bearer sk_l", `ref=Zq8vK` against a six-character `Zq8vK2`); and when nothing
+  precedes them (a bare start, such as a JSON field holding the first 64 characters of a token),
+  eight or more characters, or all but one or two of the secret (`Zq8vK2p` against `Zq8vK2pa`). So
+  a bare start is saved only when it is under eight characters and at least three short of the
+  secret ("live" against `live_9f8a…`; for a secret of six, seven, eight, nine or ten characters
+  or more, at most three, four, five, six or seven of its characters), and after other text at
+  most three characters of a secret's start are saved. A secret whose start repeats inside it (a
+  self-overlapping secret) can make a shorter value end with a counted overlap and be dropped,
+  which fails safe; so does a value ending in four to seven characters of a secret's start after
+  other text when it is ordinary data (`Environment: live`, `mode=live`), with its own reason.
 - **Separators beside a secret in a header:** because short secrets are matched as tokens, a
   member who can edit automations but not see secrets could otherwise build the adjacency on
   purpose (`X-Probe: q{{secret.crm_pin}}q`, a secret twice in a row, `%41` or a placeholder right
@@ -17729,7 +17734,10 @@ Decision:
 Known limits: a value is saved only from a 2xx response; secrets the server transforms other than
 as above are not recognised (hashed, split, encrypted, encoded twice, base64 wrapped in lines, a
 number parsed and written again without its leading zeros); a value that is a secret's bare start
-can reveal up to seven characters; a secret's start followed by other text (an ellipsis or a
+can reveal at most three, four, five, six or seven of its characters for a secret of six, seven,
+eight, nine or ten characters or more, a value ending after other text at most three, and for a
+secret of four or five characters (no cut-echo check) all but one; a secret's start followed by
+other text (an ellipsis or a
 closing quote: `Invalid key sk_live_abcd... (truncated)`, a text body ending `"}`) is not
 recognised, so a server that truncates its echo that way can reveal that much; a short secret
 (under eight characters) is not looked for in base64; a short secret run into letters or digits by
@@ -17759,8 +17767,8 @@ checked in every decoded form), and nits (a numeric secret parsed again is a tra
 recognised, answers left out in the step's order, `authn`, `authz`, `passcode` and `hmac`
 refused). All were fixed.
 A third review found no High. It found two Mediums: a member could defeat the token match of a
-short secret from the step itself (`q{{secret.pin}}q`, the secret twice, `%41` or a fullwidth
-digit beside it), now refused by the separator check and, for steps already published, matched
+short secret from the step itself (`q{{secret.pin}}q`, the secret twice, `%41` beside it),
+now refused by the separator check and, for steps already published, matched
 anywhere by the worker, with six- and seven-character secrets matched anywhere always; and the
 "after other text" rule let a value that is a long secret's bare start through at any length (now
 from eight characters), with the claim that a cut echo reveals at most three characters removed.

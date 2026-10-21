@@ -1432,7 +1432,8 @@ function httpStepIssues(node: NodeOf<'http_request'>, refs: GraphReferences): st
   return out;
 }
 
-const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
+/** A letter or a digit in any script (shared with the worker's echo checks, `automations/echo.ts`). */
+export const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
 
 /**
  * Why a header value's `{{secret.<name>}}` touches a letter, a digit or another placeholder, or

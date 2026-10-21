@@ -14,6 +14,8 @@
  * followed by an ellipsis) are not recognised.
  */
 
+import { LETTER_OR_DIGIT } from './graph';
+
 /** Secrets at least this long are also looked for in base64 and as the start of a cut echo. */
 export const ECHO_LONG_SECRET_LENGTH = 8;
 /** Secrets at least this long count anywhere in a value; shorter ones only as whole tokens. */
@@ -110,21 +112,24 @@ function base64Forms(secret: string): string[] {
   return forms;
 }
 
+/** The most characters of a needle a bare start may leave out and still count as its echo. */
+const BARE_START_SHORTFALL = 2;
+
 /**
  * Whether the last characters of `text` begin `needle`: from `ECHO_MIN_OVERLAP` characters after
- * other text, or from `ECHO_LONG_SECRET_LENGTH` when the whole value is the start of the needle. A
- * value that is only a secret's first word ("live" against `live_9f8a…`) is ordinary data; one
- * that is its first eight characters or more is not.
+ * other text. When the whole value is the start of the needle (a bare start) it counts from
+ * `ECHO_LONG_SECRET_LENGTH` characters, or when at most `BARE_START_SHORTFALL` characters of the
+ * needle are missing. So "live" against `live_9f8a…` is ordinary data, while `Zq8vK2p` against
+ * `Zq8vK2pa` is not.
  */
 function endsWithStartOf(text: string, needle: string): boolean {
   for (let k = Math.min(needle.length - 1, text.length); k >= ECHO_MIN_OVERLAP; k -= 1) {
-    if (k === text.length && k < ECHO_LONG_SECRET_LENGTH) continue;
+    const bare = k === text.length;
+    if (bare && k < ECHO_LONG_SECRET_LENGTH && needle.length - k > BARE_START_SHORTFALL) continue;
     if (needle.startsWith(text.slice(-k))) return true;
   }
   return false;
 }
-
-const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
@@ -141,7 +146,7 @@ interface PreparedSecret {
   secret: string;
   /** Set for a short secret matched as a whole token; null when it counts anywhere. */
   token: RegExp | null;
-  /** The secret and its base64 forms, for cut echoes (long secrets only). */
+  /** The secret and its base64 forms, for cut echoes (six characters or more). */
   starts: string[];
   /** Its base64 forms, looked for anywhere (long secrets only). */
   encoded: string[];
@@ -160,12 +165,13 @@ export function echoMatcher(secrets: Iterable<string>, loose: Iterable<string> =
     .filter((s) => s.length > 0)
     .map((secret) => {
       const long = secret.length >= ECHO_LONG_SECRET_LENGTH;
+      const startsCount = secret.length >= ECHO_ANYWHERE_SECRET_LENGTH;
       const anywhere = secret.length >= ECHO_ANYWHERE_SECRET_LENGTH || looseSet.has(secret);
       const encoded = long ? base64Forms(secret) : [];
       return {
         secret,
         token: anywhere ? null : tokenPattern(secret),
-        starts: long ? [secret, ...encoded] : [],
+        starts: startsCount ? [secret, ...encoded] : [],
         encoded,
       };
     });
@@ -240,4 +246,18 @@ export function adjacentSecrets(
     });
   }
   return names;
+}
+
+/**
+ * The values of the secrets a request's headers send touching other text (`adjacentSecrets`), for
+ * the worker's matcher; a secret not in `secrets` (not found when the call was claimed) gives none.
+ */
+export function looseSecretValuesOf(
+  headers: readonly { parts: readonly ({ text: string } | { secret: string })[] }[],
+  secrets: ReadonlyMap<string, string>,
+): string[] {
+  return [...adjacentSecrets(headers)].flatMap((name) => {
+    const value = secrets.get(name);
+    return value === undefined ? [] : [value];
+  });
 }

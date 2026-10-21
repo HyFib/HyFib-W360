@@ -17,6 +17,7 @@ import {
   ECHO_LONG_SECRET_LENGTH,
   echoedSecret,
   holdsSecret,
+  looseSecretValuesOf,
 } from './echo';
 import { webRequestSecretSchema } from './web-requests';
 import {
@@ -277,6 +278,14 @@ describe('saved value sources in the graph (ADR-406)', () => {
     ]);
     expect(parse('').error?.issues[0]?.message).toBe('Enter the secret value.');
     expect(parse('4829').success).toBe(true);
+    // Spaces around the value do not count towards the four characters.
+    for (const value of ['    ', ' 48 ', '\t482\t']) {
+      expect(
+        parse(value).error?.issues.map((i) => i.message),
+        JSON.stringify(value),
+      ).toStrictEqual(['Secret values need at least 4 characters.']);
+    }
+    expect(parse(' 4829 ').success).toBe(true);
   });
 
   it('a value saved by any source is an answer later steps can use', () => {
@@ -764,6 +773,40 @@ describe('values saved from a response (ADR-406)', () => {
       values: { ref: secret.slice(0, 7) },
       dropped: {},
     });
+  });
+
+  it('leaves out most of a six to ten character secret cut short, and saves "live"', () => {
+    const cut = (value: string, probe: string) => echoedSecret(value, value, [probe]);
+    // A bare start missing at most two characters, or after other text from four characters.
+    expect(cut('Zq8vK2p', 'Zq8vK2pa')).toBe('possible_cut_echo');
+    expect(cut('Zq8vK2p', 'Zq8vK2paX')).toBe('possible_cut_echo');
+    expect(cut('ref=Zq8vK2', 'Zq8vK2p')).toBe('possible_cut_echo');
+    expect(cut('ref=Zq8vK', 'Zq8vK2')).toBe('possible_cut_echo');
+    // A bare start three or more characters short of a secret under eight characters.
+    expect(cut('Zq8v', 'Zq8vK2p')).toBeNull();
+    expect(cut('Zq8vK', 'Zq8vK2pa')).toBeNull();
+    // A secret's first word on its own is ordinary data.
+    expect(cut('live', 'live_test_value_one')).toBeNull();
+  });
+
+  it('gives the worker the values of the secrets sent touching other text', () => {
+    const secrets = new Map([
+      ['crm_pin', '4829'],
+      ['shop_token', 'shop-token-value'],
+    ]);
+    expect(
+      looseSecretValuesOf(
+        [
+          { parts: [{ text: 'q' }, { secret: 'crm_pin' }, { text: 'q' }] },
+          { parts: [{ text: 'Bearer ' }, { secret: 'shop_token' }] },
+          { parts: [{ text: 'x' }, { secret: 'missing' }] },
+        ],
+        secrets,
+      ),
+    ).toStrictEqual(['4829']);
+    expect(
+      looseSecretValuesOf([{ parts: [{ text: 'Bearer ' }, { secret: 'shop_token' }] }], secrets),
+    ).toStrictEqual([]);
   });
 
   it('finds base64 of a secret inside JSON escapes or percent-encoding', () => {
