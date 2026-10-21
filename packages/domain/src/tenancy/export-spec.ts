@@ -651,6 +651,8 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'updated_at',
       'checkout_id',
       'automation_run_id',
+      'shipment_id',
+      'dedupe_key',
     ],
   },
   {
@@ -729,6 +731,30 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'created_at',
       'updated_at',
     ],
+  },
+  {
+    table: 'app.commerce_store_shipments',
+    columns: [
+      'id',
+      'store_id',
+      'order_id',
+      'external_id',
+      'status',
+      'display_status',
+      'failed',
+      'remote_created_at',
+      'remote_updated_at',
+      'tracking_company',
+      'tracking_number',
+      'tracking_url',
+      'synced_at',
+      'created_at',
+      'updated_at',
+    ],
+    omitted: {
+      tracking_keys:
+        'Digests HyFib keeps to tell a new tracking from one already seen (ADR-413); the tracking itself is exported.',
+    },
   },
   {
     table: 'app.commerce_stores',

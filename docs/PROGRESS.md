@@ -1,5 +1,101 @@
 # Progress
 
+## 2026-10-21 — Store follow-ups per shipment (P4-06f, ADR-413)
+
+Status: **Implemented (migration 0323); unit tests run locally, integration and e2e tests in CI
+only; no live Shopify or Meta traffic.** An order message rule fired once per order and event, so
+an order shipped in several parcels got one "shipped" message and a tracking number added later
+got none; BACKLOG P4-06f listed this as not built.
+
+### Completed
+
+- **Research** (`docs/research/store-connectors.md` §5, SH-044 to SH-048, WC-024): the shipment
+  webhook topics and the scope they need (`read_fulfillments` or `read_marketplace_orders`), the
+  `Fulfillment` and `FulfillmentTrackingInfo` fields in the 2026-07 and 2025-10 Admin schemas, the
+  REST Fulfillment resource (`order_id`), and WooCommerce core's lack of shipments (its Order
+  Fulfillments feature is off by default with no setting). Unconfirmed: a delivery's body, which
+  fulfillments past ten an order returns, links Shopify builds itself.
+- **Events** (`messages-model.ts`): `shipment_created` ("Shipment sent", once per shipment, dated by
+  its creation) and `tracking_updated` ("Tracking updated", once per shipment and tracking not seen
+  for it, dated by the shipment's `updatedAt`), Shopify only; a tracking is the first entry's
+  number (case and spaces ignored) and link, the carrier alone no change, at most ten remembered;
+  nothing for cancelled or failed shipments, cancelled orders or the past; test orders and late
+  events recorded as skipped; new skip reasons `shipment_cancelled` and `tracking_replaced`.
+- **Copy and dedupe** (migration 0323, `worker.ts`): `app.commerce_store_shipments` kept with each
+  order read, never backwards, under row locks; store messages gain `shipment_id` and `dedupe_key`
+  with a unique key per shipment, event and key; shipment messages name no order, so the old key
+  and the outgoing webhook triggers are untouched (expand only, three checks widened `NOT VALID`).
+- **Sending** (`order-messages.ts`): ADR-048's checks, delay and sending hours, the shipment's own
+  carrier, number and link in the existing variable mapping (fallback or `missing_variable`), a
+  replaced tracking skipped; an automation instead of a template (ADR-050's generic path).
+- **Subscriptions** (`model.ts`, `shopify.ts`, `webhook.ts`, `service.ts`): every authorization asks
+  for `read_fulfillments` (not required); with it the webhook check subscribes `FULFILLMENTS_CREATE`
+  and `FULFILLMENTS_UPDATE` (`includeFields` `id`, `order_id`, `updated_at`), whose deliveries signal
+  a read of the order; older stores keep working and are brought up to date by "Allow shipment
+  updates in Shopify" (`startShipmentAccess`, `commerce.manage`, audited) and the idempotent
+  six-hourly check; a refused topic is shown, not a failed sync; the transit re-read also runs while
+  a shipment rule is on.
+- **Pages:** a "Shipment messages" section on the store's Order messages page (shipment access, the
+  two rules, a note that tracking values are the shipment's own), the report and the order page
+  listing shipment messages with their order, automation labels.
+- **Privacy:** a trigger clears shipments' tracking and digests whenever their order is redacted
+  (erasure as `w360_definer`, `customers/redact`, reads of erased numbers); the export has the
+  shipments without digests.
+- **Docs:** ADR-413, THREAT-MODEL T362, research §5, BACKLOG P4-06f, SECURITY, DEPLOYMENT (Shopify
+  app scopes, migration 0323, rollout), RUNBOOKS §10J, DATA-RETENTION. No public API or OpenAPI
+  change (no endpoint returns store messages, and the webhook enums keep their five order events).
+  The feature matrix's statuses are unchanged.
+
+### Tests
+
+- Unit (`stores/shipment-messages.test.ts`, 19 tests; `messages-model.test.ts`,
+  `webhooks/webhooks.test.ts` updated): the events' availability, automations and delays; detection
+  of a new shipment and of a new tracking, the rule's start to the second, the 48-hour bound, test
+  orders, cancelled shipments and orders; tracking keys (case, spaces, number against link, empty),
+  first-seen not counted, going back not counted, the bound of ten; dedupe key shapes; parsing
+  fulfillments (ids, statuses, failed, https links only, at most ten, missing times); the scopes,
+  `includeFields` and `order_id` parsing; the approval shortfall messages; the skip reasons never
+  reported by order webhooks.
+- Integration (CI only, `stores.test.ts`, 7 new tests): one message per shipment and per new
+  tracking with each shipment's own number, a duplicate and a repeated delivery, a carrier-only and
+  a back-to-earlier change sending nothing, the order page, the report and no outgoing webhook
+  event; two reads of a new shipment and of a tracking at once giving one message each, a stale read
+  changing nothing; the past, a replaced tracking, a cancelled shipment, a shipment first seen
+  failed, a cancelled order, a test order and a late shipment; sending hours, permissions,
+  isolation and WooCommerce refused; new stores subscribed with trimmed payloads, an older store
+  left as it was, brought up to date once after its approval, never subscribed twice, a refused
+  topic shown, malformed and unknown-shop deliveries; an automation started per shipment; the
+  transit re-read finding a new tracking without a webhook; erasure and `customers/redact` clearing
+  tracking for good. Existing tests updated for the new scope and the two extra subscriptions.
+- E2E (CI only, `stores.spec.ts`): a new store subscribed to the shipment topics, "Shipment sent"
+  set up in the browser, a `fulfillments/create` delivery sending the template with the shipment's
+  tracking, a repeated delivery sending nothing, the report and the order page.
+- Hand mutation of 26 rules, bounds and checks: 19 caught by the unit tests (detection, bounds,
+  tracking keys, parsing, scopes, `order_id`, `includeFields`, the shortfall message, the transit
+  rules). The 7 others need the database or the stand-ins, each exercised by a named integration
+  test that did not run here: shipment topics created without the scope ("subscribes new stores
+  to the shipment webhooks and brings existing stores up to date once"), a replaced tracking or a
+  cancelled shipment still sent ("sends nothing about the past, cancelled shipments or orders, test
+  orders or late events, and only the newest tracking"), the order's tracking instead of the
+  shipment's and the fulfillment topics not routed ("sends one message per shipment and per new
+  tracking, each with its own shipment's tracking"), a redacted order's shipment keeping its
+  tracking on a later read ("clears shipments' tracking with the customer's details, for good"),
+  and a stale shipment read applied ("records one message when the same shipment is read twice at
+  once, and never goes backwards").
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                                         | Result                                                         |
+| ------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`                                                 | clean                                                          |
+| `npx prettier --check . --ignore-path .prettierignore --ignore-path .gitignore` | clean                                                          |
+| `pnpm typecheck`                                                                | clean                                                          |
+| `pnpm test` (unit)                                                              | 2,159 of 2,159 passed (187 files)                              |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`                             | clean                                                          |
+| `pnpm build`                                                                    | passed                                                         |
+| hand mutation of 26 rules, bounds and checks                                    | 19 caught by unit tests; 7 exercised only by integration tests |
+| `pnpm test:integration`, `pnpm test:e2e`                                        | not run here: no local PostgreSQL or browser; CI runs them     |
+
 ## 2026-10-21 — Saved replies that carry a file (P3-06, W-087, ADR-411)
 
 Status: **Implemented (migration 0321); unit tests run locally, integration and e2e tests in CI

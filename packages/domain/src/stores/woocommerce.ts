@@ -337,6 +337,9 @@ export function parseWooOrder(raw: unknown, storeCurrency: string | null): Store
     trackingNumber: null,
     trackingUrl: null,
     items,
+    // Core orders have no shipments: the Order Fulfillments feature is off by default and has no
+    // setting merchants can turn on (WC-024).
+    shipments: [],
   };
 }
 

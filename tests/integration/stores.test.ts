@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { createEgressClient, DEFAULT_EGRESS_POLICY } from '@w360/core/egress';
-import { authorizedTenantScope } from '@w360/db';
+import { authorizedTenantScope, sql } from '@w360/db';
 import {
   advanceAutomationRun,
   applyAutomationRetention,
@@ -31,6 +31,7 @@ import {
   processStoreMessage,
   processTemplateSubmit,
   processWebhookDeliveries,
+  recordOrderEvents,
   dayOf,
   saveStoreOrders,
   saveStoreProducts,
@@ -43,6 +44,7 @@ import {
   syncTemplates,
   WebhookOAuthTokenCache,
   type StoreMessageEvent,
+  type StoreShipmentRecord,
   type WebhookOrderMessageEvent,
   type WebhookOrderMessageSkipReason,
   type WebhookCartReminder,
@@ -59,6 +61,7 @@ import {
   startShopifyStandIn,
   type ShopifyStandIn,
   type StandInCheckout,
+  type StandInFulfillment,
 } from '../support/shopify-stand-in';
 import { startWooStandIn, type WooStandIn } from '../support/woocommerce-stand-in';
 import { acceptInvitation, createUser, failOnLog, invite, type TestUser } from './helpers';
@@ -420,11 +423,14 @@ describe('Shopify stores', () => {
     const store = await storeRow(storeId);
     expect(store).toMatchObject({ state: 'connected', name: 'Tea House', currency: 'INR' });
     expect(store?.backfilled_at).not.toBeNull();
-    // HyFib's subscriptions, pointing at its webhook route (SH-021, SH-022).
+    // HyFib's subscriptions, pointing at its webhook route (SH-021, SH-022), with the shipment
+    // topics the read_fulfillments grant allows (SH-044, ADR-413).
     const subs = shopify.shops.get(shop)?.subscriptions ?? [];
     expect(subs.map((s) => s.topic).sort()).toEqual(
       [
         'APP_UNINSTALLED',
+        'FULFILLMENTS_CREATE',
+        'FULFILLMENTS_UPDATE',
         'ORDERS_CREATE',
         'ORDERS_DELETE',
         'ORDERS_UPDATED',
@@ -673,6 +679,7 @@ describe('Shopify stores', () => {
             trackingNumber: null,
             trackingUrl: null,
             items: [],
+            shipments: [],
           },
         ],
         new Date(),
@@ -724,7 +731,8 @@ describe('Shopify stores', () => {
     const outcomes = await drain(c, storeId, hoursLater);
     expect(outcomes.at(-1)).toBe('synced');
     expect(await orderRows(storeId)).toHaveLength(130);
-    expect(state.subscriptions).toHaveLength(7);
+    // The connector's seven topics and, with read_fulfillments granted, the two shipment topics.
+    expect(state.subscriptions).toHaveLength(9);
     // The token was refreshed before it expired (SH-007): a new pair was stored atomically.
     const store = await storeRow(storeId);
     expect(Number(store?.credentials_version)).toBeGreaterThan(2);
@@ -3804,7 +3812,9 @@ describe('Cart reminders', () => {
     const { shop, storeId } = await shopifyStoreForMessages(c, owner);
     const template = await approvedTemplate(c, owner, cartReminder);
     await optIn(owner, storeId);
-    expect(await storeRow(storeId)).toMatchObject({ granted_scopes: 'read_orders,read_products' });
+    expect(await storeRow(storeId)).toMatchObject({
+      granted_scopes: 'read_orders,read_products,read_fulfillments',
+    });
     await expectAppError(
       storeMessages().saveStoreConsent(owner, { storeId, useStoreConsent: true }),
       'validation_failed',
@@ -3824,7 +3834,7 @@ describe('Cart reminders', () => {
     const admin = await fx.ctx(c, await member(c, 'admin'));
     const pending = await allowCustomerAccess(owner, storeId);
     expect(new URL(pending.url).searchParams.get('scope')).toBe(
-      'read_orders,read_products,read_customers',
+      'read_orders,read_products,read_fulfillments,read_customers',
     );
     await expectAppError(service().acceptShopifyApproval(admin, pending.checked), 'forbidden');
     const credentialsBefore = Number((await storeRow(storeId))?.credentials_version);
@@ -3840,7 +3850,7 @@ describe('Cart reminders', () => {
       state: 'connected',
       access_code_ciphertext: null,
       access_error: null,
-      granted_scopes: 'read_orders,read_products,read_customers',
+      granted_scopes: 'read_orders,read_products,read_fulfillments,read_customers',
       credentials_version: credentialsBefore + 1,
     });
     await expectAppError(service().startCustomerAccess(owner, storeId), 'conflict', /already/);
@@ -5628,5 +5638,781 @@ describe('Plans and store work', () => {
     await onPlan(c, { modules: ['commerce'] });
     await placeOrder(c, shop, storeId, '9603', '+919812379603');
     expect(await runMessages(c, storeId)).toEqual([{ outcome: 'skipped', reason: 'not_in_plan' }]);
+  });
+});
+
+// Shipment messages (ADR-413) ---------------------------------------------------------------------
+
+interface ShipmentMessageRow extends Record<string, unknown> {
+  id: string;
+  event: string;
+  state: string;
+  skip_reason: string | null;
+  dedupe_key: string;
+  order_id: string | null;
+  message_id: string | null;
+  send_at: Date;
+  shipment_external_id: string;
+}
+
+async function shipmentMessageRows(storeId: string) {
+  return fx.query<ShipmentMessageRow>(
+    `SELECT sm.id, sm.event, sm.state, sm.skip_reason, sm.dedupe_key, sm.order_id, sm.message_id,
+            sm.send_at, s.external_id AS shipment_external_id
+       FROM app.commerce_store_messages sm
+       JOIN app.commerce_store_shipments s ON s.id = sm.shipment_id
+      WHERE sm.store_id = $1 ORDER BY sm.created_at, sm.dedupe_key`,
+    [storeId],
+  );
+}
+
+const shipmentSummary = async (storeId: string) =>
+  (await shipmentMessageRows(storeId)).map((r) => [
+    r.shipment_external_id,
+    r.event,
+    r.dedupe_key,
+    r.state,
+    r.skip_reason,
+  ]);
+
+async function shipmentRows(storeId: string) {
+  return fx.query<
+    Record<string, unknown> & {
+      id: string;
+      external_id: string;
+      tracking_keys: string[];
+      tracking_number: string | null;
+      tracking_url: string | null;
+    }
+  >('SELECT * FROM app.commerce_store_shipments WHERE store_id = $1 ORDER BY external_id::bigint', [
+    storeId,
+  ]);
+}
+
+/** A Shopify fulfillment of the stand-in, shipped now unless told otherwise. */
+const shipped = (id: string, over: Partial<StandInFulfillment> = {}): StandInFulfillment => ({
+  id,
+  status: 'SUCCESS',
+  displayStatus: 'IN_TRANSIT',
+  createdAt: iso(),
+  updatedAt: iso(),
+  deliveredAt: null,
+  trackingInfo: [],
+  ...over,
+});
+const tracking = (number: string, company = 'Delhivery') => [
+  { company, number, url: `https://track.example/${number}` },
+];
+
+/** Shopify's shipment webhook: only the fulfillment, its order and its update time are kept. */
+const fulfillmentSignal = (
+  shop: string,
+  orderId: string,
+  fulfillmentId: string,
+  topic: 'fulfillments/create' | 'fulfillments/update' = 'fulfillments/create',
+  webhookId?: string,
+) =>
+  shopify.deliver(
+    shop,
+    topic,
+    {
+      id: Number(fulfillmentId),
+      order_id: Number(orderId),
+      updated_at: iso(),
+      tracking_number: 'not read from the webhook',
+      destination: { phone: '+910000000000' },
+    },
+    webhookId,
+  );
+
+/** An order record as a read from Shopify returns it, with the given shipments. */
+function shopifyRecord(externalId: string, shipments: StoreShipmentRecord[], updatedAt: Date) {
+  return {
+    externalId,
+    name: `#${externalId}`,
+    status: 'open',
+    financialStatus: 'paid',
+    fulfillmentStatus: 'partially_fulfilled',
+    test: false,
+    currency: 'INR',
+    totalMinor: 149_900,
+    itemsTruncated: false,
+    placedAt: new Date(updatedAt.getTime() - 60_000),
+    cancelledAt: null,
+    remoteUpdatedAt: updatedAt,
+    customerName: 'Ravi S',
+    customerPhone: '+919812373301',
+    customerEmail: null,
+    statusUrl: null,
+    paymentNames: ['Shopify Payments'],
+    cashOnDelivery: false,
+    shippedAt: shipments[0]?.createdAt ?? null,
+    deliveredAt: null,
+    trackingCompany: null,
+    trackingNumber: null,
+    trackingUrl: null,
+    items: [],
+    shipments,
+  };
+}
+
+const shipmentRecord = (
+  externalId: string,
+  at: Date,
+  number: string | null,
+): StoreShipmentRecord => ({
+  externalId,
+  status: 'success',
+  displayStatus: 'in_transit',
+  failed: false,
+  createdAt: at,
+  updatedAt: at,
+  trackingCompany: number ? 'Delhivery' : null,
+  trackingNumber: number,
+  trackingUrl: number ? `https://track.example/${number}` : null,
+});
+
+const shipmentVars = update({ source: 'order', field: 'tracking_number' });
+
+async function shipmentRules(
+  owner: TenantContext,
+  c: Company,
+  storeId: string,
+  templateId: string,
+  delayMinutes = 0,
+) {
+  await saveRule(owner, c, storeId, 'shipment_created', {
+    templateId,
+    variables: shipmentVars,
+    delayMinutes,
+  });
+  await saveRule(owner, c, storeId, 'tracking_updated', {
+    templateId,
+    variables: shipmentVars,
+    delayMinutes,
+  });
+}
+
+/** Walks a member through Shopify's approval for shipment updates on a connected store. */
+async function allowShipmentUpdates(owner: TenantContext, storeId: string) {
+  const { url } = await service().startShipmentAccess(owner, storeId);
+  const redirect = await fetch(url, { redirect: 'manual' });
+  const callback = new URL(redirect.headers.get('location') ?? '');
+  const checked = await service().shopifyCallback(callback.searchParams);
+  if (!checked.ok) throw new Error(`callback refused: ${checked.reason}`);
+  return { url, checked };
+}
+
+describe('Shipment messages (ADR-413)', () => {
+  it('sends one message per shipment and per new tracking, each with its own shipment’s tracking', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    await shipmentRules(owner, c, storeId, template.id);
+    // Outgoing webhooks report the five order events only: shipment messages capture nothing.
+    const hook = await addHook(owner, ['store_order.message_sent', 'store_order.message_skipped']);
+
+    shopify.upsertOrder(shop, {
+      id: '7201',
+      name: '#7201',
+      phone: '+919812372201',
+      shippingAddress: { name: 'Asha K', phone: null },
+    });
+    await orderSignal(shop, '7201', 'orders/create');
+    await drain(c, storeId);
+    expect(await shipmentMessageRows(storeId)).toEqual([]);
+
+    // The first shipment, with tracking: Shopify's shipment webhook asks for the order again.
+    const a = shipped('720101', { trackingInfo: tracking('AWB1') });
+    shopify.upsertOrder(shop, {
+      id: '7201',
+      displayFulfillmentStatus: 'PARTIALLY_FULFILLED',
+      fulfillments: [a],
+    });
+    const delivered = await fulfillmentSignal(
+      shop,
+      '7201',
+      '720101',
+      'fulfillments/create',
+      'ship-1',
+    );
+    expect(delivered.map((d) => d.status)).toEqual([200]);
+    // The same delivery again is a duplicate; another delivery reads the order again.
+    const repeat = await fulfillmentSignal(shop, '7201', '720101', 'fulfillments/create', 'ship-1');
+    expect(repeat.map((d) => d.status)).toEqual([200]);
+    await drain(c, storeId);
+    await fulfillmentSignal(shop, '7201', '720101', 'fulfillments/update');
+    await drain(c, storeId);
+    const created = await shipmentMessageRows(storeId);
+    expect(created.map((r) => [r.shipment_external_id, r.event, r.dedupe_key, r.order_id])).toEqual(
+      [['720101', 'shipment_created', 'created', null]],
+    );
+    expect(await runMessages(c, storeId)).toMatchObject([{ outcome: 'queued' }]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(bodyTexts(templatesTo('919812372201').at(-1))).toEqual(['Asha K', '#7201', 'AWB1']);
+
+    // A second shipment without tracking: its message has no tracking number and no fallback.
+    const b = shipped('720102');
+    shopify.upsertOrder(shop, { id: '7201', fulfillments: [a, b] });
+    await fulfillmentSignal(shop, '7201', '720102');
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId)).toEqual([
+      { outcome: 'skipped', reason: 'missing_variable' },
+    ]);
+
+    // Its tracking arrives later: a tracking update with its own number, not the first shipment's.
+    const b2 = { ...b, updatedAt: iso(), trackingInfo: tracking('AWB2') };
+    shopify.upsertOrder(shop, { id: '7201', fulfillments: [a, b2] });
+    await fulfillmentSignal(shop, '7201', '720102', 'fulfillments/update');
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId)).toMatchObject([{ outcome: 'queued' }]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(bodyTexts(templatesTo('919812372201').at(-1))).toEqual(['Asha K', '#7201', 'AWB2']);
+
+    // The first shipment's tracking changes: one more update, numbered for that shipment.
+    const a2 = { ...a, updatedAt: iso(), trackingInfo: tracking('AWB3') };
+    shopify.upsertOrder(shop, { id: '7201', fulfillments: [a2, b2] });
+    await fulfillmentSignal(shop, '7201', '720101', 'fulfillments/update');
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId)).toMatchObject([{ outcome: 'queued' }]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(bodyTexts(templatesTo('919812372201').at(-1))).toEqual(['Asha K', '#7201', 'AWB3']);
+
+    // A new carrier name alone, or a tracking the shipment had before, is no change.
+    const a3 = { ...a2, updatedAt: iso(), trackingInfo: tracking('AWB3', 'Blue Dart') };
+    shopify.upsertOrder(shop, { id: '7201', fulfillments: [a3, b2] });
+    await fulfillmentSignal(shop, '7201', '720101', 'fulfillments/update');
+    await drain(c, storeId);
+    const a4 = { ...a3, updatedAt: iso(), trackingInfo: tracking('AWB1') };
+    shopify.upsertOrder(shop, { id: '7201', fulfillments: [a4, b2] });
+    await fulfillmentSignal(shop, '7201', '720101', 'fulfillments/update');
+    await drain(c, storeId);
+    expect(await shipmentSummary(storeId)).toEqual([
+      ['720101', 'shipment_created', 'created', 'queued', null],
+      ['720102', 'shipment_created', 'created', 'skipped', 'missing_variable'],
+      ['720102', 'tracking_updated', 'tracking:1', 'queued', null],
+      ['720101', 'tracking_updated', 'tracking:2', 'queued', null],
+    ]);
+    const shipments = await shipmentRows(storeId);
+    expect(
+      shipments.map((s) => [s.external_id, s.tracking_number, s.tracking_keys.length]),
+    ).toEqual([
+      ['720101', 'AWB1', 2],
+      ['720102', 'AWB2', 1],
+    ]);
+    expect(shipments[0]).toMatchObject({ tracking_company: 'Delhivery', failed: false });
+
+    // The order page and the store's report show them with the order.
+    const [order] = await orderRows(storeId);
+    const onOrder = await storeMessages().orderMessages(owner, order?.id as string);
+    expect(onOrder.map((m) => [m.event, m.label])).toEqual([
+      ['shipment_created', 'Shipment sent'],
+      ['shipment_created', 'Shipment sent'],
+      ['tracking_updated', 'Tracking updated'],
+      ['tracking_updated', 'Tracking updated'],
+    ]);
+    const report = await storeMessages().storeMessages(owner, storeId);
+    expect(report.recent.filter((m) => m.event === 'tracking_updated')).toHaveLength(2);
+    for (const m of report.recent) expect(m.orderName).toBe('#7201');
+    expect(report.store.shipmentAccess).toBe(true);
+
+    await deliverHooks(c);
+    expect(hookBodiesAt(hook.path)).toEqual([]);
+    expect(
+      await fx.query(
+        `SELECT 1 FROM app.webhook_events WHERE tenant_id = $1 AND type LIKE 'store_order.%'`,
+        [c.tenant.id],
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('records one message when the same shipment is read twice at once, and never goes backwards', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    await shipmentRules(owner, c, storeId, template.id);
+    shopify.upsertOrder(shop, { id: '7301', phone: '+919812373301' });
+    await orderSignal(shop, '7301', 'orders/create');
+    await drain(c, storeId);
+
+    const store = {
+      id: storeId,
+      tenantId: c.tenant.id,
+      phoneCallingCode: null,
+      sendWindowStart: null,
+      sendWindowEnd: null,
+      messageTestOrders: false,
+    };
+    const read = (record: ReturnType<typeof shopifyRecord>) =>
+      fx.dbs.app.run(scopeOf(c), async (tx) => {
+        const now = new Date();
+        const changes = await saveStoreOrders(tx, store, [record], now);
+        return recordOrderEvents(tx, messageDeps(), store, changes, now);
+      });
+
+    // Two reads of a new shipment at once (a webhook and the transit check): one message.
+    const first = new Date(Date.now() + 1_000);
+    const record = shopifyRecord('7301', [shipmentRecord('730101', first, null)], first);
+    const counts = await Promise.all([read(record), read(record)]);
+    expect([...counts].sort()).toEqual([0, 1]);
+    expect(await shipmentRows(storeId)).toHaveLength(1);
+    expect(await shipmentSummary(storeId)).toEqual([
+      ['730101', 'shipment_created', 'created', 'pending', null],
+    ]);
+
+    // Its tracking arrives and is read twice at once: one update.
+    const second = new Date(first.getTime() + 60_000);
+    const withTracking = shopifyRecord('7301', [shipmentRecord('730101', second, 'AWB9')], second);
+    const updates = await Promise.all([read(withTracking), read(withTracking)]);
+    expect([...updates].sort()).toEqual([0, 1]);
+    expect((await shipmentSummary(storeId)).map((r) => r[2])).toEqual(['created', 'tracking:1']);
+
+    // An older read arriving late changes nothing (the copy never moves backwards).
+    const stale = shopifyRecord('7301', [shipmentRecord('730101', first, 'OLD1')], second);
+    expect(await read(stale)).toBe(0);
+    expect((await shipmentRows(storeId))[0]).toMatchObject({ tracking_number: 'AWB9' });
+    expect((await shipmentRows(storeId))[0]?.tracking_keys).toHaveLength(1);
+  });
+
+  it('sends nothing about the past, cancelled shipments or orders, test orders or late events, and only the newest tracking', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+
+    // A shipment HyFib read before the rules were switched on is not messaged afterwards.
+    const early = shipped('740101', { trackingInfo: tracking('AWB40') });
+    shopify.upsertOrder(shop, { id: '7401', phone: '+919812374401', fulfillments: [early] });
+    await orderSignal(shop, '7401', 'orders/create');
+    await drain(c, storeId);
+    expect(await shipmentRows(storeId)).toHaveLength(1);
+    await shipmentRules(owner, c, storeId, template.id, 30);
+    await fulfillmentSignal(shop, '7401', '740101', 'fulfillments/update');
+    await drain(c, storeId);
+    expect(await shipmentMessageRows(storeId)).toEqual([]);
+
+    // Its tracking changes twice before the delay is up: only the newest goes out.
+    const t1 = { ...early, updatedAt: iso(1_000), trackingInfo: tracking('AWB41') };
+    shopify.upsertOrder(shop, { id: '7401', fulfillments: [t1] });
+    await fulfillmentSignal(shop, '7401', '740101', 'fulfillments/update');
+    await drain(c, storeId);
+    const t2 = { ...t1, updatedAt: iso(2_000), trackingInfo: tracking('AWB42') };
+    shopify.upsertOrder(shop, { id: '7401', fulfillments: [t2] });
+    await fulfillmentSignal(shop, '7401', '740101', 'fulfillments/update');
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId)).toEqual([{ outcome: 'not_due' }, { outcome: 'not_due' }]);
+    const afterDelay = later(31 * MINUTE_MS);
+    expect(await runMessages(c, storeId, afterDelay)).toMatchObject([
+      { outcome: 'skipped', reason: 'tracking_replaced' },
+      { outcome: 'queued' },
+    ]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(bodyTexts(templatesTo('919812374401').at(-1))?.[2]).toBe('AWB42');
+
+    // A shipment cancelled before its message is due sends nothing.
+    const cancelledLater = shipped('740102', { trackingInfo: tracking('AWB43') });
+    shopify.upsertOrder(shop, { id: '7401', fulfillments: [t2, cancelledLater] });
+    await fulfillmentSignal(shop, '7401', '740102');
+    await drain(c, storeId);
+    shopify.upsertOrder(shop, {
+      id: '7401',
+      fulfillments: [t2, { ...cancelledLater, status: 'CANCELLED', updatedAt: iso(3_000) }],
+    });
+    await fulfillmentSignal(shop, '7401', '740102', 'fulfillments/update');
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId, afterDelay)).toEqual([
+      { outcome: 'skipped', reason: 'shipment_cancelled' },
+    ]);
+    // A shipment HyFib first sees cancelled is no shipment at all.
+    shopify.upsertOrder(shop, {
+      id: '7401',
+      fulfillments: [t2, cancelledLater, shipped('740103', { status: 'FAILURE' })],
+    });
+    await fulfillmentSignal(shop, '7401', '740103');
+    await drain(c, storeId);
+    expect((await shipmentSummary(storeId)).filter((r) => r[0] === '740103')).toEqual([]);
+
+    // The order is cancelled while a shipment message waits; later shipments send nothing.
+    shopify.upsertOrder(shop, { id: '7402', phone: '+919812374402' });
+    await orderSignal(shop, '7402', 'orders/create');
+    await drain(c, storeId);
+    shopify.upsertOrder(shop, { id: '7402', fulfillments: [shipped('740201')] });
+    await fulfillmentSignal(shop, '7402', '740201');
+    await drain(c, storeId);
+    shopify.upsertOrder(shop, {
+      id: '7402',
+      cancelledAt: iso(),
+      fulfillments: [shipped('740201'), shipped('740202')],
+    });
+    await orderSignal(shop, '7402');
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId, afterDelay)).toEqual([
+      { outcome: 'skipped', reason: 'order_cancelled' },
+    ]);
+    expect((await shipmentSummary(storeId)).filter((r) => r[0] === '740202')).toEqual([]);
+
+    // Test orders and shipments first seen more than 48 hours after they were created are
+    // recorded, not sent.
+    shopify.upsertOrder(shop, {
+      id: '7403',
+      phone: '+919812374403',
+      test: true,
+      fulfillments: [shipped('740301')],
+    });
+    await orderSignal(shop, '7403', 'orders/create');
+    await drain(c, storeId);
+    await fx.query(
+      `UPDATE app.commerce_store_message_rules SET enabled_at = now() - interval '5 days'
+        WHERE store_id = $1 AND event = 'shipment_created'`,
+      [storeId],
+    );
+    shopify.upsertOrder(shop, {
+      id: '7404',
+      phone: '+919812374404',
+      fulfillments: [shipped('740401', { createdAt: iso(-49 * 3_600_000) })],
+    });
+    await orderSignal(shop, '7404', 'orders/create');
+    await drain(c, storeId);
+    expect(
+      (await shipmentSummary(storeId)).filter((r) => r[0] === '740301' || r[0] === '740401'),
+    ).toEqual([
+      ['740301', 'shipment_created', 'created', 'skipped', 'test_order'],
+      ['740401', 'shipment_created', 'created', 'skipped', 'too_late'],
+    ]);
+  });
+
+  it('waits for the sending hours and lets only managers set shipment messages up, for Shopify stores only', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    const kolkata = new Date(Date.now() + 5.5 * 3_600_000);
+    const minute = kolkata.getUTCHours() * 60 + kolkata.getUTCMinutes();
+    const hhmm = (m: number) =>
+      `${String(Math.floor((m % 1440) / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    await optIn(owner, storeId, { windowStart: hhmm(minute + 60), windowEnd: hhmm(minute + 180) });
+
+    const agent = await fx.ctx(c, c.agent);
+    await expectAppError(
+      saveRule(agent, c, storeId, 'shipment_created', {
+        templateId: template.id,
+        variables: shipmentVars,
+      }),
+      'forbidden',
+    );
+    await expectAppError(service().startShipmentAccess(agent, storeId), 'forbidden');
+    await saveRule(owner, c, storeId, 'shipment_created', {
+      templateId: template.id,
+      variables: shipmentVars,
+    });
+    shopify.upsertOrder(shop, {
+      id: '7501',
+      phone: '+919812375501',
+      fulfillments: [shipped('750101', { trackingInfo: tracking('AWB51') })],
+    });
+    await orderSignal(shop, '7501', 'orders/create');
+    await drain(c, storeId);
+    const [waiting] = await shipmentMessageRows(storeId);
+    const opens = new Date(String(waiting?.send_at));
+    expect(opens.getTime() - Date.now()).toBeGreaterThan(55 * 60_000);
+    expect(opens.getTime() - Date.now()).toBeLessThan(62 * 60_000);
+    expect(await runMessages(c, storeId)).toEqual([{ outcome: 'not_due' }]);
+    const atOpening: Clock = { now: () => new Date(opens.getTime() + 1_000) };
+    expect(await runMessages(c, storeId, atOpening)).toMatchObject([{ outcome: 'queued' }]);
+
+    // Another company cannot see the shipments or their messages.
+    const other = await fx.company();
+    expect(
+      await fx.dbs.app.run(scopeOf(other), (tx) =>
+        tx.execute(sql`select id from app.commerce_store_shipments`),
+      ),
+    ).toMatchObject({ rows: [] });
+    expect(
+      await fx.dbs.app.run(scopeOf(other), (tx) =>
+        tx.execute(sql`select id from app.commerce_store_messages where shipment_id is not null`),
+      ),
+    ).toMatchObject({ rows: [] });
+    const otherOwner = await fx.ctx(other, other.owner);
+    await expectAppError(storeMessages().storeMessages(otherOwner, storeId), 'not_found');
+
+    // WooCommerce orders have no shipments: the rules cannot be set up there.
+    const site = `ship-${Date.now().toString(36)}`;
+    woo.addSite(site);
+    const keys = woo.addKeys(site);
+    const wooStore = await service().saveWooKeys(owner, { url: woo.siteUrl(site), ...keys });
+    await drain(c, wooStore.storeId);
+    await expectAppError(
+      saveRule(owner, c, wooStore.storeId, 'tracking_updated', {
+        templateId: template.id,
+        variables: shipmentVars,
+      }),
+      'validation_failed',
+      /not available/,
+    );
+    await expectAppError(
+      service().startShipmentAccess(owner, wooStore.storeId),
+      'conflict',
+      /Only Shopify stores/,
+    );
+  });
+
+  it('subscribes new stores to the shipment webhooks and brings existing stores up to date once', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+
+    // A new store asks for read_fulfillments and gets the two shipment topics, trimmed.
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    const fresh = shopify.shops.get(shop);
+    expect(fresh?.subscriptions.map((s) => s.topic).sort()).toEqual(
+      [
+        'APP_UNINSTALLED',
+        'FULFILLMENTS_CREATE',
+        'FULFILLMENTS_UPDATE',
+        'ORDERS_CREATE',
+        'ORDERS_DELETE',
+        'ORDERS_UPDATED',
+        'PRODUCTS_CREATE',
+        'PRODUCTS_DELETE',
+        'PRODUCTS_UPDATE',
+      ].sort(),
+    );
+    expect(
+      fresh?.subscriptions.find((s) => s.topic === 'FULFILLMENTS_UPDATE')?.includeFields,
+    ).toEqual(['id', 'order_id', 'updated_at']);
+    expect((await storeRow(storeId))?.webhook_error).toBeNull();
+
+    // A store connected before the shipment webhooks existed: its token has no read_fulfillments.
+    const oldShop = newShop();
+    shopify.addShop(oldShop, { name: 'Old Tea' });
+    shopify.grantScopes = ['read_orders', 'read_products'];
+    const oldStore = await connectShopify(c, owner, oldShop)
+      .then((r) => r.storeId)
+      .finally(() => {
+        shopify.grantScopes = null;
+      });
+    expect(await drain(c, oldStore)).toEqual(['connected', 'synced']);
+    const legacy = shopify.shops.get(oldShop);
+    if (!legacy) throw new Error('no shop');
+    expect(legacy.subscriptions).toHaveLength(7);
+    // The six-hourly check leaves it as it is, without an error.
+    const recheck = async (id: string) => {
+      await fx.query(
+        "UPDATE app.commerce_stores SET webhooks_checked_at = now() - interval '7 hours' WHERE id = $1",
+        [id],
+      );
+      await drain(c, id);
+    };
+    await recheck(oldStore);
+    expect(legacy.subscriptions).toHaveLength(7);
+    expect(await storeRow(oldStore)).toMatchObject({ webhook_error: null, state: 'connected' });
+    expect((await storeMessages().storeMessages(owner, oldStore)).store.shipmentAccess).toBe(false);
+
+    // A manager allows shipment updates: Shopify is asked for read_fulfillments (customers only
+    // if they were asked for), the store keeps its token until the worker exchanges the code.
+    const pending = await allowShipmentUpdates(owner, oldStore);
+    expect(new URL(pending.url).searchParams.get('scope')).toBe(
+      'read_orders,read_products,read_fulfillments',
+    );
+    await service().acceptShopifyApproval(owner, pending.checked);
+    await drain(c, oldStore);
+    expect(await storeRow(oldStore)).toMatchObject({
+      state: 'connected',
+      granted_scopes: 'read_orders,read_products,read_fulfillments',
+      access_error: null,
+      webhook_error: null,
+    });
+    expect(legacy.subscriptions.map((s) => s.topic).filter((t) => t.startsWith('FULFILL'))).toEqual(
+      ['FULFILLMENTS_CREATE', 'FULFILLMENTS_UPDATE'],
+    );
+    // Checking again never creates a topic twice.
+    await recheck(oldStore);
+    expect(legacy.subscriptions).toHaveLength(9);
+    await expectAppError(service().startShipmentAccess(owner, oldStore), 'conflict', /already/);
+    const audit = await fx.query<{ action: string }>(
+      `SELECT action FROM app.audit_events WHERE tenant_id = $1
+          AND action LIKE 'commerce.store_shipment_access_%' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(audit.map((a) => a.action)).toEqual([
+      'commerce.store_shipment_access_requested',
+      'commerce.store_shipment_access_approved',
+    ]);
+
+    // Shopify refuses the shipment topics (the grant was withdrawn): the store keeps syncing and
+    // says why; the connector's own topics are still re-created.
+    legacy.scopes = ['read_orders', 'read_products'];
+    legacy.subscriptions = [];
+    await recheck(oldStore);
+    expect(legacy.subscriptions).toHaveLength(7);
+    expect(await storeRow(oldStore)).toMatchObject({
+      state: 'connected',
+      sync_error: null,
+      webhook_error: expect.stringMatching(
+        /FULFILLMENTS_CREATE subscription.*HyFib reads shipments with their orders instead/,
+      ),
+    });
+
+    // A shipment delivery without its order, or for a shop HyFib does not hold, reads nothing.
+    const body = JSON.stringify({ id: 1, updated_at: iso() });
+    const hmac = createHmac('sha256', CLIENT_SECRET).update(body).digest('base64');
+    const headers = (shopDomain: string) => ({
+      rawBody: Buffer.from(body),
+      hmac,
+      topic: 'fulfillments/create',
+      shopDomain,
+      webhookId: `ship-${randomBytes(4).toString('hex')}`,
+    });
+    expect(await handleShopifyWebhook(webhookDeps(), headers(shop))).toMatchObject({
+      status: 400,
+      log: { outcome: 'malformed' },
+    });
+    expect(await handleShopifyWebhook(webhookDeps(), headers(newShop()))).toMatchObject({
+      status: 200,
+      log: { outcome: 'no_store' },
+    });
+    expect(
+      await fx.query('SELECT 1 FROM app.commerce_store_fetches WHERE store_id = $1', [storeId]),
+    ).toHaveLength(0);
+  });
+
+  it('starts the chosen automation once per shipment, with the shipment’s order', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, orderConfirmed);
+    const flow = await publishAutomation(owner, 'Per shipment', storeEvent, orderFlow(template.id));
+    await automationRule(owner, c, storeId, 'shipment_created', flow.id);
+    shopify.upsertOrder(shop, { id: '7601', name: '#7601', phone: '+919812376601' });
+    await orderSignal(shop, '7601', 'orders/create');
+    await drain(c, storeId);
+    shopify.upsertOrder(shop, { id: '7601', fulfillments: [shipped('760101')] });
+    await fulfillmentSignal(shop, '7601', '760101');
+    await drain(c, storeId);
+    const [started] = await runMessages(c, storeId);
+    expect(started).toMatchObject({ outcome: 'started' });
+    const run = await storeRun((started as { runId: string }).runId);
+    const [order] = await orderRows(storeId);
+    expect(run).toMatchObject({
+      trigger_type: 'store_event',
+      store_event: 'shipment_created',
+      store_order_id: order?.id,
+    });
+    // A second shipment of the same order starts a run of its own (the hourly limit allowing).
+    shopify.upsertOrder(shop, { id: '7601', fulfillments: [shipped('760101'), shipped('760102')] });
+    await fulfillmentSignal(shop, '7601', '760102');
+    await drain(c, storeId);
+    expect(await shipmentSummary(storeId)).toEqual([
+      ['760101', 'shipment_created', 'created', 'started', null],
+      ['760102', 'shipment_created', 'created', 'pending', null],
+    ]);
+  });
+
+  it('reads orders in transit again and finds a shipment’s new tracking when no webhook comes', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    await shipmentRules(owner, c, storeId, template.id);
+    const a = shipped('780101');
+    shopify.upsertOrder(shop, {
+      id: '7801',
+      phone: '+919812377801',
+      displayFulfillmentStatus: 'FULFILLED',
+      fulfillments: [a],
+    });
+    await orderSignal(shop, '7801', 'orders/create');
+    await drain(c, storeId);
+    expect((await shipmentSummary(storeId)).map((r) => r[1])).toEqual(['shipment_created']);
+
+    // The carrier's tracking arrives without changing the order or sending any webhook (SH-034).
+    const kept = shopify.shops.get(shop)?.orders.get('7801')?.updatedAt;
+    shopify.upsertOrder(shop, {
+      id: '7801',
+      updatedAt: kept,
+      fulfillments: [{ ...a, updatedAt: iso(), trackingInfo: tracking('AWB78') }],
+    });
+    // Only the transit check reads it: the hourly read is not due.
+    await fx.query(
+      "UPDATE app.commerce_stores SET next_sync_at = now() + interval '10 hours' WHERE id = $1",
+      [storeId],
+    );
+    await drain(c, storeId, later(60 * MINUTE_MS));
+    expect((await shipmentSummary(storeId)).map((r) => r[1])).toEqual(['shipment_created']);
+    await drain(c, storeId, later(4 * 60 * MINUTE_MS));
+    expect(await shipmentSummary(storeId)).toEqual([
+      ['780101', 'shipment_created', 'created', 'pending', null],
+      ['780101', 'tracking_updated', 'tracking:1', 'pending', null],
+    ]);
+  });
+
+  it('clears shipments’ tracking with the customer’s details, for good', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    await shipmentRules(owner, c, storeId, template.id, 30);
+
+    // Contact erasure (as the definer role) clears the tracking at once; waiting messages stop.
+    const a = shipped('770101', { trackingInfo: tracking('AWB71') });
+    shopify.upsertOrder(shop, { id: '7701', phone: '+919812377701', fulfillments: [a] });
+    await orderSignal(shop, '7701', 'orders/create');
+    await drain(c, storeId);
+    expect((await shipmentRows(storeId))[0]).toMatchObject({ tracking_number: 'AWB71' });
+    const contacts = createContactsService({ db: fx.dbs.app, clock: systemClock });
+    const contact = await contacts.createContact(owner, {
+      displayName: 'Erased',
+      phone: '+919812377701',
+    });
+    await contacts.eraseContact(owner, { contactId: contact.id, suppress: true });
+    expect((await shipmentRows(storeId))[0]).toMatchObject({
+      tracking_number: null,
+      tracking_url: null,
+      tracking_keys: [],
+    });
+    expect(await runMessages(c, storeId, later(31 * MINUTE_MS))).toEqual([
+      { outcome: 'skipped', reason: 'customer_erased' },
+    ]);
+    // Read again (the store still has it): the tracking stays empty and no update is recorded.
+    shopify.upsertOrder(shop, {
+      id: '7701',
+      fulfillments: [{ ...a, updatedAt: iso(1_000), trackingInfo: tracking('AWB72') }],
+    });
+    await fulfillmentSignal(shop, '7701', '770101', 'fulfillments/update');
+    await drain(c, storeId);
+    expect((await shipmentRows(storeId))[0]).toMatchObject({
+      tracking_number: null,
+      tracking_keys: [],
+    });
+    expect((await shipmentSummary(storeId)).map((r) => r[1])).toEqual(['shipment_created']);
+
+    // Shopify's customers/redact clears another order's shipment tracking the same way.
+    shopify.upsertOrder(shop, {
+      id: '7702',
+      phone: '+919812377702',
+      fulfillments: [shipped('770201', { trackingInfo: tracking('AWB73') })],
+    });
+    await orderSignal(shop, '7702', 'orders/create');
+    await drain(c, storeId);
+    expect(
+      await shopify.deliverCompliance('customers/redact', {
+        shop_id: Number(shopify.shops.get(shop)?.id),
+        shop_domain: shop,
+        customer: { id: 77, email: null, phone: '+919812377702' },
+        orders_to_redact: [7702],
+      }),
+    ).toBe(200);
+    expect((await shipmentRows(storeId)).find((s) => s.external_id === '770201')).toMatchObject({
+      tracking_number: null,
+      tracking_url: null,
+      tracking_keys: [],
+    });
   });
 });

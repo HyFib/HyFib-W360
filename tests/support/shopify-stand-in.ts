@@ -44,6 +44,8 @@ export interface StandInShopifyOrder {
 }
 
 export interface StandInFulfillment {
+  /** The fulfillment's numeric id (SH-045); defaults to one made from the order's id and place. */
+  id?: string;
   status: 'SUCCESS' | 'CANCELLED' | 'ERROR' | 'FAILURE';
   displayStatus: string | null;
   createdAt: string;
@@ -187,8 +189,19 @@ const TOPIC_ENUM: Record<string, string> = {
   'products/update': 'PRODUCTS_UPDATE',
   'products/delete': 'PRODUCTS_DELETE',
   'app/uninstalled': 'APP_UNINSTALLED',
+  'fulfillments/create': 'FULFILLMENTS_CREATE',
+  'fulfillments/update': 'FULFILLMENTS_UPDATE',
 };
 const KNOWN_TOPICS = new Set(Object.values(TOPIC_ENUM));
+/** Topics that need a scope beyond the connector's own (SH-044: the shipment topics). */
+const TOPIC_SCOPES: Record<string, readonly string[]> = {
+  FULFILLMENTS_CREATE: ['read_fulfillments', 'read_marketplace_orders'],
+  FULFILLMENTS_UPDATE: ['read_fulfillments', 'read_marketplace_orders'],
+};
+
+/** A fulfillment's id as the stand-in serves it. */
+export const standInFulfillmentId = (orderId: string, index: number, f: StandInFulfillment) =>
+  f.id ?? `${orderId}${String(index + 1).padStart(2, '0')}`;
 
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -457,7 +470,8 @@ export async function startShopifyStandIn(options: {
       billingAddress: hide ? null : o.billingAddress,
       statusPageUrl: o.statusPageUrl,
       paymentGatewayNames: o.paymentGatewayNames,
-      fulfillments: o.fulfillments.slice(0, 10).map((f) => ({
+      fulfillments: o.fulfillments.slice(0, 10).map((f, index) => ({
+        id: gid('Fulfillment', standInFulfillmentId(o.id, index, f)),
         status: f.status,
         displayStatus: f.displayStatus,
         createdAt: f.createdAt,
@@ -758,6 +772,20 @@ export async function startShopifyStandIn(options: {
               webhookSubscriptionCreate: {
                 webhookSubscription: null,
                 userErrors: [{ field: ['topic'], message: 'Invalid topic' }],
+              },
+            },
+            extensions: cost,
+          };
+        }
+        const needed = TOPIC_SCOPES[topic];
+        if (needed && !needed.some((scope) => shop.scopes.includes(scope))) {
+          return {
+            data: {
+              webhookSubscriptionCreate: {
+                webhookSubscription: null,
+                userErrors: [
+                  { field: ['topic'], message: `${topic} requires the read_fulfillments scope` },
+                ],
               },
             },
             extensions: cost,

@@ -9,6 +9,7 @@ import {
   commerceStoreOrderItems,
   commerceStoreOrders,
   commerceStoreProducts,
+  commerceStoreShipments,
   commerceStores,
   eq,
   inArray,
@@ -35,15 +36,20 @@ import {
 import { StoreApiError } from './http';
 import {
   STORE_MESSAGE_LIMITS,
+  nextTrackingKeys,
   type OrderMilestones,
   type SavedOrderChange,
+  type SavedShipmentChange,
 } from './messages-model';
 import { markOrdersTracked, recordOrderEvents, transitOrdersToCheck } from './order-messages';
 import {
   STORE_LIMITS,
   SHOPIFY_CUSTOMER_SCOPE,
+  SHOPIFY_FULFILLMENT_SCOPE,
   SHOPIFY_SCOPES,
   hasCustomerAccess,
+  hasShipmentAccess,
+  shipmentTrackingKey,
   storeAccessCodeAad,
   storeCredentialsAad,
   storeCredentialsSchema,
@@ -53,8 +59,10 @@ import {
   type StoreCredentials,
   type StoreOrderRecord,
   type StoreProductRecord,
+  type StoreShipmentRecord,
 } from './model';
 import {
+  SHOPIFY_SHIPMENT_TOPICS,
   SHOPIFY_WEBHOOK_TOPICS,
   ShopifyAdmin,
   exchangeShopifyCode,
@@ -418,7 +426,11 @@ class StoreJob {
         'connecting',
       );
     }
-    const webhookError = await ensureShopifyWebhooks(admin, shopifyWebhookUri(deps.appBaseUrl));
+    const webhookError = await ensureShopifyWebhooks(
+      admin,
+      shopifyWebhookUri(deps.appBaseUrl),
+      this.store.grantedScopes,
+    );
     await this.finish(
       {
         state: 'connected',
@@ -944,11 +956,9 @@ class StoreJob {
           accessExpiresAt: tokens.expiresInSeconds ? this.at(tokens.expiresInSeconds * 1000) : null,
           grantedScopes: tokens.scopes.join(',').slice(0, 500),
           accessCodeCiphertext: null,
-          accessError:
-            failure ??
-            (tokens.scopes.includes(SHOPIFY_CUSTOMER_SCOPE)
-              ? null
-              : 'Shopify did not grant access to customers. The store keeps working without it.'),
+          accessError: failure ?? accessShortfall(store, tokens.scopes),
+          // New access may allow more webhooks (the shipment topics): check them in this run.
+          webhooksCheckedAt: null,
         })
         .where(
           and(
@@ -1099,7 +1109,8 @@ function shopifyStoreClient(admin: ShopifyAdmin): StoreClient {
     async productsById(ids) {
       return (await admin.productsById(ids)).items;
     },
-    ensureWebhooks: (appBaseUrl) => ensureShopifyWebhooks(admin, shopifyWebhookUri(appBaseUrl)),
+    ensureWebhooks: (appBaseUrl, store) =>
+      ensureShopifyWebhooks(admin, shopifyWebhookUri(appBaseUrl), store.grantedScopes),
     async checkoutsPage(since, page, withCustomers) {
       return shopifyPage(await admin.checkoutsPage(since, page, withCustomers));
     },
@@ -1169,11 +1180,30 @@ function wooStoreClient(woo: WooStore, currency: string | null): StoreClient {
   };
 }
 
-/** Creates the subscriptions Shopify is missing (it deletes them after repeated failures, SH-025). */
-async function ensureShopifyWebhooks(admin: ShopifyAdmin, uri: string): Promise<string | null> {
+/**
+ * Creates the subscriptions Shopify is missing (it deletes them after repeated failures, SH-025).
+ * The same check brings stores connected before the shipment webhooks up to date (ADR-413): once a
+ * store's token was granted `read_fulfillments` (SH-044), the two shipment topics are created like
+ * any missing one, and a topic already there is never created twice. Shopify refusing a shipment
+ * topic does not stop the store: shipments are read with the order anyway, and the reason is shown.
+ */
+async function ensureShopifyWebhooks(
+  admin: ShopifyAdmin,
+  uri: string,
+  grantedScopes: string | null,
+): Promise<string | null> {
   const existing = new Set(await admin.webhookTopics(uri));
   for (const topic of SHOPIFY_WEBHOOK_TOPICS) {
     if (!existing.has(topic)) await admin.createWebhook(topic, uri);
+  }
+  if (!hasShipmentAccess(grantedScopes)) return null;
+  try {
+    for (const topic of SHOPIFY_SHIPMENT_TOPICS) {
+      if (!existing.has(topic)) await admin.createWebhook(topic, uri);
+    }
+  } catch (error) {
+    if (!(error instanceof StoreApiError) || error.failure !== 'rejected') throw error;
+    return `${error.message.slice(0, 300)} HyFib reads shipments with their orders instead.`;
   }
   return null;
 }
@@ -1202,6 +1232,27 @@ async function ensureWooWebhooks(
       throw error;
     return 'The keys cannot manage webhooks (they need Read/Write access); HyFib reads changes every hour instead.';
   }
+}
+
+/**
+ * What an approval for more access did not grant, said on the store's page: customer access only
+ * when it was asked for, and shipment access (which every approval asks for). Null when nothing is
+ * missing.
+ */
+export function accessShortfall(
+  store: Pick<StoreRow, 'customerAccessRequestedAt'>,
+  scopes: readonly string[],
+): string | null {
+  const missing: string[] = [];
+  if (store.customerAccessRequestedAt !== null && !scopes.includes(SHOPIFY_CUSTOMER_SCOPE)) {
+    missing.push('Shopify did not grant access to customers. The store keeps working without it.');
+  }
+  if (!hasShipmentAccess(scopes.join(','))) {
+    missing.push(
+      `Shopify did not grant access to shipment updates (${SHOPIFY_FULFILLMENT_SCOPE}): HyFib reads shipments with their orders instead.`,
+    );
+  }
+  return missing.length > 0 ? missing.join(' ') : null;
 }
 
 function connectFailureMessage(platform: StoreRow['platform'], error: StoreApiError): string {
@@ -1380,7 +1431,7 @@ export async function saveStoreOrders(
         },
         setWhere: sql`${commerceStoreOrders.remoteUpdatedAt} <= excluded.remote_updated_at`,
       })
-      .returning({ id: commerceStoreOrders.id });
+      .returning({ id: commerceStoreOrders.id, redactedAt: commerceStoreOrders.redactedAt });
     if (!row) continue;
     const previous = before.get(record.externalId);
     changes.push({
@@ -1388,6 +1439,7 @@ export async function saveStoreOrders(
       // An order the store deleted and brought back is not new again.
       previous: previous ? milestonesOf(previous) : null,
       current: milestonesOf(record),
+      shipments: await saveOrderShipments(tx, store, row, record, now),
     });
     await tx
       .delete(commerceStoreOrderItems)
@@ -1413,6 +1465,119 @@ export async function saveStoreOrders(
     }
   }
   return changes;
+}
+
+/**
+ * Upserts the shipments read with an order (ADR-413), never backwards (an older `updatedAt` than the
+ * one kept is ignored), under row locks on the copies already there, so two reads of the same
+ * shipment (a webhook delivered twice, a read racing the transit check) agree on what is new. A
+ * redacted order's shipments keep no tracking. Returns each shipment saved: whether HyFib saw it
+ * for the first time and, when its tracking is one not seen for it before, that tracking's number.
+ */
+async function saveOrderShipments(
+  tx: Tx,
+  store: Pick<StoreRow, 'id' | 'tenantId'>,
+  order: { id: string; redactedAt: Date | null },
+  record: StoreOrderRecord,
+  now: Date,
+): Promise<SavedShipmentChange[]> {
+  const shipments: StoreShipmentRecord[] = record.shipments;
+  if (shipments.length === 0) return [];
+  const known = new Map(
+    (
+      await tx
+        .select({
+          externalId: commerceStoreShipments.externalId,
+          orderId: commerceStoreShipments.orderId,
+          trackingKeys: commerceStoreShipments.trackingKeys,
+        })
+        .from(commerceStoreShipments)
+        .where(
+          and(
+            eq(commerceStoreShipments.tenantId, store.tenantId),
+            eq(commerceStoreShipments.storeId, store.id),
+            inArray(
+              commerceStoreShipments.externalId,
+              shipments.map((s) => s.externalId),
+            ),
+          ),
+        )
+        .for('update')
+    ).map((row) => [row.externalId, row]),
+  );
+  const redacted = order.redactedAt !== null;
+  const saved: SavedShipmentChange[] = [];
+  for (const shipment of shipments) {
+    const previous = known.get(shipment.externalId);
+    // A fulfillment belongs to one order; one HyFib holds under another order is left alone.
+    if (previous && previous.orderId !== order.id) continue;
+    const next = redacted
+      ? { keys: [], revision: null }
+      : nextTrackingKeys(
+          previous ? previous.trackingKeys : null,
+          shipmentTrackingKey(shipment.trackingNumber, shipment.trackingUrl),
+        );
+    const [row] = await tx
+      .insert(commerceStoreShipments)
+      .values({
+        id: uuidv7(),
+        tenantId: store.tenantId,
+        storeId: store.id,
+        orderId: order.id,
+        externalId: shipment.externalId,
+        status: shipment.status,
+        displayStatus: shipment.displayStatus,
+        failed: shipment.failed,
+        remoteCreatedAt: shipment.createdAt,
+        remoteUpdatedAt: shipment.updatedAt,
+        trackingCompany: shipment.trackingCompany,
+        trackingNumber: redacted ? null : shipment.trackingNumber,
+        trackingUrl: redacted ? null : shipment.trackingUrl,
+        trackingKeys: next.keys,
+        syncedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          commerceStoreShipments.tenantId,
+          commerceStoreShipments.storeId,
+          commerceStoreShipments.externalId,
+        ],
+        set: {
+          status: sql`excluded.status`,
+          displayStatus: sql`excluded.display_status`,
+          failed: sql`excluded.failed`,
+          remoteCreatedAt: sql`excluded.remote_created_at`,
+          remoteUpdatedAt: sql`excluded.remote_updated_at`,
+          trackingCompany: sql`excluded.tracking_company`,
+          trackingNumber: sql`excluded.tracking_number`,
+          trackingUrl: sql`excluded.tracking_url`,
+          trackingKeys: sql`excluded.tracking_keys`,
+          syncedAt: now,
+        },
+        setWhere: sql`${commerceStoreShipments.remoteUpdatedAt} <= excluded.remote_updated_at
+          and ${commerceStoreShipments.orderId} = excluded.order_id`,
+      })
+      .returning({
+        id: commerceStoreShipments.id,
+        // A row this statement inserted (rather than updated) has no deleting transaction.
+        inserted: sql<boolean>`(xmax = 0)`,
+      });
+    if (!row) continue;
+    saved.push({
+      shipmentId: row.id,
+      orderId: order.id,
+      isNew: row.inserted,
+      trackingRevision: row.inserted ? null : next.revision,
+      current: {
+        createdAt: shipment.createdAt,
+        updatedAt: shipment.updatedAt,
+        failed: shipment.failed,
+      },
+      test: record.test,
+      orderCancelled: record.status === 'cancelled',
+    });
+  }
+  return saved;
 }
 
 /**

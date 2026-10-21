@@ -716,3 +716,121 @@ test('a store’s order starts an automation that sends a template, waits for th
   await expect(page.getByRole('table')).toContainText('Got an answer → Track order');
   await expectNoHorizontalOverflow(page);
 });
+
+test('a shipment message is set up, sent once per shipment with its own tracking, and shown in the report', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(240_000);
+  const { slug, wabaId } = await newCompany(page, 'shipmsg', 'Tara Tea');
+  await approvedTemplate(page, request, slug, wabaId, {
+    name: 'parcel_update',
+    body: 'Hi {{1}}, a parcel of your order {{2}} is on its way: {{3}}.',
+    examples: ['Asha', '#1001', 'AWB1001'],
+    quickReplies: [],
+  });
+  const shop = `tara-ship-${Date.now().toString(36)}.myshopify.com`;
+  await openStores(page);
+  await page.getByLabel('Shopify store').fill(shop);
+  await page.getByRole('button', { name: 'Connect with Shopify' }).click();
+  await expect(page).toHaveURL(/\/commerce\/stores\/[0-9a-f-]{36}$/);
+  await reloadUntil(page, () => page.getByText('Connected', { exact: true }));
+  // A new store is asked for shipment updates too, so Shopify's shipment webhooks are subscribed.
+  await expect(async () => {
+    const state = (await control(request, `${SHOPIFY}/__stand-in/shop`, { shop })) as {
+      subscriptions: { topic: string }[];
+    };
+    expect(state.subscriptions.map((s) => s.topic)).toEqual(
+      expect.arrayContaining(['FULFILLMENTS_CREATE', 'FULFILLMENTS_UPDATE']),
+    );
+  }).toPass({ timeout: 30_000 });
+
+  await page.getByRole('link', { name: 'Order messages' }).click();
+  const settings = page.getByRole('form', { name: 'Message settings' });
+  await settings.getByLabel(/customers agreed to receive order messages/).check();
+  await settings.getByRole('button', { name: 'Save settings' }).click();
+  await expect(settings.getByText('Settings saved.')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Shipment messages' })).toBeVisible();
+  await expect(page.getByText('Shipment updates from Shopify:')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Allow shipment updates in Shopify' })).toHaveCount(
+    0,
+  );
+  const rule = page.getByRole('form', { name: 'Shipment sent' });
+  await rule.getByLabel('Send this message').check();
+  await rule.getByLabel('Template').selectOption({ label: 'parcel_update (en, utility)' });
+  await rule.getByLabel('Variable {{1}}').selectOption('customer_name');
+  await rule.getByLabel('Variable {{2}}').selectOption('order_name');
+  await rule.getByLabel('Variable {{3}}').selectOption('tracking_number');
+  await expect(rule.getByText(/this shipment’s own/)).toBeVisible();
+  await rule.getByRole('button', { name: 'Save' }).click();
+  await expect(rule.getByText('Saved.')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // The order ships in one parcel: Shopify's shipment webhook makes HyFib read the order again.
+  const customer = randomWaId();
+  const shippedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  await control(request, `${SHOPIFY}/__stand-in/order`, {
+    shop,
+    order: {
+      id: '8101',
+      name: '#8101',
+      phone: `+${customer}`,
+      shippingAddress: { name: 'Meena Customer', phone: null },
+      displayFulfillmentStatus: 'PARTIALLY_FULFILLED',
+      fulfillments: [
+        {
+          id: '810101',
+          status: 'SUCCESS',
+          displayStatus: 'IN_TRANSIT',
+          createdAt: shippedAt,
+          updatedAt: shippedAt,
+          deliveredAt: null,
+          trackingInfo: [
+            { company: 'Delhivery', number: 'AWB8101', url: 'https://track.example/AWB8101' },
+          ],
+        },
+      ],
+    },
+  });
+  const deliveries = (await control(request, `${SHOPIFY}/__stand-in/deliver`, {
+    shop,
+    topic: 'fulfillments/create',
+    payload: { id: 810101, order_id: 8101, updated_at: shippedAt },
+  })) as { status: number }[];
+  expect(deliveries.map((d) => d.status)).toEqual([200]);
+  let sent: { wamid?: string; body: unknown } | undefined;
+  await expect(async () => {
+    sent = (await standInRequests(request)).find(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string }).to === customer,
+    );
+    expect(sent?.wamid).toBeTruthy();
+  }).toPass({ timeout: 45_000 });
+  const template = (sent?.body as { template: { name: string; components: unknown[] } }).template;
+  expect(template.name).toBe('parcel_update');
+  expect(template.components).toContainEqual({
+    type: 'body',
+    parameters: [
+      { type: 'text', text: 'Meena Customer' },
+      { type: 'text', text: '#8101' },
+      { type: 'text', text: 'AWB8101' },
+    ],
+  });
+
+  // The same shipment signalled again sends nothing more; the report shows the one message.
+  await control(request, `${SHOPIFY}/__stand-in/deliver`, {
+    shop,
+    topic: 'fulfillments/update',
+    payload: { id: 810101, order_id: 8101, updated_at: shippedAt },
+  });
+  await reloadUntil(page, () => page.getByRole('link', { name: '#8101' }));
+  await expect(page.getByRole('cell', { name: 'Shipment sent' })).toHaveCount(1);
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('link', { name: '#8101' }).click();
+  await expect(page.getByRole('heading', { name: 'Order #8101' })).toBeVisible();
+  await expect(page.getByText('Shipment sent').first()).toBeVisible();
+  await expect(
+    (await standInRequests(request)).filter(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string }).to === customer,
+    ),
+  ).toHaveLength(1);
+});

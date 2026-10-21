@@ -742,13 +742,16 @@ describe('cart reminders', () => {
   });
 
   it('asks for customer access only when a manager requested it', () => {
+    // Every authorization asks for shipment updates too (ADR-413, SH-044).
     expect(shopifyScopesFor({ customerAccessRequestedAt: null })).toEqual([
       'read_orders',
       'read_products',
+      'read_fulfillments',
     ]);
     expect(shopifyScopesFor({ customerAccessRequestedAt: NOW })).toEqual([
       'read_orders',
       'read_products',
+      'read_fulfillments',
       'read_customers',
     ]);
     const url = new URL(
@@ -759,7 +762,9 @@ describe('cart reminders', () => {
         scopes: shopifyScopesFor({ customerAccessRequestedAt: NOW }),
       }),
     );
-    expect(url.searchParams.get('scope')).toBe('read_orders,read_products,read_customers');
+    expect(url.searchParams.get('scope')).toBe(
+      'read_orders,read_products,read_fulfillments,read_customers',
+    );
     expect(hasCustomerAccess('read_orders, read_products,read_customers')).toBe(true);
     expect(hasCustomerAccess('read_orders,read_products,read_customers_extra')).toBe(false);
     expect(hasCustomerAccess(null)).toBe(false);

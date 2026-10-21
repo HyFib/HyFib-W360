@@ -9,12 +9,14 @@ import {
   commerceStoreMessages,
   commerceStoreOrderItems,
   commerceStoreOrders,
+  commerceStoreShipments,
   commerceStores,
   contactIdentities,
   conversations,
   eq,
   gt,
   gte,
+  inArray,
   isNotNull,
   isNull,
   lt,
@@ -47,7 +49,9 @@ import {
   checkoutValues,
   codPayload,
   detectOrderEvents,
+  detectShipmentEvents,
   isCartEvent,
+  isShipmentEvent,
   orderValues,
   parseCodPayload,
   readStoreVariables,
@@ -55,6 +59,7 @@ import {
   storeMessageSendAt,
   type SavedOrderChange,
   type SendWindow,
+  type StoreMessageEvent,
   type StoreMessageSkipReason,
   type StoreValues,
 } from './messages-model';
@@ -64,9 +69,10 @@ import { loadEntitlements } from '../plans/entitlements';
 /**
  * Order messages (P4-06c, ADR-048): recording the events a read from a store reveals, and the
  * `commerce.store-message` job that turns one into a template message. Store messages are rows
- * (at most one per order and event), so a repeated read, a repeated job or the sweep never sends
- * twice; the chat message then goes through the normal send pipeline (send intent, consent checked
- * again at dispatch, delivery statuses from Meta).
+ * (at most one per order and event; per shipment and event, and per shipment and tracking, for the
+ * shipment events of ADR-413), so a repeated read, a repeated job or the sweep never sends twice;
+ * the chat message then goes through the normal send pipeline (send intent, consent checked again
+ * at dispatch, delivery statuses from Meta).
  */
 
 export interface StoreMessageQueueDeps {
@@ -154,8 +160,41 @@ export async function recordOrderEvents(
   const timeZone = await companyTimeZone(tx, store.tenantId);
   const window = sendWindowOf(store);
   const delays = new Map(rules.map((r) => [r.event, r.delayMinutes]));
+  const sendAt = (event: StoreMessageEvent, occurredAt: Date, skipped: boolean) =>
+    skipped
+      ? now
+      : storeMessageSendAt({
+          occurredAt,
+          now,
+          delayMinutes: delays.get(event) ?? 0,
+          window,
+          timeZone,
+        });
   const rows: (typeof commerceStoreMessages.$inferInsert)[] = [];
+  const shipmentRows: (typeof commerceStoreMessages.$inferInsert)[] = [];
   for (const change of changes) {
+    // Shipment messages (ADR-413): about the shipment, which names the order.
+    for (const shipment of change.shipments) {
+      for (const event of detectShipmentEvents({
+        change: shipment,
+        rules,
+        includeTestOrders: store.messageTestOrders,
+        now,
+      })) {
+        shipmentRows.push({
+          id: uuidv7(),
+          tenantId: store.tenantId,
+          storeId: store.id,
+          shipmentId: shipment.shipmentId,
+          dedupeKey: event.dedupeKey,
+          event: event.event,
+          state: event.skip ? 'skipped' : 'pending',
+          skipReason: event.skip,
+          occurredAt: event.occurredAt,
+          sendAt: sendAt(event.event, event.occurredAt, event.skip !== null),
+        });
+      }
+    }
     const found = detectOrderEvents({
       previous: change.previous,
       current: change.current,
@@ -173,34 +212,45 @@ export async function recordOrderEvents(
         state: event.skip ? 'skipped' : 'pending',
         skipReason: event.skip,
         occurredAt: event.occurredAt,
-        sendAt: event.skip
-          ? now
-          : storeMessageSendAt({
-              occurredAt: event.occurredAt,
-              now,
-              delayMinutes: delays.get(event.event) ?? 0,
-              window,
-              timeZone,
-            }),
+        sendAt: sendAt(event.event, event.occurredAt, event.skip !== null),
       });
     }
   }
-  if (rows.length === 0) return 0;
-  const inserted = await tx
-    .insert(commerceStoreMessages)
-    .values(rows)
-    .onConflictDoNothing({
-      target: [
-        commerceStoreMessages.tenantId,
-        commerceStoreMessages.orderId,
-        commerceStoreMessages.event,
-      ],
-    })
-    .returning({
-      id: commerceStoreMessages.id,
-      state: commerceStoreMessages.state,
-      sendAt: commerceStoreMessages.sendAt,
-    });
+  const returned = {
+    id: commerceStoreMessages.id,
+    state: commerceStoreMessages.state,
+    sendAt: commerceStoreMessages.sendAt,
+  };
+  const inserted = [
+    ...(rows.length === 0
+      ? []
+      : await tx
+          .insert(commerceStoreMessages)
+          .values(rows)
+          .onConflictDoNothing({
+            target: [
+              commerceStoreMessages.tenantId,
+              commerceStoreMessages.orderId,
+              commerceStoreMessages.event,
+            ],
+          })
+          .returning(returned)),
+    // A shipment delivered twice, or read twice at once, still gets one message per key.
+    ...(shipmentRows.length === 0
+      ? []
+      : await tx
+          .insert(commerceStoreMessages)
+          .values(shipmentRows)
+          .onConflictDoNothing({
+            target: [
+              commerceStoreMessages.tenantId,
+              commerceStoreMessages.shipmentId,
+              commerceStoreMessages.event,
+              commerceStoreMessages.dedupeKey,
+            ],
+          })
+          .returning(returned)),
+  ];
   for (const row of inserted) {
     if (row.state === 'pending') {
       await enqueueStoreMessage(deps, tx, store.tenantId, row.id, row.sendAt);
@@ -212,8 +262,12 @@ export async function recordOrderEvents(
 /**
  * Shopify orders in transit whose delivery is due to be checked again (SH-034): shipped within
  * the last days, not delivered or cancelled, last read long enough ago. Only while the store's
- * delivered message is switched on.
+ * delivered message, or one of its shipment messages (ADR-413: a later shipment of a partly shipped
+ * order, or a shipment's new tracking), is switched on.
  */
+/** The rules that need orders in transit read again (see transitOrdersToCheck). */
+export const TRANSIT_EVENTS = ['order_delivered', 'shipment_created', 'tracking_updated'] as const;
+
 export async function transitOrdersToCheck(
   tx: Tx,
   store: Pick<StoreRow, 'id' | 'tenantId' | 'platform'>,
@@ -227,10 +281,11 @@ export async function transitOrdersToCheck(
       and(
         eq(commerceStoreMessageRules.tenantId, store.tenantId),
         eq(commerceStoreMessageRules.storeId, store.id),
-        eq(commerceStoreMessageRules.event, 'order_delivered'),
+        inArray(commerceStoreMessageRules.event, [...TRANSIT_EVENTS]),
         eq(commerceStoreMessageRules.enabled, true),
       ),
-    );
+    )
+    .limit(1);
   if (!rule) return [];
   const rows = await tx
     .select({ externalId: commerceStoreOrders.externalId })
@@ -454,21 +509,38 @@ export async function processStoreMessage(
       };
       subject = { checkoutId: checkout.id, checkoutName: checkout.name };
     } else {
-      const [order] = row.orderId
+      // A shipment message (ADR-413) is about the shipment, and through it about its order.
+      const [shipment] =
+        isShipmentEvent(row.event) && row.shipmentId
+          ? await tx
+              .select()
+              .from(commerceStoreShipments)
+              .where(
+                and(
+                  eq(commerceStoreShipments.tenantId, tenantId),
+                  eq(commerceStoreShipments.id, row.shipmentId),
+                ),
+              )
+          : [];
+      const orderId = isShipmentEvent(row.event) ? (shipment?.orderId ?? null) : row.orderId;
+      const [order] = orderId
         ? await tx
             .select()
             .from(commerceStoreOrders)
             .where(
-              and(
-                eq(commerceStoreOrders.tenantId, tenantId),
-                eq(commerceStoreOrders.id, row.orderId),
-              ),
+              and(eq(commerceStoreOrders.tenantId, tenantId), eq(commerceStoreOrders.id, orderId)),
             )
         : [];
       if (!order || order.deletedAt) return skip('order_deleted');
       if (order.redactedAt) return skip('customer_erased');
       if (row.event !== 'order_cancelled' && order.status === 'cancelled') {
         return skip('order_cancelled');
+      }
+      if (shipment?.failed) return skip('shipment_cancelled');
+      // A newer tracking of the same shipment came meanwhile: its own message goes instead.
+      if (row.event === 'tracking_updated' && shipment) {
+        const revision = Number(/^tracking:(\d+)$/.exec(row.dedupeKey ?? '')?.[1] ?? 0);
+        if (revision < shipment.trackingKeys.length) return skip('tracking_replaced');
       }
       phone = order.customerPhone;
       if (!phone) return skip('no_phone');
@@ -495,13 +567,18 @@ export async function processStoreMessage(
           totalMinor: order.totalMinor,
           items,
           statusUrl: order.statusUrl,
-          trackingNumber: order.trackingNumber,
-          trackingCompany: order.trackingCompany,
-          trackingUrl: order.trackingUrl,
+          // A shipment message carries its own shipment's tracking, missing parts included.
+          trackingNumber: shipment ? shipment.trackingNumber : order.trackingNumber,
+          trackingCompany: shipment ? shipment.trackingCompany : order.trackingCompany,
+          trackingUrl: shipment ? shipment.trackingUrl : order.trackingUrl,
           storeName,
         }),
       };
-      subject = { orderId: order.id, orderName: order.name };
+      subject = {
+        orderId: order.id,
+        orderName: order.name,
+        ...(shipment ? { shipmentId: shipment.id } : {}),
+      };
       if (rule.action === 'automation' && rule.automationId && canStartAutomation(row.event)) {
         const started = await startStoreAutomation(tx, deps, {
           tenantId,

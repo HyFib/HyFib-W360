@@ -18326,6 +18326,109 @@ customer's reaction webhook that carries no `emoji` at all is already stored wit
 "Reaction removed" (`meta-webhook.ts`); that reading is kept as it was, and this research neither
 confirms nor refutes it.
 
+## ADR-413 Store follow-ups per shipment (P4-06f) (2026-10-21)
+
+Context: an order message rule (ADR-048) fires at most once per order and event, so an order
+shipped in three parcels got one "Order shipped" message, at the first, with the tracking of
+whichever shipment last had one, and a tracking number added or corrected later sent nothing.
+BACKLOG P4-06f listed "messages per shipment or on tracking changes" as not built. Shopify gives
+each shipment as a fulfillment with its own id, statuses, times and tracking (research SH-045 to
+SH-047), already read with every order (`Order.fulfillments`, `read_orders`), and has webhooks for
+fulfillments that need a scope HyFib did not ask for (SH-044). WooCommerce core has no shipments:
+its tracking comes from extensions, and its own Order Fulfillments feature is off by default with
+no setting to turn it on (WC-022, WC-024).
+
+Decision:
+
+- **Two events, about a shipment.** `shipment_created` ("Shipment sent") fires once for each
+  shipment HyFib sees for the first time, dated when Shopify created it; `tracking_updated`
+  ("Tracking updated") fires once for each tracking a shipment changes to that HyFib had not seen
+  for that shipment, dated by the shipment's `updatedAt` ("when the fulfillment was last modified",
+  SH-045). Shopify only (`eventAvailable`); a WooCommerce store's page says why not. A shipment is
+  a fulfillment that is not `CANCELLED`, `ERROR` or `FAILURE` (nor displayed `CANCELED` or
+  `FAILURE`), the same rule as "Order shipped" (SH-030). Both follow ADR-048's rules unchanged:
+  nothing about what happened before the rule was switched on (from its second), test orders
+  (unless allowed) and events first seen over 48 hours late recorded as skipped, a delay of 0 to 24
+  hours, the store's sending hours, and every send-time check again (store, opt-in, plan, rule,
+  order, number, template, variables, suppression, erasure, opt-out, marketing opt-in and cap).
+  Nothing for a shipment first seen cancelled or failed, nor for a cancelled order. "Order
+  shipped" is kept as it was; the page says to switch on one of the two, since both on gives the
+  first shipment two messages (not suppressed automatically: that would add a skip reason to
+  `store_order.message_skipped`, whose meaning ADR-354 fixed).
+- **What counts as a tracking change.** A shipment's tracking is its first tracking entry's number
+  and link (Shopify allows several; the first is what the order's copy already used). It is
+  identified by a digest (`shipmentTrackingKey`: SHA-256 of the number, upper case with spaces
+  collapsed, and the link as `URL` gives it); the carrier's name is not part of it, so a new carrier
+  name alone is no change, and an empty tracking is none. A shipment seen for the first time
+  remembers its tracking without it counting as a change (its "Shipment sent" message carries it);
+  after that, a tracking not remembered is a change, numbered by its place (`nextTrackingKeys`), so
+  going back to a number the shipment had before sends nothing. At most ten trackings are
+  remembered per shipment (`trackingKeysPerShipment`); an eleventh sends nothing. A message still
+  waiting when a newer tracking of its shipment arrives is skipped (`tracking_replaced`), so a
+  quick correction gives one message, with the newest values.
+- **One message per shipment and key, in the database.** Migration 0323 adds
+  `app.commerce_store_shipments` (one row per Shopify fulfillment and store, under its order: the
+  statuses as status words, `failed`, the times, the first tracking entry, and `tracking_keys`, the
+  digests, at most ten, checked hex) and gives store messages `shipment_id` and `dedupe_key`
+  (`created` or `tracking:<n>`) with `UNIQUE (tenant_id, shipment_id, event, dedupe_key)`.
+  Shipment messages name the shipment, not the order (`num_nonnulls(order_id, checkout_id,
+shipment_id) = 1`): the old unique key of one message per order and event stays untouched, so
+  the migration is expand only and a server of the release before never meets a second message per
+  order and event. The order read saves each shipment in its own transaction with the order,
+  never backwards (an older `updatedAt` is ignored), after locking the copies it holds, and records
+  the messages with `ON CONFLICT DO NOTHING` on the new key: a fulfillment webhook delivered twice
+  (the second is a duplicate by its delivery id), delivered again under another id, or read by the
+  webhook and the transit check at once still gives one message per key. Whether a row was new is
+  read from the upsert itself (`xmax = 0`), so the losing reader of a race never calls it new.
+- **Variables.** The rule editor's mapping is ADR-048's: the order's fields with fallbacks or fixed
+  text. For a shipment message the carrier, tracking number and tracking link are that shipment's
+  own (`processStoreMessage`), each only as Shopify returns it (HyFib never builds a link, SH-047);
+  a missing one uses the variable's fallback or the message is skipped (`missing_variable`), as
+  for missing order data. The message keeps the shipment's id with the order's.
+- **Shipment webhooks, asked for and rolled out safely.** Every authorization now asks for
+  `read_fulfillments` too (`shopifyScopesFor`); it is not required (a grant without it connects,
+  `SHOPIFY_SCOPES` stays the connector's own two). When a store's granted scopes include it or
+  `read_marketplace_orders` (`hasShipmentAccess`, SH-044), the webhook check subscribes
+  `FULFILLMENTS_CREATE` and `FULFILLMENTS_UPDATE` with `includeFields` `id`, `order_id`,
+  `updated_at`; a delivery only signals a read of the order its `order_id` names (`fulfillmentOrderId`;
+  the body is never stored, and a body without a usable `order_id` is answered 400). The same
+  six-hourly check that re-creates lost subscriptions brings older stores up to date: it creates
+  only topics missing for HyFib's address, so running it again never subscribes twice, and a
+  shipment topic Shopify refuses leaves a reason on the store (`webhook_error`) instead of failing
+  its sync. A store connected before this release has no `read_fulfillments`, which only Shopify's
+  approval can add (SH-042): its Order messages page offers "Allow shipment updates in Shopify"
+  (`startShipmentAccess`, `commerce.manage`), the customer-access handshake of ADR-049 for the same
+  scopes plus `read_fulfillments` (and `read_customers` only if it was asked for before); after the
+  worker exchanges the approval it checks webhooks in the same run. Until then shipments are read
+  with the order: by an order's own webhooks, the hourly read and the transit check, which now
+  reads orders in transit again every three hours while a delivered or shipment rule is on (a
+  later shipment of a partly shipped order, or a new tracking that changes no order, SH-034). An
+  approval that does not grant a scope says which (`accessShortfall`: customers only when asked for).
+  Audited as `commerce.store_shipment_access_requested` and `..._approved`.
+- **Automations.** A shipment rule may start a published automation instead (ADR-050's path is
+  generic): the run keeps the shipment's order and its event (`store_event`, check widened). Its
+  `{{order.tracking_*}}` placeholders read the order's copy, which holds the latest shipment's
+  tracking, not necessarily the one that started the run.
+- **Reports and privacy.** The store's report and the order page list shipment messages with their
+  order. A tracking number and its link go with the customer's details: whenever an order is
+  written as redacted (erasure as `w360_definer`, Shopify's `customers/redact`, or a read of an
+  order whose number was erased) a trigger clears its shipments' tracking and digests at once, and
+  later reads keep them empty. Shipment messages send no outgoing webhook event: the
+  `store_order.message_*` triggers watch messages with an order, so the five order events of
+  ADR-352 keep their meaning; their skip reasons `shipment_cancelled` and `tracking_replaced` are
+  never in those events. No public API or OpenAPI change. The company export has the shipments
+  without their digests.
+
+Not built: WooCommerce shipments (core has none a merchant can turn on, WC-024, and extensions are
+not read); tracking from a shipment's other tracking entries; messages for each delivery event of
+a shipment (in transit, out for delivery, delivered per shipment: `fulfillment_events/create` needs
+`read_fulfillments` and its payload was not read); outgoing webhook events for shipment messages;
+shipment tracking in automation placeholders; suppressing "Order shipped" when "Shipment sent" is
+on; validating the widened checks of `commerce_store_messages` and `automation_runs` (left NOT
+VALID, see 0323); and any check against a real Shopify store (the stand-in only): the body of a
+fulfillment delivery, the order of an order's fulfillments past ten and links Shopify builds itself
+are unconfirmed (research §5).
+
 ## ADR-414 Automations started by replies to a campaign (P4-01) (2026-10-21)
 
 Context: P4-01's Remaining listed "starting runs from campaigns". A company that sends a campaign

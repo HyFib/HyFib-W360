@@ -1330,6 +1330,45 @@ means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). It also 
 `contacts.source` check to allow `store`. The `commerce.store-message` queue is created by
 `pnpm db:migrate`.
 
+**A shipment message was not sent, or came twice (ADR-413).** "Shipment sent" goes once for each
+shipment of a Shopify order HyFib sees for the first time, and "Tracking updated" once for each
+tracking number or link a shipment changes to that HyFib had not seen for it. The report and the
+order page list them with the order; besides the order message reasons above:
+
+- "The shipment was cancelled, or failed" — Shopify reports it `CANCELLED`, `ERROR` or `FAILURE`
+  (or displayed cancelled or failed) by the time it was due; a shipment first seen so gets nothing.
+- "The shipment's tracking changed again" — a newer tracking of the same shipment arrived while
+  this one waited for its delay or the sending hours; only the newest is sent.
+- "A template variable had no value" — Shopify gave the shipment no tracking number (or link) and
+  the variable has no fallback: give the variable a fallback, or use "Tracking updated" for the
+  number that comes later.
+- Nothing recorded for a new carrier name, the same number written differently (case, spaces), a
+  number the shipment had before, or more than ten trackings of one shipment: none of these is a
+  change. A customer who got "Order shipped" and "Shipment sent" for the first parcel has both
+  rules on; switch one off.
+
+**Shipment messages come hours late.** The store page's Order messages section says whether
+Shopify sends shipment updates. When it says "not allowed" (stores connected before ADR-413 lack
+`read_fulfillments`), shipments are read only with their orders: an order's own webhook, the
+hourly read, and the three-hourly re-read of orders in transit (14 days after shipping) while a
+delivered or shipment rule is on. A manager clicks "Allow shipment updates in Shopify" and
+approves; the worker exchanges the approval and subscribes `fulfillments/create` and
+`fulfillments/update` in the same run. The store page's "Webhooks" line shows a refusal ("Shopify
+did not create the FULFILLMENTS_CREATE subscription … HyFib reads shipments with their orders
+instead"): the grant was withdrawn or the app lacks the scope in the Partner Dashboard
+(docs/DEPLOYMENT.md, Shopify app step 2). The web log's `shopify webhook` lines for
+`fulfillments/*` show `fetch_signalled`, `duplicate`, or `malformed` (no usable `order_id` in the
+body: research SH-048, unconfirmed against a real store; the order is still read later).
+
+**Migration 0323 failed.** It runs in one transaction, so a failure applies nothing. It creates
+`app.commerce_store_shipments` (with `ops.apply_tenant_rls`, grants for `w360_app` and column grants
+and a policy for `w360_definer`), a trigger on `app.commerce_store_orders`, two columns and a unique
+key on `app.commerce_store_messages`, and replaces three checks `NOT VALID`; a failure on the
+definer's grants usually means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). A
+lock timeout means a long transaction held `app.commerce_store_messages`,
+`app.commerce_store_message_rules`, `app.commerce_store_orders` or `app.automation_runs`: run it
+again in a quieter moment.
+
 ## 10K. Cart reminders (Shopify checkouts)
 
 **A customer who left a checkout got no reminder.** Open the store's Order messages page: the Cart

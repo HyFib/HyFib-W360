@@ -10024,10 +10024,14 @@ describe('skip reason filters for skipped order messages (ADR-354)', () => {
     'cart_too_old',
     'not_marketing_template',
   ];
+  // Shipment messages (ADR-413) send no webhook events, so their own reasons are never reported.
+  const shipmentOnly = ['shipment_cancelled', 'tracking_replaced'];
 
   it('are the reasons a store’s Messages page explains, but cart reminders’ own', () => {
     expect(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS).toEqual(
-      Object.keys(STORE_MESSAGE_SKIP_REASONS).filter((reason) => !cartOnly.includes(reason)),
+      Object.keys(STORE_MESSAGE_SKIP_REASONS).filter(
+        (reason) => !cartOnly.includes(reason) && !shipmentOnly.includes(reason),
+      ),
     );
     expect(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS).toHaveLength(25);
     for (const reason of cartOnly) {
@@ -10135,6 +10139,9 @@ describe('the events of a store’s cart reminders (ADR-355)', () => {
     'automation_busy',
     'automation_limit',
     'automation_quota',
+    // Shipment messages' own (ADR-413).
+    'shipment_cancelled',
+    'tracking_replaced',
   ];
 
   /** A transaction that answers its reads, in order, with `answers`; another read fails the test. */

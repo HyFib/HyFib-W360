@@ -629,10 +629,28 @@ verification, app review, Embedded Signup configuration).
   automation whose template the customer taps); 76 deliberate regressions caught. **Remaining:**
   checks with a development store, approved templates and a WhatsApp test number (release
   checklist).
-- **P4-06f Store follow-ups not built yet**: messages per shipment or on tracking changes (a rule
-  fires once per order and event); cash on delivery confirmations and cart reminders starting
-  automations (their answers and checks depend on their own templates); order data other than the
-  fields listed (for example addresses or discount codes).
+- **P4-06f Store follow-ups** — **[messages per shipment and on tracking changes built, locally
+  verified against the Shopify and Graph stand-ins; no live store or WhatsApp traffic yet]**
+  (ADR-413, migration 0323): "Shipment sent" once for each shipment of a Shopify order (each
+  fulfillment HyFib sees for the first time) and "Tracking updated" once for each tracking number or
+  link a shipment changes to that HyFib had not seen for it (the carrier's name alone is no change;
+  at most ten per shipment; a waiting message replaced by a newer tracking is skipped), with that
+  shipment's carrier, tracking number and tracking link in the existing variable mapping (fallbacks,
+  or skipped as missing); one message per shipment and key in the database, also for a webhook
+  delivered twice or read twice at once; ADR-048's checks, delay and sending hours; an automation
+  instead of a template; every authorization asks for `read_fulfillments`, the shipment webhooks
+  are subscribed once a store has it, and older stores are brought up to date by the six-hourly
+  check after a manager allows shipment updates (until then shipments are read with orders,
+  including every three hours while in transit); tracking cleared with the customer's details.
+  T: `stores.test.ts` (7 shipment tests), unit tests `stores/shipment-messages.test.ts`, e2e
+  `stores.spec.ts` (a shipment message set up and sent); 26 deliberate regressions, 19 caught by
+  unit tests. **Remaining:** checks with a development store (a fulfillment delivery's body,
+  approving the new scope on an installed store, research §5); WooCommerce shipments (core has none
+  merchants can turn on, WC-024); messages per delivery event of a shipment; outgoing webhook events
+  for shipment messages; a shipment's own tracking in automation placeholders. **Not built yet:**
+  cash on delivery confirmations and cart reminders starting automations (their answers and checks
+  depend on their own templates); order data other than the fields listed (for example addresses
+  or discount codes).
 
 ## Phase 5 — billing, wallet, platform, public API
 

@@ -707,7 +707,9 @@ Phase 4 rules (Store connectors, P4-06b):
   `commerce.store_uninstalled`, `commerce.store_customer_redacted`,
   `commerce.store_data_requested`, `commerce.store_data_request_answered`,
   `commerce.store_redacted`), never with tokens, keys or customer details.
-- Shopify: the app asks only for `read_orders,read_products`. The state is 32 random bytes, stored
+- Shopify: the app asks only for `read_orders,read_products` and, for shipment webhooks only,
+  `read_fulfillments` (ADR-413; not required, and a store connected before is asked again only when
+  a manager allows shipment updates). The state is 32 random bytes, stored
   as a SHA-256 hash, single-use, valid 15 minutes and bound to the member who started it; the
   callback is refused unless its HMAC (current or previous app secret), timestamp (±90 s), shop
   name and waiting handshake all check out, and then only the same signed-in member, re-checked in
@@ -769,6 +771,15 @@ Phase 4 rules (Cart reminders, P4-06d):
   (`commerce.store_message_rule_saved`, `commerce.store_consent_saved`,
   `commerce.store_customer_access_requested`, `commerce.store_customer_access_approved`,
   `commerce.store_access_updated`), never with customer details.
+- Shipment messages (ADR-413) follow the order message permissions. Allowing shipment updates needs
+  `commerce.manage` and uses the customer access handshake (the same checks, bound to the member who
+  started it), audited as `commerce.store_shipment_access_requested` and
+  `commerce.store_shipment_access_approved`. A shipment webhook only signals a read of the order its
+  `order_id` names in the store its verified shop header maps to; nothing in the body is used. A
+  shipment's tracking and its digests are cleared whenever its order is redacted (a trigger;
+  `w360_definer` holds only `SELECT (tenant_id, order_id, tracking_number, tracking_url,
+tracking_keys)` and `UPDATE (tracking_number, tracking_url, tracking_keys)` on
+  `app.commerce_store_shipments`, for erasure). No permission changes.
 - Least privilege at Shopify: HyFib asks for `read_customers` only after a manager allows customer
   access for that store. The new authorization has the connection's checks (HMAC with the app
   secret, timestamp, shop, a single-use state bound to the member who started it). Its code is

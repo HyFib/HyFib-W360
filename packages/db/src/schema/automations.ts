@@ -118,11 +118,19 @@ export const automationRuns = appSchema.table('automation_runs', {
   triggerMessageId: uuid('trigger_message_id'),
   /**
    * The store order a run started by order messages (or a test run with a chosen order) reads
-   * while it runs, and the event that started it (migration 0022). Cleared when the order is deleted.
+   * while it runs, and the event that started it (migration 0022; the shipment events, 0323).
+   * Cleared when the order is deleted.
    */
   storeOrderId: uuid('store_order_id'),
   storeEvent: text('store_event', {
-    enum: ['order_placed', 'order_shipped', 'order_delivered', 'order_cancelled'],
+    enum: [
+      'order_placed',
+      'order_shipped',
+      'order_delivered',
+      'order_cancelled',
+      'shipment_created',
+      'tracking_updated',
+    ],
   }),
   /** The API key a run started through the API came from (migration 0052, ADR-077). */
   apiKeyId: uuid('api_key_id'),

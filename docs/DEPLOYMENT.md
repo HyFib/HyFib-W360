@@ -2019,6 +2019,27 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    deleted (which removes their values and leaves those segments refused as naming a field that does
    not exist).
 
+   Migration 0323 (ADR-413, shipment messages) is expand only. It creates
+   `app.commerce_store_shipments` (empty; tenant row security, grants), a trigger on
+   `app.commerce_store_orders` that clears shipments' tracking when an order is redacted, and gives
+   `app.commerce_store_messages` the null columns `shipment_id` and `dedupe_key` with
+   `UNIQUE (tenant_id, shipment_id, event, dedupe_key)`. It replaces the event and subject checks of
+   `app.commerce_store_messages`, the event and action checks of `app.commerce_store_message_rules`
+   (validated: at most nine rows a store) and the `store_event` check of `app.automation_runs` with
+   wider ones; every value the old checks allowed is still allowed. The two on the large tables are
+   left `NOT VALID` (new and changed rows are checked; rows already there passed the narrower
+   check), so the migration does not scan them under its lock. The unique key builds an index on
+   `app.commerce_store_messages`, which blocks writes to it while it builds (order messages wait,
+   nothing fails); on a large table apply it in a quiet hour. Locks: `ACCESS EXCLUSIVE` briefly on
+   the three altered tables and `SHARE ROW EXCLUSIVE` on `app.commerce_store_orders` for the trigger.
+   Rollout: apply 0323, then roll out workers and web as usual. A server of the release before
+   ignores the new table and columns: shipment rules cannot be switched on from it, and it never
+   writes a second message per order and event (shipment messages name no order). During the rollout
+   an old web server showing a store's report could meet a shipment message's event and fail to
+   render that page, so switch shipment rules on only after the web rollout ends. Rolling back an
+   image leaves the table, trigger, columns and checks; older code then ignores them (shipment
+   messages already waiting are never sent by older workers, which skip them as an order deleted).
+
    ADR-410 (campaigns that test up to five templates) has no migration: the labels B to Z, the
    shares of 10% to 90% in steps of 5, the unique label per campaign and the grants of 0317 already
    take variants C to E, and the recipients' check takes any label A to Z. It adds the web setting
@@ -2327,8 +2348,11 @@ Optional: without it, the Stores page says Shopify is not set up and WooCommerce
    distribution through Shopify's app review (SH-001); custom distribution only reaches one store or
    one Plus organization, which is enough for a pilot.
 2. Allowed redirection URL: `https://<app host>/api/stores/shopify/callback` (the whole address must
-   be listed, SH-003). Scopes: `read_orders,read_products` only; HyFib asks for exactly these and
-   fails a connection that is not granted both.
+   be listed, SH-003). Scopes: `read_orders,read_products,read_fulfillments`. HyFib fails a
+   connection that is not granted `read_orders` and `read_products`; `read_fulfillments` (ADR-413,
+   research SH-044) only lets it subscribe to Shopify's shipment webhooks, and a store works without
+   it. If the Partner Dashboard asks for the app's access scopes, list all three (and
+   `read_customers` as optional, step 9).
 3. Compliance webhooks (set on the app, not per shop, SH-027): `customers/data_request`,
    `customers/redact` and `shop/redact` to `https://<app host>/api/webhooks/shopify`. HyFib creates
    the per-shop order, product and uninstall subscriptions itself.
@@ -2347,9 +2371,18 @@ Optional: without it, the Stores page says Shopify is not set up and WooCommerce
    lifetimes, the retry schedule and the `shop/redact` timing listed as unconfirmed in
    `docs/research/store-connectors.md`.
 8. Order messages (P4-06c) need no other scope or setting: shipments, tracking and payment gateways
-   are read with `read_orders` (research SH-030, SH-031). The fulfillment webhooks would need
-   `read_fulfillments` (SH-033), so the worker finds deliveries by reading orders in transit again
-   every three hours. Each message is a `commerce.store-message` job scheduled for its send time
+   are read with `read_orders` (research SH-030, SH-031), and the worker finds deliveries by
+   reading orders in transit again every three hours. Shipment messages (ADR-413) also read
+   shipments with the order; with `read_fulfillments` the store's webhook check subscribes
+   `fulfillments/create` and `fulfillments/update` (SH-044), whose deliveries make HyFib read the
+   order at once. Rollout: new connections ask for the scope from this release on; a store
+   connected before keeps its token (no re-approval is forced, nothing breaks) and reads shipments
+   as before until a manager allows shipment updates on its Order messages page, after which the
+   same run subscribes the two topics. The six-hourly check creates only topics missing for HyFib's
+   address, so it is safe to run any number of times, and a Shopify refusal of a shipment topic is
+   shown on the store, not a failed sync. Before launch, on a development store: approve the new
+   scope on an installed store, receive a `fulfillments/create` delivery and check its body has
+   `order_id` (research SH-048). Each message is a `commerce.store-message` job scheduled for its send time
    (the queue is created by `pnpm db:migrate` with the others), and the worker's minute sweep
    queues again any message that is due but lost its job.
 9. Cart reminders (P4-06d) read checkouts with `read_orders` (research SH-037). Customer access is

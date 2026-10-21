@@ -86,6 +86,8 @@ export const STEP_DETAILS: Record<string, string> = {
   'store_event:order_shipped': 'an order shipped by a store',
   'store_event:order_delivered': 'an order delivered',
   'store_event:order_cancelled': 'an order cancelled in a store',
+  'store_event:shipment_created': 'a shipment sent by a store',
+  'store_event:tracking_updated': 'a shipment’s tracking updated by a store',
   // Form steps (ADR-248, checked again when the step runs).
   flow_unavailable:
     'the form is archived, no longer published, or of another WhatsApp account than the number',
@@ -212,6 +214,8 @@ export const STORE_EVENT_LABELS: Record<string, string> = {
   order_shipped: 'Started when an order shipped',
   order_delivered: 'Started when an order was delivered',
   order_cancelled: 'Started when an order was cancelled',
+  shipment_created: 'Started when a shipment was sent',
+  tracking_updated: 'Started when a shipment’s tracking was updated',
 };
 
 export const TRIGGER_TYPE_LABELS: Record<string, string> = {
