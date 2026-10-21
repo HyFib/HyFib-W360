@@ -489,7 +489,9 @@ test('a member enrols the contacts the Contacts page’s filters match in an aut
     page.getByRole('heading', { name: 'Enrol contacts in an automation' }),
   ).toBeVisible();
   await page.getByLabel('Automation', { exact: true }).selectOption({ index: 1 });
-  await expect(page.getByLabel('Whom')).toContainText('Contacts matching tag “festival”');
+  await expect(page.getByLabel('Whom', { exact: true })).toContainText(
+    'Contacts matching tag “festival”',
+  );
   await page.getByRole('button', { name: 'Count contacts' }).click();
   await expect(page.getByText('2 contacts', { exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);

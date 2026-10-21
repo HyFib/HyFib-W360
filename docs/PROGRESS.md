@@ -283,6 +283,10 @@ started only from customer messages, store events, members' tests and the public
   - the skewed-clock test measured the next batch from a later `now()` instead of the batch's own
     time.
 
+  The end-to-end run then failed two steps, both the tests', on WebKit and again on retry:
+  `getByLabel('Whom')` also matched the enrol page's form, whose label ends "and whom" (now exact),
+  and `webhook-events.spec.ts` still named the api trigger's checkbox by its old label, "API (api)".
+
 ### Test commands and results (local, 2026-10-16)
 
 | Command                                            | Result                                                          |
