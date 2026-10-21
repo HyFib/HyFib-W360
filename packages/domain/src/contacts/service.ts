@@ -11,6 +11,7 @@ import {
   contacts,
   contactTags,
   conversations,
+  CONTACT_FIELD_TYPES,
   desc,
   eq,
   exactTimestamp,
@@ -40,13 +41,23 @@ import {
 import type { BulkFieldResult } from './bulk-fields';
 import { BULK_TAG_LIMIT, type BulkTagResult } from './bulk-tags';
 import { CsvError, CSV_BOM, csvLine, parseCsv, restoreCell, type CsvLimits } from './csv';
-import { createContactField, deleteContactField, renameContactField } from './field-definitions';
 import {
+  createContactField,
+  deleteContactField,
+  lockContactFieldValues,
+  renameContactField,
+  setContactFieldOptions,
+} from './field-definitions';
+import {
+  MAX_CONTACT_FIELDS,
   MAX_TAGS_PER_CONTACT,
   coerceFieldValue,
+  fieldOptionsSchema,
   normalizeEmail,
   normalizeTag,
   parseConsentCell,
+  refineFieldOptions,
+  sameOptions,
   type AttributeValue,
 } from './fields';
 import { seesNumbers, shownNumber } from './number-masking';
@@ -134,14 +145,22 @@ export const updateContactSchema = z.object({
   attributes: z.record(z.string(), z.string().max(1000)).optional(),
 });
 
-export const createFieldSchema = z.object({
-  label: z.string().trim().min(1, 'Enter a label').max(80),
-  key: z
-    .string()
-    .regex(/^[a-z][a-z0-9_]{0,39}$/, 'Use lower-case letters, digits and underscores')
-    .optional(),
-  type: z.enum(['text', 'number', 'date', 'boolean']),
-});
+const fieldLabelSchema = z.string().trim().min(1, 'Enter a label').max(80);
+
+export const createFieldSchema = z
+  .object({
+    label: fieldLabelSchema,
+    key: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{0,39}$/, 'Use lower-case letters, digits and underscores')
+      .optional(),
+    type: z.enum(CONTACT_FIELD_TYPES, {
+      error: 'Choose the type: text, number, date, yes/no or a choice.',
+    }),
+    /** A choice field's options (ADR-407); other types take none. */
+    options: fieldOptionsSchema.optional(),
+  })
+  .superRefine(refineFieldOptions);
 
 export const importMappingSchema = z.object({
   phone: z.number().int().min(0),
@@ -192,6 +211,99 @@ export interface ContactFieldRow {
   key: string;
   label: string;
   type: ContactFieldType;
+  /** A choice field's options, in order; null for every other type (ADR-407). */
+  options: string[] | null;
+}
+
+/** How many times an import reads a number's contact again before reporting it as changing. */
+export const IMPORT_RELOCK_ROUNDS = 3;
+
+/**
+ * Finds, for each number, the contact that has it once that contact is locked (ADR-407): reads the
+ * contacts by number, locks those not locked yet, and keeps a number only when its locked contact
+ * still has it (a contact already locked cannot change). A contact merged away or erased before its
+ * lock does not come back, and one whose number changed is ignored for this number; those numbers
+ * are read again, at most `IMPORT_RELOCK_ROUNDS` times. A number found on no contact, or still
+ * changing, is `unsettled`, for the import to report as a row error, so every row of the file is
+ * counted once.
+ */
+export async function settleLockedContacts(
+  phones: readonly string[],
+  deps: {
+    selectByPhones: (phones: string[]) => Promise<(readonly [string, ContactLockRow])[]>;
+    lockContacts: (ids: string[]) => Promise<ContactLockRow[]>;
+    isLocked: (id: string) => boolean;
+  },
+): Promise<{ locked: Map<string, ContactLockRow>; unsettled: string[] }> {
+  const locked = new Map<string, ContactLockRow>();
+  const gone: string[] = [];
+  let pending = [...new Set(phones)];
+  for (let round = 0; round < IMPORT_RELOCK_ROUNDS && pending.length > 0; round += 1) {
+    const found = await deps.selectByPhones(pending);
+    const already = found.filter(([, e]) => deps.isLocked(e.id));
+    const fresh = await deps.lockContacts(
+      found.filter(([, e]) => !deps.isLocked(e.id)).map(([, e]) => e.id),
+    );
+    const freshById = new Map(fresh.map((e) => [e.id, e]));
+    for (const [phone, e] of already) locked.set(phone, e);
+    for (const [phone, e] of found) {
+      const row = freshById.get(e.id);
+      if (row && row.phoneE164 === phone) locked.set(phone, row);
+    }
+    // Only numbers found on a contact that moved or went are read again: a number no contact has
+    // now would be found by nobody again.
+    const seen = new Set(found.map(([phone]) => phone));
+    gone.push(...pending.filter((phone) => !locked.has(phone) && !seen.has(phone)));
+    pending = pending.filter((phone) => !locked.has(phone) && seen.has(phone));
+  }
+  return { locked, unsettled: [...gone, ...pending] };
+}
+
+/** A contact as an import reads it once locked. */
+export interface ContactLockRow {
+  id: string;
+  phoneE164: string | null;
+  displayName: string | null;
+  email: string | null;
+  attributes: Record<string, AttributeValue>;
+}
+
+/**
+ * The patch an import writes over a contact's values (ADR-407), as `mergeAttributes` would change
+ * them: the values given set, the keys given null removed (an import never gives null, since a
+ * blank cell leaves a value alone, so for it `removed` is always empty; the rule is kept so the
+ * patch means what `mergeAttributes` means); null when it changes nothing, compared value by value
+ * with the locked row so an unchanged contact is not rewritten.
+ */
+export function attributePatch(
+  current: Readonly<Record<string, AttributeValue>>,
+  changes: Readonly<Record<string, AttributeValue | null>>,
+): { set: Record<string, AttributeValue>; removed: string[] } | null {
+  const set: Record<string, AttributeValue> = {};
+  const removed: string[] = [];
+  for (const [key, value] of Object.entries(changes)) {
+    if (value === null) {
+      if (Object.hasOwn(current, key)) removed.push(key);
+    } else if (!Object.hasOwn(current, key) || !Object.is(current[key], value)) {
+      set[key] = value;
+    }
+  }
+  return Object.keys(set).length > 0 || removed.length > 0 ? { set, removed } : null;
+}
+
+/**
+ * Whether a field takes the same values as it did: its id, type and options as written. An import
+ * reads its rows against the fields before its transaction and checks them again under the lock
+ * (ADR-407).
+ */
+export function sameFieldShape(a: ContactFieldRow, b: ContactFieldRow): boolean {
+  return (
+    a.id === b.id &&
+    a.type === b.type &&
+    (a.options === null || b.options === null
+      ? a.options === b.options
+      : sameOptions(a.options, b.options))
+  );
 }
 
 function csvToAppError(error: unknown): never {
@@ -363,10 +475,47 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         key: contactFields.key,
         label: contactFields.label,
         type: contactFields.type,
+        options: contactFields.options,
       })
       .from(contactFields)
       .where(eq(contactFields.tenantId, tenantId))
       .orderBy(asc(contactFields.label));
+  }
+
+  /**
+   * The fields with these keys, read under the company's contact-field lock (ADR-407), for writes
+   * of their values: taken before any contact is locked, so a choice field's options cannot change
+   * until they commit. Only the rows of the keys written are then locked `FOR SHARE`, still before
+   * the contact, in the order a field's deletion takes them (ADR-112), as the API's `lockFields`
+   * does: a deletion of one of them in progress is waited for and its field is then gone, or the
+   * deletion waits and removes what this transaction writes; other fields' renames and deletions
+   * do not wait. A key no field has is simply not returned.
+   */
+  async function lockedFields(
+    tx: Tx,
+    tenantId: string,
+    keys: readonly string[],
+  ): Promise<ContactFieldRow[]> {
+    if (keys.length === 0) return [];
+    if (keys.length > MAX_CONTACT_FIELDS) {
+      const message = `A company has at most ${MAX_CONTACT_FIELDS} custom fields.`;
+      throw new AppError('validation_failed', message, {
+        issues: [{ path: 'attributes', message }],
+      });
+    }
+    await lockContactFieldValues(tx, tenantId);
+    return tx
+      .select({
+        id: contactFields.id,
+        key: contactFields.key,
+        label: contactFields.label,
+        type: contactFields.type,
+        options: contactFields.options,
+      })
+      .from(contactFields)
+      .where(and(eq(contactFields.tenantId, tenantId), inArray(contactFields.key, [...keys])))
+      .orderBy(asc(contactFields.key))
+      .for('share');
   }
 
   /** Validates raw attribute strings against the field definitions (empty value = remove). */
@@ -419,7 +568,14 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
   /**
    * Locks the contacts a bulk edit's filters match, in id order, and returns their ids: refused
    * beyond BULK_TAG_LIMIT contacts, or when the filters no longer match the number the member was
-   * shown (ADR-213).
+   * shown (ADR-213). A tag edit locks them `FOR UPDATE`, which an automation step's key share lock
+   * waits for before it changes a tag, so the two take turns on a contact's tags. A field edit
+   * changes only `attributes`, never `tenant_id` or `id` (the only key other tables reference;
+   * the number's unique index is partial, so no key), so it locks `FOR NO KEY UPDATE` (ADR-407):
+   * automation steps' key share locks and foreign key checks (tags, consent events, a message's
+   * conversation) do not wait for it, and it cannot join a deletion and an automation step in a
+   * cycle; steps that set a field or create a deal, Flow answers and a first name from WhatsApp
+   * still wait until it commits.
    */
   async function lockMatching(
     tx: Tx,
@@ -434,7 +590,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       .where(and(...filterConditions(ctx, filter)))
       .orderBy(asc(contacts.id))
       .limit(BULK_TAG_LIMIT + 1)
-      .for('update');
+      .for(done === 'tagged' ? 'update' : 'no key update');
     if (locked.length > BULK_TAG_LIMIT) {
       throw new AppError(
         'validation_failed',
@@ -613,7 +769,9 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'contacts.write');
       const data = parseInput(bulkFieldSchema, input);
       return db.run(ctx.scope, async (tx) => {
-        const field = (await loadFields(tx, ctx.tenant.id)).find((f) => f.key === data.key);
+        const field = (await lockedFields(tx, ctx.tenant.id, [data.key])).find(
+          (f) => f.key === data.key,
+        );
         if (!field) {
           const message = 'Choose one of the company’s custom fields.';
           throw new AppError('validation_failed', message, {
@@ -783,7 +941,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       if (!email.ok) throw new AppError('validation_failed', email.message);
       const tags = normalizeTags(data.tags ?? []);
       return db.run(ctx.scope, async (tx) => {
-        const fields = await loadFields(tx, ctx.tenant.id);
+        const fields = await lockedFields(tx, ctx.tenant.id, Object.keys(data.attributes ?? {}));
         const attributes = mergeAttributes({}, coerceAttributes(fields, data.attributes ?? {}));
         const id = uuidv7();
         const [row] = await tx
@@ -840,6 +998,8 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'contacts.write');
       const data = parseInput(updateContactSchema, input);
       await db.run(ctx.scope, async (tx) => {
+        // The fields before the contact, as every write of values takes them (ADR-407).
+        const fields = await lockedFields(tx, ctx.tenant.id, Object.keys(data.attributes ?? {}));
         const current = await lockContact(tx, ctx, contactId);
         const set: Partial<typeof contacts.$inferInsert> = {};
         if (data.displayName !== current.displayName) set.displayName = data.displayName;
@@ -885,7 +1045,6 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
           }
         }
         if (data.attributes) {
-          const fields = await loadFields(tx, ctx.tenant.id);
           const next = mergeAttributes(
             current.attributes,
             coerceAttributes(fields, data.attributes),
@@ -992,7 +1151,11 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
             action: 'contact_field.created',
             subjectType: 'contact_field',
             subjectId: field.id,
-            metadata: { key: field.key, type: field.type },
+            metadata: {
+              key: field.key,
+              type: field.type,
+              ...(field.options ? { options: field.options.length } : {}),
+            },
           },
           meta,
         );
@@ -1002,7 +1165,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
 
     async renameField(ctx: TenantContext, fieldId: string, label: string, meta: RequestMeta = {}) {
       assertCan(ctx, 'tenant.settings.manage');
-      const parsed = parseInput(createFieldSchema.shape.label, label);
+      const parsed = parseInput(fieldLabelSchema, label);
       if (!z.uuid().safeParse(fieldId).success) throw notFound('Field');
       await db.run(ctx.scope, async (tx) => {
         const result = await renameContactField(tx, ctx.tenant.id, { id: fieldId }, parsed);
@@ -1020,6 +1183,44 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
             meta,
           );
         }
+      });
+    },
+
+    /**
+     * Gives a choice field a new list of options (ADR-407), as Settings → Messaging sends it: options
+     * can be added, reordered, and removed or renamed while no contact has them chosen; an option a
+     * contact has chosen must stay as it is written, or the change is refused naming it. Audited
+     * with the counts, never the options; the same list changes nothing and leaves no trace.
+     */
+    async setFieldOptions(
+      ctx: TenantContext,
+      fieldId: string,
+      options: unknown,
+      meta: RequestMeta = {},
+    ) {
+      assertCan(ctx, 'tenant.settings.manage');
+      const next = parseInput(fieldOptionsSchema, options);
+      if (!z.uuid().safeParse(fieldId).success) throw notFound('Field');
+      await db.run(ctx.scope, async (tx) => {
+        const result = await setContactFieldOptions(tx, ctx.tenant.id, { id: fieldId }, next);
+        if (!result) throw notFound('Field');
+        if (!result.changed) return;
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'contact_field.options_changed',
+            subjectType: 'contact_field',
+            subjectId: fieldId,
+            metadata: {
+              key: result.field.key,
+              options: next.length,
+              added: result.added,
+              removed: result.removed,
+            },
+          },
+          meta,
+        );
       });
     },
 
@@ -1244,24 +1445,84 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
 
       const now = clock.now();
       const result = await db.run(ctx.scope, async (tx) => {
+        // The values were read against the fields above; under the company's contact-field lock
+        // (ADR-407) the fields mapped must be as they were then, so no value is stored that a
+        // field's options or type no longer take.
+        if (Object.keys(opts.mapping.fields).length > 0) {
+          const locked = await lockedFields(tx, ctx.tenant.id, Object.keys(opts.mapping.fields));
+          for (const key of Object.keys(opts.mapping.fields)) {
+            const before = fields.find((f) => f.key === key);
+            const after = locked.find((f) => f.key === key);
+            if (!before || !after || !sameFieldShape(before, after)) {
+              throw new AppError(
+                'conflict',
+                'The custom fields changed while the file was read. Import it again.',
+              );
+            }
+          }
+        }
         const importId = uuidv7();
         let created = 0;
         let updated = 0;
         let skipped = 0;
         const touched = new Map<string, Row>(); // contact id -> row
+        const contactColumns = {
+          id: contacts.id,
+          phoneE164: contacts.phoneE164,
+          displayName: contacts.displayName,
+          email: contacts.email,
+          attributes: contacts.attributes,
+        };
         const selectByPhones = async (phones: string[]) => {
           const rows = await tx
-            .select({
-              id: contacts.id,
-              phoneE164: contacts.phoneE164,
-              displayName: contacts.displayName,
-              email: contacts.email,
-              attributes: contacts.attributes,
-            })
+            .select(contactColumns)
             .from(contacts)
             .where(and(eq(contacts.tenantId, ctx.tenant.id), inArray(contacts.phoneE164, phones)));
           return rows.flatMap((r) => (r.phoneE164 ? [[r.phoneE164, r] as const] : []));
         };
+        /**
+         * Locks contacts the import may change in id order, as bulk edits and field deletions lock
+         * them, and reads them as they are once locked: values are written as a patch over the
+         * locked row, so a value a field's deletion removed meanwhile, or a member's change of
+         * another field, is never written back from an earlier read (ADR-407). An import that adds
+         * tags (a tag column or tags for every row) locks `FOR UPDATE`, as bulk tag edits do, so an
+         * automation step adding a tag (which takes its contact's key share lock, counts the tags,
+         * then adds one) takes turns with it. Otherwise `FOR NO KEY UPDATE`: the import changes the
+         * name, email and values, never `tenant_id` or `id` (the only key other tables reference),
+         * so automation steps' key share locks and foreign key checks (tags, consent events, a
+         * message's conversation) do not wait for it; steps that set a field or create a deal, Flow
+         * answers and a first name from WhatsApp still wait until it commits.
+         */
+        const lockMode =
+          globalTags.length > 0 || opts.mapping.tags !== null ? 'update' : 'no key update';
+        const lockedIds = new Set<string>();
+        const lockContacts = async (ids: string[]) => {
+          const rows: ContactLockRow[] = [];
+          for (const part of chunks([...ids].sort(), 1000)) {
+            rows.push(
+              ...(await tx
+                .select(contactColumns)
+                .from(contacts)
+                .where(and(eq(contacts.tenantId, ctx.tenant.id), inArray(contacts.id, part)))
+                .orderBy(asc(contacts.id))
+                .for(lockMode)),
+            );
+          }
+          for (const row of rows) lockedIds.add(row.id);
+          return rows;
+        };
+        if (opts.updateExisting) {
+          // Every contact the file names that exists now, locked before any is changed, all in id
+          // order. A contact merged into, or created by another request, during the import is
+          // found below and locked then, possibly out of id order (a created one usually has a
+          // later id, UUIDv7 from the app servers' clocks; a merge's kept contact may not), a rare
+          // cycle PostgreSQL detects (the member imports again).
+          const known: string[] = [];
+          for (const part of chunks([...records.keys()], 1000)) {
+            for (const [, e] of await selectByPhones(part)) known.push(e.id);
+          }
+          await lockContacts(known);
+        }
         for (const part of chunks([...records.entries()], 500)) {
           const existing = new Map(await selectByPhones(part.map(([phone]) => phone)));
           const fresh = part
@@ -1297,6 +1558,33 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
               for (const [phone, e] of await selectByPhones(raced)) existing.set(phone, e);
             }
           }
+          if (opts.updateExisting) {
+            // A contact read here but not locked above (created or merged into since) is locked
+            // now and read again, so the patch is decided on the locked row; a number whose
+            // contact keeps changing is reported instead of being dropped or applied elsewhere.
+            const pending = [...existing]
+              .filter(([, e]) => !lockedIds.has(e.id))
+              .map(([phone]) => phone);
+            if (pending.length > 0) {
+              for (const phone of pending) existing.delete(phone);
+              const settledRows = await settleLockedContacts(pending, {
+                selectByPhones,
+                lockContacts,
+                isLocked: (id) => lockedIds.has(id),
+              });
+              for (const [phone, e] of settledRows.locked) existing.set(phone, e);
+              for (const phone of settledRows.unsettled) {
+                const r = records.get(phone);
+                if (r) {
+                  messages.push({
+                    row: r.line,
+                    level: 'error',
+                    message: 'This contact changed during the import; import it again.',
+                  });
+                }
+              }
+            }
+          }
           for (const [phone, e] of existing) {
             const r = records.get(phone);
             if (!r) continue;
@@ -1309,11 +1597,15 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
               });
               continue;
             }
-            const set: Partial<typeof contacts.$inferInsert> = {};
+            // The contact was locked above, so `e` is as it is now. Values are written as a patch
+            // (set the given values, remove those given empty), never as the whole object.
+            const set: { displayName?: string; email?: string; attributes?: SQL } = {};
             if (r.name && r.name !== e.displayName) set.displayName = r.name;
             if (r.email && r.email !== e.email) set.email = r.email;
-            const merged = mergeAttributes(e.attributes, r.attributes);
-            if (JSON.stringify(merged) !== JSON.stringify(e.attributes)) set.attributes = merged;
+            const patch = attributePatch(e.attributes, r.attributes);
+            if (patch) {
+              set.attributes = sql`(${contacts.attributes} || ${jsonbText(patch.set)}::jsonb) - ${sql.param(patch.removed)}::text[]`;
+            }
             if (Object.keys(set).length > 0) {
               await tx
                 .update(contacts)

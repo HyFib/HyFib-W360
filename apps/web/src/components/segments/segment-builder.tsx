@@ -58,7 +58,9 @@ export interface Definition {
 export interface BuilderField {
   key: string;
   label: string;
-  type: 'text' | 'number' | 'date' | 'boolean';
+  type: 'text' | 'number' | 'date' | 'boolean' | 'choice';
+  /** A choice field's options, in order; null for every other type (ADR-407). */
+  options: string[] | null;
 }
 
 const FIELD_OPS: Record<BuilderField['type'], { value: string; label: string }[]> = {
@@ -87,6 +89,13 @@ const FIELD_OPS: Record<BuilderField['type'], { value: string; label: string }[]
   boolean: [
     { value: 'is_true', label: 'is yes' },
     { value: 'is_false', label: 'is no' },
+    { value: 'is_set', label: 'has a value' },
+    { value: 'is_not_set', label: 'has no value' },
+  ],
+  // A choice compares as text does, whatever its case (ADR-407).
+  choice: [
+    { value: 'equals', label: 'is' },
+    { value: 'not_equals', label: 'is not' },
     { value: 'is_set', label: 'has a value' },
     { value: 'is_not_set', label: 'has no value' },
   ],
@@ -540,7 +549,28 @@ function ConditionFields({
               </Select>
             )}
           </Field>
-          {NEEDS_VALUE.has(c.op) ? (
+          {NEEDS_VALUE.has(c.op) && field?.type === 'choice' ? (
+            <Field id={`${id}-value`} label="Value">
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={c.value ?? ''}
+                  onChange={(e) => onChange({ ...c, value: e.target.value })}
+                >
+                  <option value="">Choose an option</option>
+                  {/* A value saved before its option was removed stays listed, so it is seen. */}
+                  {[
+                    ...(c.value && !(field.options ?? []).includes(c.value) ? [c.value] : []),
+                    ...(field.options ?? []),
+                  ].map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          ) : NEEDS_VALUE.has(c.op) ? (
             <Field id={`${id}-value`} label="Value">
               {(aria) => (
                 <Input

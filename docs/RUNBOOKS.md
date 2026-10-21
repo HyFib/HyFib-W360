@@ -418,6 +418,22 @@ changed. Each edit is in the audit log as `contacts.bulk_field_set` with the fie
 counts (never the value); each changed contact also appears in the contact feed and as a
 `contact.updated` webhook event.
 
+**A choice field's option cannot be removed or renamed, or a value is refused (ADR-407).** An
+option some contact has chosen stays exactly as written: Settings → Messaging (and
+`PATCH /contact-fields/{key}`, 409) refuses a list that leaves it out or changes it, even only its
+case, naming it. Find those contacts with a segment ("Tier is Silver") or
+`GET /contacts?fields[tier]=Silver`, change them (a bulk field edit sets another option on all the
+contacts a filter matches), then change the options. Members, imports, bulk edits, automations and
+Flow answers take an option whatever its case and store it as written; anything else is refused
+("Tier must be one of its options."; a CSV row error; an automation step `skipped` with
+`invalid_value`; a Flow answer `invalid`). The API takes the option exactly as `GET /contact-fields`
+lists it. An import refused with "The custom fields changed while the file was read" met a change of
+a mapped field's options (or its deletion) between reading the file and writing it: import it
+again. Changes are audited as `contact_field.options_changed` with the key and counts, never the
+options. Every write of values takes the company's `contact-fields:<company id>` advisory lock
+shared and a change of options takes it exclusively, so a change of options waits for writes in
+progress (and they for it); a wait is visible in `pg_locks` (`locktype = 'advisory'`, not granted).
+
 **Erasure request.** A member with `contacts.delete` erases the contact from its page (keep the
 number suppressed unless the requester asks otherwise). The action is audited
 (`contact.erased`). Data already delivered to Meta is outside our database (see
@@ -508,34 +524,48 @@ of what Meta does with messages over the limit, and HyFib names no code for it. 
 that looks out of date is the one Meta gave at the number's last health read (see "Messaging limit
 on Channels" above for when a number is read).
 
-**A/B variants (ADR-405).** A draft can add variant B under "A/B test": a second approved template
-of the same number's account, with its own variables, for 10% to 90% of the recipients in steps of
-5 (A, the campaign's own template, gets the rest). What a member sees and what to tell them:
+**A/B variants (ADR-405, ADR-410).** A draft can add variant B under "A/B test": a second approved
+template of the same number's account, with its own variables, for 10% to 90% of the recipients in
+steps of 5, and then variants C, D and E the same way, so a campaign tests up to five templates (A,
+the campaign's own template, gets the rest, which must stay at least 10%). Variants after B appear
+only where the deployment sets `CAMPAIGN_VARIANTS_MAX` above 2 (DEPLOYMENT); a member told "A
+campaign can test at most 2 templates for now" is on a deployment that has not raised it. Removing
+a variant removes those after it, and "Add variant …" is offered only while A keeps at least 20%
+(so the new one and A both keep 10%). What a member sees and what to tell them:
 
 - The split is close to the share but rarely exact (with 1,000 contacts, a 30% share commonly gives
   between about 27% and 33%): each contact's variant comes from a fixed rule on the campaign and the
   contact, given once when the campaign is submitted and never changed, also after a pause, a
   resume or a worker restart. Taking a submission back and submitting it again gives each contact
-  the same variant.
+  the same variant as long as the shares are unchanged; changing a share, or removing a variant
+  before the last, moves contacts between the variants after it.
+- "The variants are out of order: save the draft again …" means the stored variants skip a label
+  (not something the app writes): saving the draft labels them B, C and on again.
+- "Variant C has recipients waiting but no template: cancel the campaign." on a resume, with a
+  pause whose history names the variant, means a submitted campaign lost a variant's row (not
+  something the app does); cancel it and send a new one.
+- Submitting a campaign with many variants makes one pass over the audience per variant in one
+  transaction; its time with five variants and a large audience is not measured yet (P3-04's
+  10,000-contact staging run). A submission that times out changes nothing and can be retried.
 - A problem that names a variant ("Variant B: The template is not approved by Meta.") blocks
   submitting until that variant is fixed; so does "Variant B: no contact in its share of the
   audience can receive the campaign now" (often a marketing B whose contacts have no marketing
   opt-in: use a utility template, or more opted-in contacts).
 - Each variant is checked by its own template: a marketing variant needs marketing consent (and
   the opt-in when the company requires it) and keeps to the frequency cap; a utility one does not.
-  So the two variants can skip different contacts; the Variants table shows each one's counts.
+  So the variants can skip different contacts; the Variants table shows each one's counts.
 - The cost estimate prices each variant's contacts at its own category's rate, once; the spending
-  cap counts both. Meta bills the company directly: no wallet funds are reserved for campaigns.
-- Approvers see both templates and the split on the campaign's page and in the approval email;
-  approving approves both. A variant's template is checked only while that variant still has
+  cap counts them all. Meta bills the company directly: no wallet funds are reserved for campaigns.
+- Approvers see every template and the split on the campaign's page and in the approval email;
+  approving approves them all. A variant's template is checked only while that variant still has
   contacts waiting: if it stops being approved then, the whole campaign pauses ("its template can
   no longer be sent"; the history names the variant) and resumes once it is approved again. A
   variant that has finished (nobody of it waiting) is not checked, so Meta pausing its template
-  later never stops the other variant, and a resume is not refused for it.
+  later never stops the others, and a resume is not refused for it.
 - The Variants table on the page gives each variant's counts and rates with the same denominators
   as the results. It picks no winner and computes no significance: tell members that a difference
   between small groups can be chance, and to compare counts, not only percentages.
-- Test sends can use either variant ("Variant to test"). The recipients page and its CSV export
+- Test sends can use any variant ("Variant to test"). The recipients page and its CSV export
   name each recipient's variant; the API gives `variant` on each recipient, `variants` on
   `GET /campaigns/{id}`, and `campaign.recipient_skipped` gives `recipient.variant`.
 
@@ -815,8 +845,11 @@ enrolment's page (Automations → the automation → its enrolment) counts conta
 (with the reasons: erased, on the suppression list, opted out, no marketing opt-in, conversation
 assigned to a member, another automation handling the conversation, the hourly limit of 10 runs, no
 runs left in the plan this month, no phone number, merged into another contact), not started and
-waiting. A refused contact is not retried: fix the cause (record consent, unassign the conversation,
-wait an hour) and enrol it again. Runs start in the background, 50 per job; worker log lines
+waiting. Members who may also read contacts see its contacts one by one below the counts (ADR-408):
+in order, each with its outcome, the reason of a refusal, a link to its run and when it was
+handled, 50 per page, filtered by outcome ("Refused" lists whom to follow up); an analyst sees the
+counts only. A refused contact is not retried: fix the cause (record consent, unassign the
+conversation, wait an hour) and enrol it again. Runs start in the background, 50 per job; worker log lines
 "automation enrolment batch" carry the enrolment id, the outcome and the counts. An enrolment that
 stopped by itself says why: the automation was paused or archived, its number is not active, its
 live version takes other inputs, the plan does not include automations, or the member who started it
@@ -860,7 +893,10 @@ key), as a member stops one from its page; the audit log names the key (actor `a
 starts and stops. An integration that gets 409 `enrollment_running` sees the running enrolment's id
 in the message: wait for it (`GET …/enrollments/{enrollmentId}`) or stop it. Runs a key's
 enrolment started reach webhooks with `run.apiKeyId` null and their `run.enrollmentId`; the
-enrolment names the key.
+enrolment names the key. `GET …/enrollments/{enrollmentId}/contacts` (ADR-408, also
+`contacts.read`) lists the contacts by id with their outcomes, reasons and runs, `outcome=refused`
+for those to follow up; a 403 there with GET of the enrolment working means the key lacks
+`contacts.read`.
 
 **Budgets and failed sends.** A run fails, and hands the conversation to people, when it exceeds
 200 steps, enters one step 20 times, sends 50 messages or runs longer than 7 days, or when a
@@ -904,6 +940,27 @@ under the same name in Settings → Web requests (the version increases; steps k
 delete it to stop every step that uses it. The audit log shows who created, replaced or deleted
 secrets and domains (`http.*`). Values are never shown, so a leak points at the receiving server
 (one that echoes request headers, for example) or at the keyring (section 13).
+
+**A web request succeeded but a value was not saved.** Values are saved only from a 2xx response
+(ADR-406). A JSON path finds nothing in a body that is not JSON; body text is saved only from a
+`text/*`, JSON or XML response in UTF-8 (no charset, utf-8 or us-ascii) and not when the body is
+empty; a header the response lacks saves nothing. Answers left out for safety are listed on the
+run page's web request table as "Not saved: <answer> (<reason>)" (the call's `dropped_values`:
+`refused_header`, `secret_header`, `echoed_secret` or `possible_cut_echo`; names only, never
+values). `refused_header`
+and `secret_header` mean the step saves a header that can carry credentials, that it sends a
+secret in, or that is named like a company secret (one added after publishing included): change
+the step or rename the secret. `echoed_secret` means the company's server sent back a secret the
+request carried (as written, JSON-escaped, URL-encoded, as character references or in base64):
+treat that secret as exposed to whoever can read that server's responses and logs, replace it at
+its source and in Settings → Web requests, and ask the company to stop echoing request headers.
+`possible_cut_echo` means the value ended with four or more characters of a secret's start after
+other text, or was the first eight or more characters of a secret on its own, as a server cutting
+its echo short would send: it may be ordinary data (`mode=live` against a secret starting `live_`),
+so ask the
+company whether their server echoes request headers before replacing the secret. An echo the
+server transforms otherwise is not recognised. Values are never logged; check the
+response with the company's own tools.
 
 **Worker restarts and deploys.** Runs are rows, so a restart delays steps but never loses or repeats
 one: queued `automation.run` jobs continue, and runs whose signal was lost are picked up by the sweep
@@ -1097,6 +1154,17 @@ another way (a template, or a reply after the customer writes again).
 **Cancelling did not cancel.** Razorpay refuses to cancel paid or partly paid links (research R-109);
 HyFib then records what Razorpay reports (the order becomes paid when the link is paid in full).
 Refunds are made in the company's Razorpay Dashboard; HyFib does not change the order for them.
+
+**The order report's totals are lower than the order list's for the same days** (ADR-409). The
+web log has `order report: a day outside the period was left out (time zone data skew)` with the
+company id, its time zone, the day and how many orders. PostgreSQL dated orders by its own time
+zone data while the period's days come from Node's ICU data; when the two disagree about a zone's
+offsets (one was updated for a new daylight-saving rule and the other not), orders near midnight
+fall on a day outside the period and are left out of the totals, days and statuses, as Reports
+leave such rows out; the product table still counts them (it is bounded by the period's instants,
+not by day labels), so its quantities can exceed the orders shown. Update the time
+zone data of the older side (the PostgreSQL server or image, or the Node.js runtime) so both carry
+the same IANA release; nothing in HyFib needs changing and the totals are right once they agree.
 
 **Migration 0018 failed.** It runs in one transaction, so a failure applies nothing. It replaces
 `app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011 and 0015–0017 and adds two

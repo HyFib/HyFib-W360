@@ -22,7 +22,14 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     request,
     async ({ ctx, runtime, body }) => ({
       status: 200,
-      body: { data: await apiUpdateCampaign(runtime.outbound, ctx, id, body) },
+      body: {
+        data: await apiUpdateCampaign(
+          { ...runtime.outbound, campaignVariantsLimit: runtime.config.CAMPAIGN_VARIANTS_MAX },
+          ctx,
+          id,
+          body,
+        ),
+      },
     }),
     { json: true },
   );

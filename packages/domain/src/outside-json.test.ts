@@ -66,9 +66,21 @@ describe('outside JSON with the NUL character', () => {
 
   it("keeps it as U+FFFD in what an automation saves from a company's endpoint", () => {
     const body = Buffer.from(answer({ customer: { name: `Pri${NUL}ya` } }));
-    expect(savedValuesFrom(body, [{ path: 'customer.name', saveAs: 'name' }])).toEqual({
+    expect(
+      savedValuesFrom({ status: 200, headers: {}, body }, [
+        { path: 'customer.name', saveAs: 'name' },
+      ]).values,
+    ).toEqual({
       name: `Pri${KEPT}ya`,
     });
+  });
+
+  it('keeps it as U+FFFD in a body an automation saves as text (ADR-406)', () => {
+    const body = Buffer.from(`Pri${NUL}ya`);
+    const headers = { 'content-type': 'text/plain' };
+    expect(
+      savedValuesFrom({ status: 200, headers, body }, [{ from: 'text', saveAs: 'name' }]).values,
+    ).toEqual({ name: `Pri${KEPT}ya` });
   });
 
   it("keeps it as U+FFFD in a completed Flow's answers", () => {

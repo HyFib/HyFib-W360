@@ -1970,6 +1970,120 @@ DEFAULT 'A'`, a constant default, so nothing is rewritten) with its check added 
    was checked when written and older rows hold the default, so it cannot fail on them. It runs in
    the same deployment, after 0317.
 
+   Migration 0319 (ADR-406) adds `app.automation_http_calls.dropped_values` (jsonb, default `{}`,
+   no table rewrite) with a check and `UPDATE` on it for the runtime role, and replaces the call's
+   guard function with the same body plus the column among what a finished call keeps. Workers of
+   the release before never name the column. Order matters for HTTP steps' saved value sources:
+   apply 0319, then roll out **workers first**, then web servers. That forward order is safe.
+   Rolling **workers** back once any graph uses `from` (a header, body text or status source) is
+   not: the older `graphSchema` refuses those pinned versions, so their runs fail, and an older
+   worker's `savedValuesFrom` throws a TypeError after the request was sent, so the call stays
+   `in_flight` and becomes `unknown` at its run's deadline. Rolling **web servers** back makes such
+   drafts fail to parse in the editor and at publishing. Before rolling either back, check for
+   graphs with a source: `SELECT count(*) FROM app.automations WHERE
+jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
+   `app.automation_versions.graph`.
+
+   Migration 0320 (ADR-407) adds `app.contact_fields.options` (null for every existing field),
+   replaces the type check with one that also accepts `choice`, adds a check on the options' shape
+   (0301's, for contact fields) and grants the runtime role `UPDATE (options)`; the table holds at
+   most 50 rows a company, so both checks are validated at once, under the migration's brief lock on
+   the table. It is additive: old web servers and workers neither offer nor change choice fields,
+   and they cannot read a choice field at all: a contact form, an import, a bulk edit, an API
+   request, an automation step or a Flow answer that gives one a value fails with an internal error
+   (or, in a run, a failed step) and stores nothing; saving or previewing a segment that names a
+   choice field, a campaign's checks and send of such a segment, the API's segments and contact
+   searches naming one, and `GET /contacts?fields[<key>]=…` for one all answer 500 (old code has no
+   comparisons for the type). Create choice fields only after both the worker and the web rollouts
+   end. Every write of contact field values now takes the company's contact-field advisory lock
+   shared (`contact-fields:<company id>`, the key additions already took) and locks the rows of the
+   fields it writes `FOR SHARE`; merges lock every field row. What can wait: adding a field or
+   changing options waits for every write of values in progress (an import of up to 5,000 rows or a
+   bulk edit of up to 10,000 contacts runs in one transaction), and writes wait for it; renaming a
+   field waits for the writes of that field and for merges; deleting a field waits for those and for
+   any transaction holding a contact that has a value of it (an import or a bulk edit over that
+   contact), and later writes of that field wait behind it. Writers of values wait on each other's
+   contact row locks, as before. An import with "update existing contacts" now locks every existing
+   contact the file names in id order for its whole transaction (up to 5,000, unchanged ones
+   included): `FOR NO KEY UPDATE`, or `FOR UPDATE` when it adds tags. Members' and keys' changes of
+   those contacts, automation steps that set a field or create a deal, Flow answers and a first name
+   from WhatsApp wait for it; automation steps' key share locks and foreign key checks (an inbound
+   message's conversation, tags, consent events) wait only for an import that adds tags. Bulk field
+   edits lock their contacts `FOR NO KEY UPDATE` too (bulk tag edits keep `FOR UPDATE`). Rare
+   deadlocks remain between the API's many-contact calls, bulk tag edits or imports that add tags,
+   automation steps and a field's deletion, and around imports and Flow answers during a deletion;
+   PostgreSQL detects them and the failed request, step or inbound change is retried (ADR-407). Do
+   deletions in quiet hours on busy companies. Rolling an image back leaves the column, checks and
+   grant in place; an older release then fails the same way for choice values, and every segment,
+   campaign and API filter naming a choice field fails with 500s, until the choice fields are
+   deleted (which removes their values and leaves those segments refused as naming a field that does
+   not exist).
+
+   ADR-410 (campaigns that test up to five templates) has no migration: the labels B to Z, the
+   shares of 10% to 90% in steps of 5, the unique label per campaign and the grants of 0317 already
+   take variants C to E, and the recipients' check takes any label A to Z. It adds the web setting
+   `CAMPAIGN_VARIANTS_MAX` (2 to 5, **2 when unset**): a web server lets a draft grow past two
+   variants only up to it. Workers do not read it; they send, check and report any number of
+   variants.
+
+   Why the setting: a server of the release before (ADR-405, two variants) that meets a campaign
+   with a variant C, D or E does the wrong thing. An older web server submitting such a draft reads
+   variant B only, so C's contacts are given variant A and sent A's template (C's row is ignored);
+   its review, campaign page and approval page show A and B only, so an approver would approve a
+   template they never saw, and only A's and B's templates are checked; its results, the API's
+   `variants` and the recipients list leave C out or report C's recipients as A. An older worker
+   loads A and B only: a recipient recorded as C has no template there, so it is never sent (not
+   sent the wrong template) and stays pending, a batch full of them stalls the campaign until a new
+   worker takes it, and its `campaign.recipient_skipped` events name C's recipients as A. A release
+   before ADR-405 ignores every variant, as DEPLOYMENT says for 0317. With the setting at 2 during
+   the rollout no draft gets a third variant, so no older server can meet one; a new server with the
+   setting at 2 behaves exactly as ADR-405 for two-variant campaigns and for those without
+   variants, and reads, checks and sends a campaign that already has more correctly (it can edit or
+   trim such a draft, never grow it).
+
+   Rollout: deploy as usual (workers, then web) with `CAMPAIGN_VARIANTS_MAX` unset. Once every web
+   server and worker runs this release (no image of the release before is left, including canaries
+   and jobs that run web code), set `CAMPAIGN_VARIANTS_MAX=5` on the web servers and roll them
+   again; servers still at 2 during that roll are of this release, so they read such drafts
+   correctly.
+
+   Rollback to an image without ADR-410. A campaign's labels C to E are recorded when it is
+   submitted, so every campaign that has one, whatever its status, must be out of the older code's
+   reach before the older image serves:
+
+   1. Set `CAMPAIGN_VARIANTS_MAX=2` (or unset it) and roll the web servers, so no draft gets a
+      third variant.
+   2. List the campaigns that have one. The owner role cannot read them across companies (forced
+      row security); connected with the runtime role's own credentials (`w360_app`, as the web app
+      connects), run for each company in its own transaction:
+
+      ```sql
+      BEGIN;
+      SELECT set_config('app.tenant_id', '<company id>', true);
+      SELECT DISTINCT v.campaign_id, c.name, c.status
+        FROM app.campaign_variants v
+        JOIN app.campaigns c ON c.tenant_id = v.tenant_id AND c.id = v.campaign_id
+       WHERE v.label > 'B'
+         AND c.status IN ('draft', 'pending_approval', 'scheduled', 'running', 'paused');
+      COMMIT;
+      ```
+
+   3. While the new release still serves, have each company (or support acting with its members)
+      act on every one, in the app or through the API:
+      - `pending_approval`: send it back (Reject; a key's submission can also be withdrawn), so it
+        is a draft again. An older web server would approve it checking A's and B's templates only,
+        showing the approver two of its templates.
+      - `scheduled`, `running` and `paused`: cancel it. **A pause is not enough:** a member can
+        resume a paused campaign on an older web server, which checks A's and B's templates only,
+        and an older worker would then leave C to E's recipients pending for good and report them
+        as A. A cancel (or a return to draft) ends that.
+      - `draft`: trim it to two variants, or leave it unsubmitted until the release returns (an
+        older web server would submit it as A and B, C's contacts getting A's template).
+   4. Run the query again until it lists nothing but drafts left unsubmitted on purpose, then roll
+      back.
+
+   Rolling forward needs no step; raise the setting again once every server runs the release.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

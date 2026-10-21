@@ -60,16 +60,20 @@ export default async function OrdersPage({
             Carts customers send from your catalog in WhatsApp. You see the orders of conversations
             you can see. Amounts are the prices WhatsApp sent with the order.
           </CardDescription>
-          {can(ctx, 'contacts.export') ? (
-            <div>
+          <div className="flex flex-wrap gap-2">
+            <Button asChild variant="outline" size="sm">
+              {/* Totals of the orders this list shows, by day, status and product (ADR-409). */}
+              <Link href={`${base}/orders/report`}>Order report</Link>
+            </Button>
+            {can(ctx, 'contacts.export') ? (
               <Button asChild variant="outline" size="sm">
                 {/* The orders this list shows, as CSV (ADR-235). */}
                 <a href={`${base}/orders/export${current ? `?status=${current}` : ''}`} download>
                   Export CSV
                 </a>
               </Button>
-            </div>
-          ) : null}
+            ) : null}
+          </div>
           <nav aria-label="Order status" className="flex flex-wrap gap-2 pt-2 text-sm">
             {FILTERS.map((s) => (
               <Link

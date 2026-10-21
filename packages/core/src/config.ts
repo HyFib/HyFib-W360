@@ -136,6 +136,12 @@ const webSchema = baseSchema.extend({
   PASSWORD_BREACH_CHECK: z.enum(['pwned-passwords', 'off']).optional(),
   /** Range API origin override, allowed only for APP_ENV=local|test (a test stand-in). */
   PWNED_PASSWORDS_BASE_URL: z.url().optional(),
+  /**
+   * The most templates a campaign draft may test, variant A included (ADR-410): 2 to 5. Unset, 2,
+   * as the release before builds. Raise it only once every web server and worker runs a release
+   * that has ADR-410, and lower it to 2 before rolling back to one that has not (DEPLOYMENT).
+   */
+  CAMPAIGN_VARIANTS_MAX: z.coerce.number().int().min(2).max(5).default(2),
 });
 
 const workerSchema = baseSchema.extend({

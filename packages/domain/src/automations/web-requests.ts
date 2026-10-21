@@ -27,7 +27,13 @@ import { httpSecretAad } from './http';
  * request. Members who can read automations see the domains and secret names.
  */
 
-export const WEB_REQUEST_LIMITS = { domains: 50, secrets: 50, secretValueLength: 2000 } as const;
+export const WEB_REQUEST_LIMITS = {
+  domains: 50,
+  secrets: 50,
+  secretValueLength: 2000,
+  /** New secret values need this many characters (ADR-406). */
+  secretValueMinLength: 4,
+} as const;
 
 const DOMAIN_RE = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
@@ -41,15 +47,23 @@ const domainSchema = z
     'Enter a host name such as api.example.com, or *.example.com for all its subdomains.',
   );
 
-const secretSchema = z.object({
+/** A secret as Settings → Web requests saves it (new or replaced). */
+export const webRequestSecretSchema = z.object({
   domain: domainSchema,
   name: z
     .string()
     .trim()
     .regex(SECRET_NAME_RE, 'Secret names start with a letter and use a-z, 0-9 and _ (at most 40).'),
+  // Saved values that hold a secret the request carried are left out (ADR-406); a value of one to
+  // three characters would match ordinary answers ("1" in "price 1.5"), so new values need four.
+  // Secrets saved shorter before keep working. Spaces around the value do not count.
   value: z
     .string()
     .min(1, 'Enter the secret value.')
+    .refine(
+      (v) => v.length === 0 || v.trim().length >= WEB_REQUEST_LIMITS.secretValueMinLength,
+      `Secret values need at least ${WEB_REQUEST_LIMITS.secretValueMinLength} characters.`,
+    )
     .max(
       WEB_REQUEST_LIMITS.secretValueLength,
       `Secret values are limited to ${WEB_REQUEST_LIMITS.secretValueLength} characters.`,
@@ -229,7 +243,7 @@ export function createWebRequestService(deps: { db: Database; clock: Clock; keyr
      */
     async saveSecret(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'integrations.manage');
-      const data = parseInput(secretSchema, input);
+      const data = parseInput(webRequestSecretSchema, input);
       return db.run(ctx.scope, async (tx) => {
         await lockSettings(tx, ctx.tenant.id);
         const [allowed] = await tx

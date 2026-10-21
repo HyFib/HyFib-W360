@@ -2,10 +2,17 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
-import { ENROLLMENT_END_REASON_LABELS, can } from '@w360/domain';
+import {
+  ENROLLED_OUTCOME_LABELS,
+  ENROLLMENT_END_REASON_LABELS,
+  can,
+  enrolledContactLabel,
+  enrolledContactsCursorSchema,
+} from '@w360/domain';
 import {
   Alert,
   Badge,
+  Button,
   Card,
   CardContent,
   CardDescription,
@@ -29,17 +36,30 @@ import { requireTenant } from '@/server/session';
 export const metadata: Metadata = { title: 'Enrolment' };
 export const dynamic = 'force-dynamic';
 
+/** The contacts list's filters by outcome (ADR-408), in the words of the counts above it. */
+const OUTCOME_FILTERS: readonly (readonly [string, string])[] = [
+  ['all', 'All'],
+  ...(['started', 'refused', 'cancelled', 'pending'] as const).map(
+    (o) => [o, ENROLLED_OUTCOME_LABELS[o]] as const,
+  ),
+];
+
 /**
  * One enrolment of contacts in an automation (ADR-401), a member's or an API key's (ADR-403): its progress, how many started and were
- * refused (by reason) or not started, who started or stopped it, and Stop while it runs. The page
- * re-checks the member's permission itself and re-renders every 15 seconds while it runs.
+ * refused (by reason) or not started, who started or stopped it, and Stop while it runs; to members
+ * who also read contacts, its contacts in position order with their outcomes, 50 per page, by
+ * outcome (ADR-408). The page re-checks the member's permissions itself and re-renders every 15
+ * seconds while it runs.
  */
 export default async function EnrollmentPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ slug: string; automationId: string; enrollmentId: string }>;
+  searchParams: Promise<{ outcome?: string; cursor?: string }>;
 }) {
   const { slug, automationId, enrollmentId } = await params;
+  const sp = await searchParams;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'automations.read')) notFound();
   const { automationEnrollments } = await getRuntime();
@@ -51,6 +71,28 @@ export default async function EnrollmentPage({
     throw error;
   }
   if (enrollment.automationId !== automationId) notFound();
+  // The contacts one by one (ADR-408) only to members who may also read contacts.
+  const outcome = OUTCOME_FILTERS.some(([v]) => v === sp.outcome) ? (sp.outcome as string) : 'all';
+  // A cursor the service would refuse starts from the first page instead.
+  const cursor = enrolledContactsCursorSchema.safeParse(sp.cursor).success ? sp.cursor : null;
+  let enrolled: Awaited<ReturnType<typeof automationEnrollments.listEnrolledContacts>> | null =
+    null;
+  if (can(ctx, 'contacts.read')) {
+    try {
+      enrolled = await automationEnrollments.listEnrolledContacts(
+        ctx,
+        automationId,
+        enrollment.id,
+        {
+          ...(outcome === 'all' ? {} : { outcome }),
+          ...(cursor ? { cursor } : {}),
+        },
+      );
+    } catch (error) {
+      // The service checks the permissions again: a refusal shows the counts without the list.
+      if (!isAppError(error) || error.code !== 'forbidden') throw error;
+    }
+  }
   const tz = ctx.tenant.timezone;
   const status = ENROLLMENT_STATUS[enrollment.status] ?? {
     label: enrollment.status,
@@ -58,6 +100,7 @@ export default async function EnrollmentPage({
   };
   const running = enrollment.status === 'running';
   const base = `/c/${ctx.tenant.slug}/automations/${automationId}`;
+  const pageUrl = `${base}/enrollments/${enrollment.id}`;
   const n = (v: number) => v.toLocaleString('en-IN');
   return (
     <>
@@ -168,6 +211,97 @@ export default async function EnrollmentPage({
             )}
           </CardContent>
         </Card>
+        {enrolled ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Contacts</CardTitle>
+              <CardDescription>
+                Each contact enrolled, in order, with what happened to it and when.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 p-0">
+              <nav aria-label="Filter contacts by outcome" className="flex flex-wrap gap-2 px-4">
+                {OUTCOME_FILTERS.map(([value, label]) => (
+                  <Button
+                    key={value}
+                    asChild
+                    size="sm"
+                    variant={value === outcome ? 'primary' : 'outline'}
+                  >
+                    <Link
+                      href={`${pageUrl}?outcome=${value}`}
+                      aria-current={value === outcome ? 'page' : undefined}
+                    >
+                      {label}
+                    </Link>
+                  </Button>
+                ))}
+              </nav>
+              {enrolled.items.length === 0 ? (
+                <p className="px-4 pb-4 text-sm text-muted-foreground">
+                  No contact with this outcome.
+                </p>
+              ) : (
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH className="text-right">#</TH>
+                      <TH>Contact</TH>
+                      <TH>Outcome</TH>
+                      <TH>Handled</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {enrolled.items.map((c) => (
+                      <TR key={c.position}>
+                        <TD className="text-right tabular-nums text-muted-foreground">
+                          {n(c.position)}
+                        </TD>
+                        <TD>
+                          {c.contactId ? (
+                            <Link
+                              href={`/c/${ctx.tenant.slug}/contacts/${c.contactId}`}
+                              className="text-primary underline-offset-4 hover:underline"
+                            >
+                              {enrolledContactLabel(c)}
+                            </Link>
+                          ) : (
+                            <span className="text-muted-foreground">{enrolledContactLabel(c)}</span>
+                          )}
+                        </TD>
+                        <TD className="text-sm">
+                          {c.outcome === 'refused'
+                            ? `Refused: ${c.reasonLabel ?? 'no reason recorded'}`
+                            : ENROLLED_OUTCOME_LABELS[c.outcome]}
+                          {c.runId ? (
+                            <Link
+                              href={`/c/${ctx.tenant.slug}/automations/runs/${c.runId}`}
+                              className="ml-2 text-primary underline-offset-4 hover:underline"
+                            >
+                              Open the run
+                            </Link>
+                          ) : null}
+                        </TD>
+                        <TD className="text-sm text-muted-foreground">
+                          {c.processedAt ? formatDateTime(c.processedAt.toISOString(), tz) : '—'}
+                        </TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              )}
+              {enrolled.nextCursor ? (
+                <div className="px-4 pb-4">
+                  <Button asChild variant="outline">
+                    <Link href={`${pageUrl}?outcome=${outcome}&cursor=${enrolled.nextCursor}`}>
+                      Next page
+                    </Link>
+                  </Button>
+                </div>
+              ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
         <Link
           href={`/c/${ctx.tenant.slug}/automations/runs?automation=${automationId}`}
           className="text-sm text-primary underline-offset-4 hover:underline"

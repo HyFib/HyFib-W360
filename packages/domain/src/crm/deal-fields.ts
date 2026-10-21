@@ -14,9 +14,19 @@ import {
 } from '@w360/db';
 import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
-import { apiFieldValue, fieldKeyFromLabel, type AttributeValue } from '../contacts/fields';
+import {
+  MAX_FIELD_OPTION_LENGTH,
+  MAX_FIELD_OPTIONS,
+  apiFieldValue,
+  fieldKeyFromLabel,
+  fieldOptionsSchema,
+  refineFieldOptions,
+  removedChosenOptions,
+  sameOptions,
+  type AttributeValue,
+} from '../contacts/fields';
 import { parseInput } from '../validation';
-import { coerceDealFieldValue, dealFieldOptionKey, type DealFieldShape } from './deal-field-values';
+import { coerceDealFieldValue, type DealFieldShape } from './deal-field-values';
 
 export { coerceDealFieldValue } from './deal-field-values';
 
@@ -41,9 +51,9 @@ export const MAX_DEAL_FIELDS = 50;
  */
 export const MAX_DEAL_ATTRIBUTES_BYTES = 12_288;
 /** The most options a choice field has (the database holds the same bound, 0301). */
-export const MAX_DEAL_FIELD_OPTIONS = 50;
+export const MAX_DEAL_FIELD_OPTIONS = MAX_FIELD_OPTIONS;
 /** The most characters an option has (the database holds the same bound, 0301). */
-export const MAX_DEAL_FIELD_OPTION_LENGTH = 80;
+export const MAX_DEAL_FIELD_OPTION_LENGTH = MAX_FIELD_OPTION_LENGTH;
 
 /** Whether a deal's values take more than `MAX_DEAL_ATTRIBUTES_BYTES` as JSON. */
 export function dealAttributesTooLarge(next: Readonly<Record<string, AttributeValue>>): boolean {
@@ -68,41 +78,12 @@ export interface DealFieldDefinition {
   createdAt: Date;
 }
 
-/** C0 and C1 control characters, line breaks among them: never part of an option. */
-// eslint-disable-next-line no-control-regex
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
-
 /**
  * A choice field's options: 1 to 50, each trimmed, 1 to 80 characters without control characters,
- * none twice ignoring case, kept in the order given.
+ * none twice ignoring case, kept in the order given (the rules of contact fields' options since
+ * ADR-407).
  */
-export const dealFieldOptionsSchema = z
-  .array(
-    z
-      .string()
-      .trim()
-      .min(1, 'Options cannot be empty.')
-      .max(
-        MAX_DEAL_FIELD_OPTION_LENGTH,
-        `Options are limited to ${MAX_DEAL_FIELD_OPTION_LENGTH} characters.`,
-      )
-      .refine(
-        (option) => !CONTROL_RE.test(option),
-        'Options cannot hold line breaks or control characters.',
-      ),
-  )
-  .min(1, 'Give a choice field at least one option.')
-  .max(MAX_DEAL_FIELD_OPTIONS, `A choice field has at most ${MAX_DEAL_FIELD_OPTIONS} options.`)
-  .superRefine((options, ctx) => {
-    const seen = new Set<string>();
-    options.forEach((option, i) => {
-      const key = dealFieldOptionKey(option);
-      if (seen.has(key)) {
-        ctx.addIssue({ code: 'custom', path: [i], message: `“${option}” is listed twice.` });
-      }
-      seen.add(key);
-    });
-  });
+export const dealFieldOptionsSchema = fieldOptionsSchema;
 
 const labelSchema = z
   .string()
@@ -123,22 +104,7 @@ export const createDealFieldSchema = z
     /** A choice field's options; other types take none. */
     options: dealFieldOptionsSchema.optional(),
   })
-  .superRefine((data, ctx) => {
-    if (data.type === 'choice' && !data.options) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['options'],
-        message: 'Give a choice field at least one option.',
-      });
-    }
-    if (data.type !== 'choice' && data.options) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['options'],
-        message: 'Only choice fields have options.',
-      });
-    }
-  });
+  .superRefine(refineFieldOptions);
 
 const definition = {
   id: crmDealFields.id,
@@ -167,8 +133,7 @@ export function apiDealFieldValue(
   field: Pick<DealFieldDefinition, 'label' | 'type' | 'options'>,
   value: unknown,
 ): { ok: true; value: AttributeValue | null } | { ok: false; message: string } {
-  if (field.type !== 'choice')
-    return apiFieldValue({ label: field.label, type: field.type }, value);
+  if (field.type !== 'choice') return apiFieldValue(field, value);
   if (value === null) return { ok: true, value: null };
   const given = typeof value === 'string' ? value.trim() : null;
   if (given === '') return { ok: true, value: null };
@@ -325,24 +290,8 @@ export function shownDealAttributes(
   });
 }
 
-/** Whether two lists of options are the same options, written the same, in the same order. */
-export function sameOptions(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((option, i) => option === b[i]);
-}
-
-/**
- * The options deals have chosen that a new list leaves out, or writes differently, in the current
- * list's order: a change of options is refused while there are any.
- */
-export function removedChosenOptions(
-  current: readonly string[],
-  next: readonly string[],
-  chosen: readonly string[],
-): string[] {
-  const used = new Set(chosen);
-  const kept = new Set(next);
-  return current.filter((option) => used.has(option) && !kept.has(option));
-}
+/** Shared with contact fields' options (ADR-407). */
+export { removedChosenOptions, sameOptions };
 
 /** Why a change of options that leaves out chosen options is refused, naming them. */
 export function chosenOptionsMessage(options: readonly string[]): string {

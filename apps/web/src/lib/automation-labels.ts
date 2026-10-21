@@ -178,6 +178,33 @@ export const HTTP_CALL_STATE: Record<string, { label: string; tone: Tone }> = {
   canceled: { label: 'Not made', tone: 'neutral' },
 };
 
+/** Why a web request left an answer out for safety (ADR-406), on the run page. */
+export const HTTP_DROP_REASONS: Record<string, string> = {
+  refused_header: 'the header can carry credentials or a session',
+  secret_header: 'the step sends a secret in that header, or it is named like a secret',
+  echoed_secret: 'it held a secret the request sent, which the server echoed',
+  possible_cut_echo: 'it ended with the start of a secret the request sent, perhaps a cut echo',
+};
+
+/**
+ * The answers a web request left out for safety, in words, or null when there were none; in the
+ * order the step saves them (`order`, its answer names), any others after.
+ */
+export function describeDroppedValues(
+  dropped: Readonly<Record<string, string>>,
+  order: readonly string[] = [],
+): string | null {
+  const rank = (name: string) => {
+    const at = order.indexOf(name);
+    return at < 0 ? order.length : at;
+  };
+  const entries = Object.entries(dropped).sort(([a], [b]) => rank(a) - rank(b));
+  if (entries.length === 0) return null;
+  return `Not saved: ${entries
+    .map(([name, reason]) => `${name} (${HTTP_DROP_REASONS[reason] ?? reason})`)
+    .join('; ')}.`;
+}
+
 /** The order event that started a run (runs started by order messages). */
 export const STORE_EVENT_LABELS: Record<string, string> = {
   order_placed: 'Started by a new order',

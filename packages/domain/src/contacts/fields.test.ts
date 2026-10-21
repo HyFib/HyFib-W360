@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { apiFieldFilterValue, apiFieldValue, coerceFieldValue } from './fields';
 
 describe('custom field values through the public API (ADR-112)', () => {
-  const text = { label: 'City', type: 'text' as const };
-  const number = { label: 'Orders', type: 'number' as const };
-  const date = { label: 'Birthday', type: 'date' as const };
-  const yesNo = { label: 'VIP', type: 'boolean' as const };
+  const text = { label: 'City', type: 'text' as const, options: null };
+  const number = { label: 'Orders', type: 'number' as const, options: null };
+  const date = { label: 'Birthday', type: 'date' as const, options: null };
+  const yesNo = { label: 'VIP', type: 'boolean' as const, options: null };
   const value = (field: Parameters<typeof apiFieldValue>[0], raw: unknown) => {
     const result = apiFieldValue(field, raw);
     return result.ok ? result.value : `refused: ${result.message}`;
@@ -67,10 +67,10 @@ describe('custom field values through the public API (ADR-112)', () => {
 });
 
 describe('custom field values a contact list is filtered by (ADR-113)', () => {
-  const text = { label: 'City', type: 'text' as const };
-  const number = { label: 'Orders', type: 'number' as const };
-  const date = { label: 'Birthday', type: 'date' as const };
-  const yesNo = { label: 'VIP', type: 'boolean' as const };
+  const text = { label: 'City', type: 'text' as const, options: null };
+  const number = { label: 'Orders', type: 'number' as const, options: null };
+  const date = { label: 'Birthday', type: 'date' as const, options: null };
+  const yesNo = { label: 'VIP', type: 'boolean' as const, options: null };
   const value = (field: Parameters<typeof apiFieldFilterValue>[0], raw: string) => {
     const result = apiFieldFilterValue(field, raw);
     return result.ok ? result.value : `refused: ${result.message}`;

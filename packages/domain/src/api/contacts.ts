@@ -3,6 +3,7 @@ import { AppError, notFound, uuidv7 } from '@w360/core';
 import {
   and,
   asc,
+  CONTACT_FIELD_TYPES,
   contactFields,
   contactIdentities,
   contactTags,
@@ -28,7 +29,9 @@ import {
   normalizeEmail,
   normalizeTag,
   type AttributeValue,
+  type FieldShape,
 } from '../contacts/fields';
+import { lockContactFieldValues, lockContactFieldsForMerge } from '../contacts/field-definitions';
 import { normalizePhone } from '../contacts/phone';
 import type { OutboundDeps } from '../messaging/outbound';
 import { encodeKeysetCursor, parseInput } from '../validation';
@@ -180,6 +183,8 @@ export interface ApiContactField {
   key: string;
   label: string;
   type: ContactFieldType;
+  /** A choice field's options, in order; null for every other type (ADR-407). */
+  options: string[] | null;
   createdAt: string;
 }
 
@@ -188,8 +193,16 @@ export const apiContactFieldSchema = z.object({
   key: z.string().describe('The key `fields` uses for its value; it never changes.'),
   label: z.string().describe('The name members see; it can change.'),
   type: z
-    .enum(['text', 'number', 'date', 'boolean'])
-    .describe('`text`, `number`, `date` (YYYY-MM-DD) or `boolean` (yes/no).'),
+    .enum(CONTACT_FIELD_TYPES)
+    .describe(
+      '`text`, `number`, `date` (YYYY-MM-DD), `boolean` (yes/no) or `choice` (one of its `options`, as text); it never changes.',
+    ),
+  options: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      'A choice field’s options, in order (1 to 50, each at most 80 characters, none twice ignoring case); null for every other type. A contact’s value is one of them, written as listed here. Options can be added, reordered, and removed or renamed while no contact has them chosen.',
+    ),
   createdAt: z.iso.datetime(),
 });
 
@@ -221,13 +234,28 @@ export async function apiFieldChanges(
   return checkFieldChanges(await lockFields(tx, tenantId, Object.keys(input)), input, '');
 }
 
-type FieldDefinition = { key: string; label: string; type: ContactFieldType };
+type FieldDefinition = FieldShape & { key: string };
 
-/** Locks the company's fields with these keys in one statement, as a deletion takes them. */
+const fieldShape = {
+  key: contactFields.key,
+  label: contactFields.label,
+  type: contactFields.type,
+  options: contactFields.options,
+};
+
+/**
+ * Locks the company's fields with these keys in one statement, as a deletion takes them, after the
+ * company's contact-field lock that every write of values takes (ADR-407), so a choice field's
+ * options cannot change until the values checked against them are stored.
+ */
 async function lockFields(tx: Tx, tenantId: string, keys: string[]): Promise<FieldDefinition[]> {
   if (keys.length === 0) return [];
+  if (keys.length > MAX_CONTACT_FIELDS) {
+    throw invalidField('fields', `A company has at most ${MAX_CONTACT_FIELDS} custom fields.`);
+  }
+  await lockContactFieldValues(tx, tenantId);
   return tx
-    .select({ key: contactFields.key, label: contactFields.label, type: contactFields.type })
+    .select(fieldShape)
     .from(contactFields)
     .where(and(eq(contactFields.tenantId, tenantId), inArray(contactFields.key, keys)))
     .for('share');
@@ -411,7 +439,7 @@ export async function apiFieldFilters(
   const keys = Object.keys(input);
   if (keys.length === 0) return [];
   const defined = await tx
-    .select({ key: contactFields.key, label: contactFields.label, type: contactFields.type })
+    .select(fieldShape)
     .from(contactFields)
     .where(and(eq(contactFields.tenantId, tenantId), inArray(contactFields.key, keys)));
   return keys.map((key) => {
@@ -445,6 +473,7 @@ export async function apiListContactFields(
           key: contactFields.key,
           label: contactFields.label,
           type: contactFields.type,
+          options: contactFields.options,
           createdAt: contactFields.createdAt,
         })
         .from(contactFields)
@@ -891,6 +920,8 @@ export async function apiMergeContacts(
     if (!exists.has(data.mergeContactId)) {
       throw await apiContactNotFound(tx, ctx.tenant.id, data.mergeContactId);
     }
+    // Values move under the contact-field locks, as a member's merge moves them (ADR-407).
+    await lockContactFieldsForMerge(tx, ctx.tenant.id);
     const res = await tx.execute<{ summary: unknown }>(
       sql`select app.merge_contacts(${contactId}::uuid, ${data.mergeContactId}::uuid) as summary`,
     );

@@ -373,6 +373,177 @@ const RESERVED_HTTP_HEADERS: ReadonlySet<string> = new Set([
 /** A path into a JSON response: keys and array positions separated by dots (data.items.0.id). */
 export const RESPONSE_PATH_RE = /^[A-Za-z0-9_$-]{1,64}(\.[A-Za-z0-9_$-]{1,64}){0,9}$/;
 
+/**
+ * Where a value an HTTP step saves comes from (ADR-406): a JSON path in the body (`json`, the
+ * default and what a saved value without `from` means, so every stored automation is unchanged), a
+ * response header by name, the whole body as text (textual content types only) or the status code.
+ */
+export const HTTP_SAVE_SOURCES = ['json', 'header', 'text', 'status'] as const;
+export type HttpSaveSource = (typeof HTTP_SAVE_SOURCES)[number];
+
+/** A value an HTTP step saves from a successful response, as an answer. */
+export type HttpSave =
+  | { from?: 'json'; path: string; saveAs: string }
+  | { from: 'header'; header: string; saveAs: string }
+  | { from: 'text'; saveAs: string }
+  | { from: 'status'; saveAs: string };
+
+/** The source of a saved value (`json` when it does not say). */
+export const httpSaveSource = (item: HttpSave): HttpSaveSource => item.from ?? 'json';
+
+/**
+ * What in a header name suggests a credential or a session (ADR-406). Words found anywhere in the
+ * name cover the headers that carry one by definition (Set-Cookie, Cookie, Authorization,
+ * WWW-Authenticate, Proxy-Authenticate, Authentication-Info) and common ones (X-Auth-Token,
+ * X-Session-Id, X-CSRF-Token, X-Amz-Security-Token). Short words count only as a whole part of the
+ * name, so Author, X-Design or X-Hotpath are not refused. Any part ending in "key" is refused
+ * (X-Api-Key, X-Accesskey, X-Privatekey), which also refuses X-Idempotency-Key and X-Monkey.
+ */
+const CREDENTIAL_WORDS = [
+  'cookie',
+  'authoriz',
+  'authent',
+  'oauth',
+  'token',
+  'secret',
+  'passw',
+  'session',
+  'credential',
+  'csrf',
+  'xsrf',
+  'signature',
+  'bearer',
+  'passcode',
+];
+const CREDENTIAL_PARTS: ReadonlySet<string> = new Set([
+  'auth',
+  'authn',
+  'authz',
+  'jwt',
+  'pwd',
+  'otp',
+  'sig',
+  'sid',
+  'hmac',
+]);
+
+/**
+ * Why a response header cannot be saved, or null: its name must be a header name, and headers that
+ * carry credentials or session state are never saved (see `CREDENTIAL_WORDS`). Location is allowed
+ * (a created resource's address is a common value to save), although a server may put a signed
+ * address in it.
+ */
+export function responseHeaderRefusal(name: string): string | null {
+  if (!HTTP_HEADER_NAME_RE.test(name)) {
+    return 'Header names use letters, digits and - (at most 60).';
+  }
+  const lower = name.toLowerCase();
+  if (
+    CREDENTIAL_WORDS.some((word) => lower.includes(word)) ||
+    lower.split('-').some((part) => CREDENTIAL_PARTS.has(part) || part.endsWith('key'))
+  ) {
+    return `The ${name} header can carry credentials or a session, so HyFib does not save it.`;
+  }
+  return null;
+}
+
+/** The shortest secret name a header name may hold among other parts and still name it. */
+export const SECRET_NAME_MATCH_LENGTH = 6;
+
+/**
+ * Whether a response header's name names a company secret (ADR-406). The name is lowercased with -
+ * read as _, and an X- prefix is ignored: it names the secret when it is the secret's name (X-Ref
+ * names `ref`) or, for a secret name of at least `SECRET_NAME_MATCH_LENGTH` characters, holds it
+ * as whole parts (X-Crm-Ref-Id names `crm_ref`). A short secret name such as `id` or `ref` does not
+ * make X-Request-Id or X-Ref-Count refused.
+ */
+export function headerNamesSecret(header: string, secretName: string): boolean {
+  const full = header.toLowerCase().replace(/-/g, '_');
+  // The prefix is ignored on either side, so X-Shop-Ref names `x_shop_ref` as well as `shop_ref`.
+  const headers = [full, full.replace(/^x_/, '')];
+  const names = [secretName, secretName.replace(/^x_/, '')];
+  return names.some(
+    (name) =>
+      headers.includes(name) ||
+      (name.length >= SECRET_NAME_MATCH_LENGTH &&
+        headers.some((h) => `_${h}_`.includes(`_${name}_`))),
+  );
+}
+
+const httpSaveSchema = z
+  .object({
+    from: z.enum(HTTP_SAVE_SOURCES).optional(),
+    path: z.string().trim().optional(),
+    header: z.string().trim().optional(),
+    saveAs: variableSchema,
+  })
+  .superRefine((item, ctx) => {
+    const from = item.from ?? 'json';
+    if (from === 'json' && !RESPONSE_PATH_RE.test(item.path ?? '')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['path'],
+        message: 'Use a path such as data.order.status.',
+      });
+    }
+    if (from === 'header') {
+      const refusal = item.header ? responseHeaderRefusal(item.header) : 'Enter a header name.';
+      if (refusal) ctx.addIssue({ code: 'custom', path: ['header'], message: refusal });
+    }
+  })
+  .transform((item): HttpSave => {
+    switch (item.from) {
+      case 'header':
+        return { from: 'header', header: item.header ?? '', saveAs: item.saveAs };
+      case 'text':
+      case 'status':
+        return { from: item.from, saveAs: item.saveAs };
+      default:
+        // `from` is kept only when the step says it, so a stored value reads back as stored.
+        return item.from
+          ? { from: 'json', path: item.path ?? '', saveAs: item.saveAs }
+          : { path: item.path ?? '', saveAs: item.saveAs };
+    }
+  });
+
+/**
+ * The same saved value from another source (the editor's choice; anything unknown is a JSON path),
+ * keeping its answer name.
+ */
+export function withHttpSaveSource(item: HttpSave, from: string): HttpSave {
+  switch (from) {
+    case 'header':
+      return {
+        from: 'header',
+        header: 'header' in item ? item.header : 'X-Request-Id',
+        saveAs: item.saveAs,
+      };
+    case 'text':
+    case 'status':
+      return { from, saveAs: item.saveAs };
+    default:
+      return {
+        from: 'json',
+        path: 'path' in item ? item.path : 'data.status',
+        saveAs: item.saveAs,
+      };
+  }
+}
+
+/** Where a saved value comes from, in words (the simulator's labels). */
+export function describeHttpSave(item: HttpSave): string {
+  switch (item.from) {
+    case 'header':
+      return `the ${item.header} header`;
+    case 'text':
+      return 'the body as text';
+    case 'status':
+      return 'the status code';
+    default:
+      return item.path;
+  }
+}
+
 const httpRequestNode = z.object({
   id: nodeIdSchema,
   type: z.literal('http_request'),
@@ -420,14 +591,9 @@ const httpRequestNode = z.object({
     .transform((v) => (v && v.trim() ? v : null)),
   /** The body's format; left out, JSON (ADR-236). */
   bodyFormat: z.enum(HTTP_BODY_FORMATS).optional(),
-  /** Values to save from a JSON response, as answers. */
+  /** Values to save from a successful response, as answers (ADR-406: from a JSON path by default). */
   save: z
-    .array(
-      z.object({
-        path: z.string().trim().regex(RESPONSE_PATH_RE, 'Use a path such as data.order.status.'),
-        saveAs: variableSchema,
-      }),
-    )
+    .array(httpSaveSchema)
     .max(AUTOMATION_LIMITS.httpSaves, `At most ${AUTOMATION_LIMITS.httpSaves} saved values.`),
   /** A 2xx response. */
   next: nextSchema,
@@ -1250,7 +1416,75 @@ function httpStepIssues(node: NodeOf<'http_request'>, refs: GraphReferences): st
       out.push('The body must be JSON, with placeholders inside quotes.');
     }
   }
+  for (const item of node.save) {
+    if (item.from !== 'header') continue;
+    const refusal = savedHeaderSecretRefusal(item.header, node.headers, refs.secrets?.keys());
+    if (refusal) out.push(refusal);
+  }
+  // A step that saves values from the response must keep each secret apart from other text, or a
+  // server echoing the header could hand back a short secret disguised inside a longer word.
+  if (node.save.length > 0) {
+    for (const header of node.headers) {
+      const problem = secretAdjacencyProblem(header.name, header.value);
+      if (problem) out.push(problem);
+    }
+  }
   return out;
+}
+
+/** A letter or a digit in any script (shared with the worker's echo checks, `automations/echo.ts`). */
+export const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
+
+/**
+ * Why a header value's `{{secret.<name>}}` touches a letter, a digit or another placeholder, or
+ * null (ADR-406). A step that saves response values could otherwise wrap a short secret in letters
+ * (`q{{secret.pin}}q`) or repeat it so that an echo no longer shows it as a token; a separator
+ * (space, -, :, =, comma, ;, / or .) beside it is fine.
+ */
+export function secretAdjacencyProblem(headerName: string, value: string): string | null {
+  const spans = [...value.matchAll(PLACEHOLDER_RE)].map((m) => ({
+    start: m.index,
+    end: m.index + m[0].length,
+    name: (m[1] ?? '').toLowerCase(),
+  }));
+  for (const span of spans) {
+    if (!span.name.startsWith('secret.') || !SECRET_NAME_RE.test(span.name.slice(7))) continue;
+    const before = value[span.start - 1];
+    const after = value[span.end];
+    const touches =
+      (before !== undefined && LETTER_OR_DIGIT.test(before)) ||
+      (after !== undefined && LETTER_OR_DIGIT.test(after)) ||
+      spans.some(
+        (other) => other !== span && (other.end === span.start || other.start === span.end),
+      );
+    if (touches) {
+      return `In the ${headerName} header, put a separator (a space, -, :, =, comma, ;, / or .) between {{secret.${span.name.slice(7)}}} and the text or placeholder beside it, so that HyFib can recognise the secret if the server sends it back.`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Why a saved response header could hand out a company secret, or null (ADR-406): a header the
+ * step sends a secret in (a server may echo it back), or one named like a company secret.
+ */
+export function savedHeaderSecretRefusal(
+  header: string,
+  requestHeaders: readonly { name: string; value: string }[],
+  secretNames: Iterable<string> = [],
+): string | null {
+  const lower = header.toLowerCase();
+  if (
+    requestHeaders.some((h) => h.name.toLowerCase() === lower && /\{\{\s*secret\./i.test(h.value))
+  ) {
+    return `This step sends a secret in the ${header} header, so HyFib does not save that header from the response.`;
+  }
+  for (const name of secretNames) {
+    if (headerNamesSecret(header, name)) {
+      return `The ${header} header is named like the secret “${name}”, so HyFib does not save it.`;
+    }
+  }
+  return null;
 }
 
 // Graph checks -----------------------------------------------------------------------------------

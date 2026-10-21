@@ -179,6 +179,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'error_code',
       'duration_ms',
       'saved_values',
+      'dropped_values',
       'started_at',
       'lease_until',
       'finished_at',
@@ -815,7 +816,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   },
   {
     table: 'app.contact_fields',
-    columns: ['id', 'key', 'label', 'type', 'created_at'],
+    columns: ['id', 'key', 'label', 'type', 'options', 'created_at'],
   },
   {
     table: 'app.contact_identities',

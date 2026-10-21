@@ -6905,13 +6905,13 @@ describe('skipped campaign recipients (ADR-358)', () => {
     expect(
       parses({ ...body, data: { ...body.data, recipient: { skipReason: 'opted_out' } } }),
     ).toBe(false);
-    // The recipient's variant (ADR-405): A or B, always given.
-    for (const variant of ['A', 'B']) {
+    // The recipient's variant (ADR-405), A to E since ADR-410, always given.
+    for (const variant of ['A', 'B', 'C', 'D', 'E']) {
       expect(
         parses({ ...body, data: { ...body.data, recipient: { ...body.data.recipient, variant } } }),
       ).toBe(true);
     }
-    for (const variant of ['C', '', null, undefined]) {
+    for (const variant of ['F', 'Z', 'a', '', null, undefined]) {
       expect(
         parses({ ...body, data: { ...body.data, recipient: { ...body.data.recipient, variant } } }),
         String(variant),
@@ -7004,6 +7004,35 @@ describe('skipped campaign recipients (ADR-358)', () => {
       contact: { id: body.data.contact.id, phone: null, name: null },
       channel: null,
     });
+  });
+
+  it('name a third to fifth variant as recorded, the rest of the body unchanged (ADR-410)', async () => {
+    for (const variant of ['A', 'C', 'D', 'E']) {
+      const reads = answering([
+        [{ ...recipientRow, variant }],
+        [campaignRow],
+        [{ phone: '+919876543210', name: 'Asha', erasedAt: null }],
+      ]);
+      const built = await buildWebhookPayload(
+        reads.tx,
+        event('opted_out', recipientRow.id),
+        'endpoint',
+      );
+      expect(built.data).toEqual({
+        ...body.data,
+        recipient: { ...body.data.recipient, variant },
+      });
+      expect(campaignRecipientSkippedPayloadSchema.safeParse(built).success).toBe(true);
+    }
+    // A label HyFib never writes is not reported as another variant.
+    const odd = answering([
+      [{ ...recipientRow, variant: 'F' }],
+      [campaignRow],
+      [{ phone: '+919876543210', name: 'Asha', erasedAt: null }],
+    ]);
+    await expect(
+      buildWebhookPayload(odd.tx, event('opted_out', recipientRow.id), 'endpoint'),
+    ).rejects.toThrow('Unknown campaign variant "F"');
   });
 
   it('send nothing for a recipient or campaign that is gone, reading nothing for an id that is not one', async () => {

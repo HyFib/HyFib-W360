@@ -1,5 +1,527 @@
 # Progress
 
+## 2026-10-21 — Campaigns that test up to five templates (P3-04, ADR-410)
+
+Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI
+only; no live Meta traffic.** ADR-405 let a campaign test two templates; its "Not built" began with
+"more than two variants". This closes it.
+
+### Completed
+
+- **Variants:** a draft may add C, D and E after B (at most five templates, `MAX_VARIANTS`), each
+  10% to 90% in steps of 5, A keeping at least 10% (`variantSetProblem`), checked when written and
+  again before a submission. No migration: 0317's checks, unique key and grants already take them.
+- **Assignment:** ADR-405's hash buckets laid end to end (`variantRanges`: B first, A last), in SQL
+  and TypeScript, recorded once with the snapshot; with B alone the split is ADR-405's exactly, and
+  adding a variant takes buckets from A only.
+- **Checks per variant:** readiness, costs, consent, the frequency cap, approval, resuming, the
+  runner's pause (naming the variant) and test sends cover every variant as they cover B.
+- **Pages:** the editor adds variants one after another and says what A keeps; the review, the
+  campaign page, the approval page and email ("approves all 3") and the results show every variant.
+- **API and webhooks (additive):** `variants` on draft create/edit and in settings (every variant
+  after A), beside `variantB` (B alone, C to E kept; null removes all; the two refused together);
+  C to E in the enums of `variants`, each recipient's `variant` and `recipient.variant`; recorded
+  labels read back strictly. OpenAPI descriptions updated.
+- **Rolling deploy:** `CAMPAIGN_VARIANTS_MAX` (2 to 5, 2 unless set) gates drafts with more than
+  two variants until no server of the release before is left (an older web server would submit C's
+  contacts as A and show approvers two templates; an older worker would never send them and name
+  them A). DEPLOYMENT has the analysis, rollout and rollback; CI's e2e environment sets it to 5.
+- **Docs:** ADR-410, THREAT-MODEL T359, ARCHITECTURE §6B, RUNBOOKS §10A, DEPLOYMENT, SECURITY,
+  DATA-RETENTION, BACKLOG P3-04, feature matrix W-052, `.env.example`.
+
+### Tests
+
+- Unit (`campaigns/variants.test.ts`, `api/api.test.ts`, `webhooks/webhooks.test.ts`,
+  `core/config.test.ts`): labels, bounds and shares; all 1,593 valid share sets over 10,000
+  deterministic contacts, each variant within three of its own binomial standard deviations and
+  Pearson's statistic below the chi-square's 0.999 quantile, two other campaigns within 1.5 points,
+  the largest deviation pinned at 1.12 points; stability and ADR-405's split for two variants; SQL
+  ranges; the draft's variants (replace, B alone, both refused, the limit, trimming); results per
+  variant; the approval email for three; the API's schemas and mapping; the webhook body for C to
+  E and a refused unknown label; the setting's default and range; approval and resuming checking
+  every variant and refusing a waiting label without a row; each refusal's field path;
+  `apps/web/src/lib/campaign-variants.test.ts`: the editor's default shares.
+- Hand mutation of 40 branches (30 first, 10 after the reviews): 30 caught by the unit tests. The
+  10 others need the database, and each is exercised by a named integration test that did not run
+  here: the SQL condition given every share, readiness checking every variant's template and the
+  stored shares, and readiness building no audience for an invalid set (whose ranges would then be
+  refused, so the review would throw) ("checks a third variant's template and the stored shares", and the
+  three-variant test, whose review would throw), the runner loading every variant and test sends
+  of C ("assigns, approves, sends and reports three variants"), the runner's pause for a label
+  without a row ("pauses for a recipient whose variant has no row"), readiness refusing labels
+  out of order ("checks a third variant's template …", whose review would throw), and the
+  members' and keys' paths passing the limit ("refuses a third variant until the deployment allows
+  it" and the API test's refusal with the limit unset).
+- Integration (CI only, `campaigns.test.ts`, `api-campaigns.test.ts`, `webhook-events.test.ts`):
+  three variants reviewed, test-sent, submitted, refused for approval while C's template is paused,
+  approved, sent through the Graph stand-in and reported, each recipient keeping its variant (SQL
+  equal to TypeScript); a paused C pausing the runner and a resume only while C has pending
+  recipients; the limit at two refusing a third variant, another company's template refused as C,
+  shares leaving A under 10%, `variantB` keeping C, trimming; the API creating, editing, reviewing
+  and reading three variants; `campaign.recipient_skipped` naming C; the two-variant and plain
+  campaigns of ADR-405 unchanged (their tests kept, with the new `variants` field); after the
+  review, a paused C template and stored shares of B 50 and C 45 refusing the review and the
+  submission with their exact words, and so do stored shares of B 90 and C 30 (past 100%, never a
+  database error), on 40 contacts so no variant's share is empty by chance, a stored gap in the labels refused and repaired by saving,
+  and a recipient whose variant lost its row pausing the runner and refusing a resume.
+- E2E (CI only, `campaigns.spec.ts`): ADR-405's step extended to a third template: drafted in the
+  editor, reviewed, trimmed to B by the key's `PATCH` and grown back to three templates by a
+  second one (200 each, the version up by two: growth past two needs the limit the API routes pass
+  on, 5 in CI), submitted by the key, approved from the email, sent and reported per variant.
+
+### Review fixes (before merge)
+
+- **Rollback (Medium):** DEPLOYMENT now lists every campaign with a third variant with its status
+  under the company's scope, and before a rollback sends back those waiting for approval and
+  cancels scheduled, running and paused ones: a pause does not stop a member resuming on older
+  code, and lowering `CAMPAIGN_VARIANTS_MAX` does not reach submitted campaigns.
+- **Tests and accounting (Medium):** integration tests for readiness naming a third variant's
+  unapproved template and refusing stored shares that leave A under 10%; the mutation accounting
+  above names the test that exercises each survivor.
+- **Lows:** the editor offers another variant only while A keeps 20% (`canAddVariant`); refusals
+  carry field paths (`variants`, `variants.1.sharePercent`, `variantB`, `….variables`); a
+  pending label without a variant row pauses the campaign naming it and refuses a resume; the e2e
+  sends `variants` through the API route; ADR-410 restates ADR-405's stability promise and the
+  submission's unmeasured cost (also RUNBOOKS); the SQL condition computes the bucket once per row
+  (`int4range`); a stored gap in the labels is a readiness problem, not a server error; the e2e's
+  odds of an empty variant corrected.
+- **Second review (High, Medium, Low):** readiness built each variant's audience even when the
+  stored shares were invalid, so B 50 and C 45 over few contacts could add "Variant A: no contact
+  in its share …" (the new test was flaky) and B 90 and C 30 raised a database error from an
+  inverted `int4range`; readiness now builds them only for a valid set, and `variantRanges`
+  refuses an invalid set in `variantSetProblem`'s words. The test has 40 contacts and a
+  past-100% case. The e2e's `PATCH` now trims and grows, so it exercises the routes' limit.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                       | Result                                                                  |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0 --ignore-pattern '.claude/**'` | clean                                                                   |
+| `prettier --check` on the changed files                       | clean                                                                   |
+| `pnpm typecheck`                                              | clean                                                                   |
+| `pnpm test` (unit, after the review fixes)                    | 2,050 of 2,050 passed (182 files)                                       |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`           | clean                                                                   |
+| `pnpm build`                                                  | passed                                                                  |
+| hand mutation of 40 bounds, rules, checks and guards          | 30 caught by unit tests; 10 exercised only by integration tests (above) |
+| `pnpm test:integration`, `pnpm test:e2e`                      | not run here: no local PostgreSQL or browser; CI runs them              |
+
+## 2026-10-21 — Choice-type custom contact fields (P3-01, ADR-407)
+
+Status: **Implemented (migration 0320); unit tests run locally, integration and e2e tests in CI
+only.** Custom contact fields took text, a number, a date or yes/no; a company that sorts contacts
+by a fixed list typed "Gold", "gold" and "Gld" for one thing. This closes "choices for a field",
+left unbuilt by ADR-115 and ADR-262, with ADR-385's design for deal fields, through the same
+functions.
+
+### Completed
+
+- **The type and its options** (`contacts/fields.ts`, migration 0320): `choice` with 1 to 50
+  options, in order, each trimmed, 1 to 80 characters without line breaks or control characters,
+  none twice ignoring case (`fieldOptionsSchema`, now shared with deal fields); stored in
+  `app.contact_fields.options` with 0301's shape check and a type check accepting `choice`, both
+  validated in the migration; `UPDATE (options)` granted to the runtime role.
+- **Changing options** (`setContactFieldOptions`): Settings → Messaging ("Edit options", one per
+  line) and `PATCH /contact-fields/{key}` (`label`, `options` or both) add, reorder, and remove or
+  rename options no contact has chosen; a chosen option left out or rewritten is refused naming it
+  (409 through the API). The company's `contact-fields:<company>` advisory lock is taken
+  exclusively; every write of values takes it shared before reading fields and before locking a
+  contact. Audited as `contact_field.options_changed` with the key and counts; the same list changes
+  nothing.
+- **Writers:** contact page and new-contact form (a select with "Not set"), CSV import (any case,
+  stored as written, otherwise a row error; mapped fields compared again under the lock), bulk field
+  edits (a select), `POST`/`PATCH /contacts` and update-many (exactly as written), automation
+  "Set a contact field" steps (any case; the builder lists the options), Flow answers (any case),
+  and merges (values move under the lock). `coerceDealFieldValue` now delegates to the contact
+  function.
+- **Readers:** the CSV export (option as text, unchanged), `Contact.fields` and
+  `GET /contact-fields` (`options`, type `choice`, OpenAPI and schema tests), `fields[<key>]`
+  filters (any case; a non-option refused), segments and API contact searches (is, is not, set, not
+  set, as text), Settings → Webhooks' field value filters (options ticked; words and ranges refused
+  for a choice), automation conditions and placeholders (as text, unchanged).
+- Docs: ADR-407 (and "since built" notes on ADR-115 and ADR-262), BACKLOG P3-01, SECURITY (no
+  permission row changes), THREAT-MODEL T356, DATA-RETENTION, DEPLOYMENT (0320), RUNBOOKS,
+  ARCHITECTURE, the feature matrix's W-048 row.
+
+### Review fixes (before merge)
+
+An independent review found one High and one Medium; both are fixed, with the Lows and nits.
+
+- **High:** the company data export's spec for `app.contact_fields` left out `options`, which the
+  integration test comparing each spec with the live columns would have failed on, and an export
+  would have lost every choice field's options. It now lists `options` (DATA-RETENTION says so).
+- **Medium:** only the API locked field rows `FOR SHARE` before the contact (ADR-112), so a field
+  deleted while a member, an import, a bulk edit, an automation or a Flow wrote its value could
+  leave a value behind for a field added again with the key. These writers now read the fields
+  `FOR SHARE` after the advisory lock and before the contact, only the rows of the fields they
+  write (Flow answers now read them before locking the contact). Merges copy values unfiltered in
+  `app.merge_contacts`, so both merge paths lock every field row first. Integration tests race a
+  member's write, a bulk edit and a merge with a deletion, and a deletion with a write holding the
+  field (written in SQL to be held at a known point: it proves the deletion waits for and removes
+  the value, not the order inside the deletion, which the other races cover).
+- **Third review:** an import read existing contacts without locking them and wrote back the whole
+  object, so a field deleted meanwhile came back and a member's concurrent change was lost. It now
+  locks every existing contact the file names in id order up front and writes a patch (`attributes
+|| set - removed`, `attributePatch`, unchanged contacts not rewritten). A deletion locks the
+  contacts holding a value `FOR NO KEY UPDATE` in id order before removing values (not `FOR UPDATE`,
+  which would wait for an automation step's key share lock while that step waits for the field's
+  row). More than 50 keys in one change are refused before any lock. Integration tests race an
+  import with a deletion holding the contact and with a member's change of another field, and a bulk
+  edit with a deletion over two contacts.
+- **Fourth review:** the import locked its contacts `FOR UPDATE`, which waits for an automation
+  step's key share lock, bringing back a three-way cycle with a deletion. Imports and bulk field
+  edits now lock `FOR NO KEY UPDATE` (they never change `tenant_id` or `id`, the only key other
+  tables reference; the number's unique index is partial, so it is no key). Bulk tag edits and the
+  API's many-contact calls keep `FOR UPDATE`, since automation steps take turns with them on tags
+  through that conflict. A contact read during an import but not locked up front is now locked and
+  read again before its patch is decided. The bulk edit and deletion race now uses three contacts
+  whose storage order differs from their id order (asserted by `ctid`) and waits on the two pids
+  involved.
+- **Final review:** an import that adds tags now locks its contacts `FOR UPDATE` (otherwise `FOR NO
+KEY UPDATE`), so an automation step adding a tag takes turns with it; the import still does not
+  itself keep a contact under 50 tags (an existing limit, stated in ADR-407). A contact the import
+  re-locks is now kept for a number only when its locked row still has that number; a number whose
+  contact went (merged away, erased) or moved is read again, at most three times
+  (`settleLockedContacts`), and otherwise reported as a row error ("This contact changed during the
+  import; import it again"), so every row is counted once. That reconciliation is unit tested with a
+  scripted database (merged away, number moved, still changing, gone); no integration test forces
+  the interleaving. The bulk edit and deletion race now runs the deletion on connections with index
+  and bitmap scans turned off, so a deletion locking contacts in its scan order would meet them in
+  storage order (the one asserted) and deadlock; it is designed to fail without the fix, but like
+  every integration test here it has not been run, so that is not verified. Comments and docs now
+  say which waits remain: automation steps' key share locks and foreign key checks do not wait for
+  an import or a bulk field edit, while steps that set a field or create a deal, Flow answers and a
+  first name from WhatsApp do; a failed automation step counts toward the five failed attempts after
+  which its run ends with `step_error`; a conflict is resent by the member or the API client. What
+  can still cycle, each detected by PostgreSQL and retried: a bulk tag edit, the API's many-contact
+  call or an import that adds tags with an automation step and a deletion; a contact a merge kept,
+  or another request created, during an import (a created one usually has a later id, but ids come
+  from the app servers' clocks); and a Flow answer whose inbound transaction already holds some contact locked by
+  an earlier message of the same webhook change that has a value of a field being deleted, possibly
+  with a change of options too. Not raced in tests: automation steps and Flow answers (their lock
+  order is reviewed).
+- DEPLOYMENT now says old servers also fail segments, campaigns and API filters naming a choice
+  field (500s), including after a rollback. The contact page sends only changed values and shows a
+  value its options no longer hold as a disabled option. The W-048 matrix row is `implemented`
+  until its CI-only tests pass. API merges take the lock too. Unused helpers were removed, and
+  `ContactFieldUpdate` says "label or options" with `minProperties: 1`.
+
+### Tests
+
+- Unit (`contacts/field-choices.test.ts`, `api/contact-fields.test.ts`, `contacts/fields.test.ts`,
+  `apps/web/src/lib/contact-fields.test.ts`): the options schema, Settings' and the API's field
+  schemas, every writer's reading (forms, imports, bulk edits, automations, Flows, the API and its
+  filter), segments' comparisons, Settings → Webhooks' ticks, the change rules with a scripted
+  transaction (lock modes and key, same list, chosen options refused, not found, another type), the
+  import's field comparison, the select's stale value, and the service's permission and input
+  checks before any read.
+- Integration (`tests/integration/contact-field-choices.test.ts`, CI only): values through the
+  service, export, import, bulk edit and API (strict values, the filter, options through POST and
+  PATCH); options changed while in use; a change waiting on a writer holding the lock, then refused;
+  segments; another company's field not found; the database check and the grants. Existing exact
+  matches gained `options: null` (`api-contact-field-definitions.test.ts` twice,
+  `webhooks.test.ts` once).
+- End-to-end (`tests/e2e/contacts.spec.ts`, CI only): a choice field added in Settings, set on a
+  contact and read back after a reload, a chosen option refused on removal, then the options
+  reordered.
+- Manual mutation testing of key branches: 20/21 caught by the unit tests; the one missed skips the
+  import's re-check at its call site (the comparison itself is unit tested; no test races an import
+  against a change of options).
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 1,987 of 1,987 passed (181 files), after the final review's fixes    |
+| `pnpm build`                                       | passed                                                               |
+| migration 0320                                     | parses (pglast); not applied here                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: no PostgreSQL or browser on this machine; CI runs them |
+
+## 2026-10-21 — WhatsApp order reports by day and product (P4-06a, ADR-409)
+
+Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI only;
+no live Meta traffic.** Commerce → Orders listed and exported the carts customers send from the
+catalog, but totals per day or per product took an export and a spreadsheet. This closes P4-06a's
+"order reports".
+
+### Completed
+
+- **Placement:** a page of its own, Commerce → Orders → Order report
+  (`/c/{slug}/commerce/orders/report`), linked from the order list, rather than a Reports section:
+  order visibility follows the inbox member by member, while Reports' numbers are the company's
+  (also in report emails and `GET /reports`) and read by roles that see no conversation. Periods
+  and the snapshot are Reports' own (`resolvePeriod`, whole company days, at most 92, not after
+  today; one repeatable-read, read-only transaction).
+- **Figures:** orders per day and status (today's status), subtotals per currency for the orders
+  whose total HyFib knows, orders without a known total counted apart, unreadable cart items and
+  the orders that had them, totals by status; by product, the retailer id with the catalog's name,
+  quantity, orders, quantity × price per currency where the price was read and the quantity without
+  a price (the 200 most ordered listed, the count given). Tables only, as on Reports.
+- **Money:** sums as numeric in SQL, carried as `bigint` (`exactMinor`), formatted from decimal
+  text (`minorToMajorText`, `formatOrderTotal`), so nothing passes through a float.
+- **Access:** `commerce.read` over the order list's visibility (`orderVisibility`); no customer data,
+  so no contacts permission and no audit; the permission matrix is unchanged. Two statements, both
+  selecting orders by the period (the existing `(tenant_id, received_at)` index covers it; the
+  items are read once, by order id), so no migration (0322 unused). No query plan was examined.
+- **Docs:** ADR-409, ARCHITECTURE §6 commerce, SECURITY (Phase 4 commerce rules), THREAT-MODEL
+  T358, BACKLOG P4-06a (order reports built; ADR-235's "Not built" line left as history), feature
+  matrix W-113 evidence. No CSV of the totals and no API (not built, in the ADR).
+- **Review fixes (before merge):** the threat model and matrix no longer say the integration tests
+  caught the two service-level regressions (they have not run); index use reworded to what is
+  known, and the product figures now come from one CTE over the period's visible items, names
+  chosen with `distinct on` for the listed products only; captions and row headers on the three
+  tables; a day the database dates outside the period is left out (as Reports do) and logged by the
+  page, with a RUNBOOKS §10H entry on time zone data skew; the day column described as WhatsApp's
+  time and the name as the latest order's that had one; a line without a currency counts as
+  unpriced, so priced and unpriced add up. New integration cases: product names, the priced
+  subtotals' visibility, a daylight-saving change. Second review: the priced subtotals are grouped
+  into JSON once and joined instead of a correlated subquery per listed product (which would have
+  re-read every line once per product); the unit test asserts the join and that no subquery is
+  left. ADR-409 and RUNBOOKS §10H now say the product figures still include orders a time zone
+  skew drops from the days. The complement test keeps only its SQL-text assertions. Reports'
+  `RowHeader` is still copied in the page rather than shared (moving it would touch Reports).
+
+### Tests
+
+- Unit (`commerce/order-report.test.ts`, 15 tests): aggregation into every day of the period, per
+  status and currency, orders without a total and unreadable items apart, rows outside the period
+  left out of the order figures and returned to log, a subtotal without a currency refused; exact major-unit text and display beyond 2^53 minor units (INR,
+  USD, JPY, BHD); period bounds at Kolkata's midnight and the 92-day and "after today" refusals;
+  both statements checked for the company, the period's bounds, the time zone, the visibility
+  condition, the currency grouping, the numeric product, the single read of the items, the name
+  rule, the complementary priced and unpriced conditions and the priced subtotals joined once.
+  Deliberate regressions: 26 of 26 in `order-report.ts` caught, and 4 of 4 for the second review
+  (a correlated subquery restored, the join dropped, the product count taken after the limit, the
+  unpriced condition changed); 2 in the service (visibility not passed, period in UTC) survive the unit
+  tests, and the integration tests (CI only) are written to catch them. The page's log line is not
+  tested.
+- Integration (CI only, `commerce.test.ts`, "order report (ADR-409)"): exact totals across
+  Kolkata's day boundaries (23:59:59 and midnight, before and after the period) and again in UTC,
+  INR and USD, an unreadable item and an unreadable price, mixed currencies, product names and an
+  unknown product; a product renamed between orders, with a newer order without a name and one
+  after the period, named "New chai"; New York's daylight-saving change on 1 November 2026 (orders
+  either side of both local midnights, and the 25-hour day's bounds); an agent sees only their own
+  and unassigned conversations' orders, including in a listed product's priced subtotals, a
+  marketer none, another company's orders never count; an analyst is refused; period refusals.
+- E2E (CI only, `commerce.spec.ts`): after the stand-in's order is paid and fulfilled, the order
+  report shows it under Fulfilled with ₹320.50 and its products with exact subtotals (rows found by
+  their row headers).
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                | Result                                                                              |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `eslint . --max-warnings=0`, prettier on changed files | clean                                                                               |
+| `pnpm typecheck`                                       | clean                                                                               |
+| `pnpm test` (unit)                                     | 2,041 of 2,041 passed (182 files)                                                   |
+| `pnpm build`                                           | passed                                                                              |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`    | clean                                                                               |
+| deliberate regressions                                 | 26 of 26 caught in `order-report.ts`; 2 service-level left to the integration tests |
+| `pnpm test:integration`, `pnpm test:e2e`               | not run here: no local PostgreSQL or browser; CI runs them                          |
+
+## 2026-10-21 — An enrolment's contacts listed with their outcomes (P4-01, ADR-408)
+
+Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI
+only.** Enrolments (ADR-401, ADR-403) stored each contact's outcome but showed only counts and
+refusals by reason. This closes P4-01's "an enrolment's contacts listed with their outcomes (in the
+app and the API)".
+
+### Completed
+
+- **Domain:** `selectEnrolledContacts` and `assertEnrollmentOfAutomation`
+  (`automations/enrollments.ts`) read a page of an enrolment's rows by position, of one outcome
+  when asked, with each contact as it is now, after checking the enrolment is the path's
+  automation's; `toEnrolledContact`, `enrolledContactLabel`, `enrolledContactsPage` and the
+  position cursor (`automations/enrollment-model.ts`, pure) map and page them. Erased and merged
+  contacts keep their rows without a name, number or id.
+- **App:** the enrolment's page lists its contacts (position, contact, outcome with the refusal's
+  reason and "Open the run", when handled), 50 per keyset page, filtered by outcome, for members
+  with `automations.read` and `contacts.read` (`listEnrolledContacts`, checked by the page and the
+  service); numbers masked as elsewhere (ADR-226); "Erased contact" for an erased one. Analysts
+  see the counts only.
+- **API:** `GET /automations/{id}/enrollments/{enrollmentId}/contacts` (`limit`, `cursor`,
+  `outcome`), scopes `automations.start` and `contacts.read` (both checked as reads, as
+  ADR-403's reads are, so also while suspended), `limit` 1 to 100, ids and outcomes only; another
+  company's or automation's enrolment 404. OpenAPI schema `AutomationEnrollmentContact`, the
+  operation and an example page.
+- **Index:** none needed: 0311's unique key `(tenant_id, enrollment_id, position)` serves the page
+  with or without an outcome (at most 10,000 rows per enrolment); an integration test checks the
+  plan.
+- **Docs:** ADR-408, THREAT-MODEL T357, SECURITY (no permission is new), ARCHITECTURE §6E,
+  RUNBOOKS (enrolments), BACKLOG P4-01, feature matrix H-053.
+- **Review fixes (before merge):** ADR-408 said the API's `limit` went to 200; it is 1 to 100
+  (`API_LIMITS.pageSize`), now pinned by a unit test (101 refused). The page treats a `forbidden`
+  from the list as "no Contacts card" as well as checking `contacts.read` itself, and an e2e step
+  has an analyst open the enrolment page and see the counts without the list. The e2e read of the
+  key's enrolment's contacts no longer assumes both started: the member's runs of the same
+  contacts may still be going, so each row is started with its run or refused as
+  `automation_busy`, and the rows add up to the total. The scopes are described as checked as
+  reads (`assertAnyScope`, as ADR-403's reads are), not as read scopes (`automations.start`
+  writes). The integration test's title names both scopes; the `automations.start` scope's
+  description on the API keys page mentions listing an enrolment's contacts; the plan test also
+  turns sorting off and checks the plan has no sort. Not changed: the API reads the contact's name
+  and number columns and drops them (a separate column list would split the shared reader for no
+  exposure, since nothing leaves the server).
+
+### Tests
+
+- Unit (`automations/enrollments.test.ts`, 10 new): the mapping of each outcome, erased and merged
+  contacts, labels, the cursor's bounds, the outcome filter, the next page's cursor, members'
+  permissions before any read, the enrolment check with the company and automation, the page's
+  query (limit, outcome, cursor) and masking, the API's scopes (also while suspended), query
+  bounds, rows of exactly the schema's fields, and the OpenAPI operation and example.
+- Integration (CI only): `automation-enrollments.test.ts` (outcomes listed exactly with reasons and
+  runs, an erased contact, the outcome filter, pages of 50 that never skip or repeat, cancelled
+  after a stop, an analyst refused, masking for a masked role, another company's and automation's
+  enrolment not found, the index's plan); `api-automation-enrollments.test.ts` (keyset pages of a
+  key's enrolment of 55, an erased contact without an id, the outcome filter, a key without
+  `contacts.read` refused, isolation).
+- E2E (CI only, `automations.spec.ts`): after a member's enrolment, its page lists both contacts
+  with their runs and filters by outcome; the key's enrolment's contacts read through the API; an
+  invited analyst sees the enrolment's counts and no contacts list.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                               | Result                                                                                                     |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`, prettier on changed files            | clean                                                                                                      |
+| `pnpm typecheck`, `tsc --noEmit -p tests/integration`, `-p tests/e2e` | clean                                                                                                      |
+| `pnpm test` (unit)                                                    | 2,036 of 2,036 passed (181 files)                                                                          |
+| `pnpm build`                                                          | passed                                                                                                     |
+| deliberate regressions (permissions, scoping, filters, pages, maps)   | 28 of 29 caught by unit tests; the page's own `contacts.read` gate is covered by the e2e analyst step (CI) |
+| `pnpm test:integration`, `pnpm test:e2e`                              | not run here: no local PostgreSQL or browser; CI runs them                                                 |
+
+## 2026-10-21 — HTTP steps save response headers, a text body and the status (P4-02, ADR-406)
+
+Status: **Implemented (migration 0319); unit tests run locally, integration and e2e tests in CI
+only; no call against a real company API.** An automation's "Call a web address" step saved values
+only from a JSON body by path, so a plain-text answer, a header such as a request id or the status
+saved nothing. This closes P4-02's "response headers or non-JSON bodies as values".
+
+### Completed
+
+- **Sources** (`automations/graph.ts`, `automations/http.ts`): each saved value has `from`: `json`
+  (a path, the default and what a value without `from` means), `header` (by name, without regard to
+  case; a repeated header joined with ", " in the order received; Node reads values as latin1),
+  `text` (the whole body, only for `text/*`, JSON and XML content types in UTF-8; decoded as UTF-8,
+  NUL as U+FFFD, trimmed, clipped to 1,000 UTF-16 code units) or `status` (as digits). Values are
+  still saved only from 2xx responses.
+- **Compatibility:** stored graphs, published versions, runs in progress and requests already
+  written ahead (`{path, saveAs}`) parse and read back unchanged (no `from` added, so definition
+  hashes and exports are the same); the graph stays version 1, as for ADR-236's `bodyFormat`.
+- **Refused headers:** names containing cookie, authoriz, authent, oauth, token, secret, passw,
+  session, credential, csrf, xsrf, signature or bearer, with a part auth, jwt, pwd, otp, sig or
+  sid, or a part ending in key, are refused when the draft is saved (Author and Location are
+  allowed); a header the step sends a secret in, or one named like a company secret (the whole
+  name, or a secret name of six or more characters as whole parts), is refused by the publish
+  checks. The worker repeats them with the company's current secret names.
+- **Echoed secrets** (`automations/echo.ts`): the worker leaves out a value holding a secret value
+  the request carried (six characters or more anywhere; one to five as a whole token, or anywhere
+  when the request sent it touching other text), checked on the whole value before clipping, as written and JSON-unescaped, URL- and
+  form-decoded, with character references read, and for the secret in base64 or base64url at every
+  alignment in each of those forms (secrets of eight or more); a value ending with the start of a
+  secret of six or more characters (four or more characters after other text; on its own, eight
+  or more or all but one or two of the secret) is left out as a possible cut echo. Secrets transformed otherwise are not recognised (T355). In a step that saves
+  values, a secret placeholder touching a letter, a digit or another placeholder is refused; new
+  secret values need four characters.
+- **Answers left out are recorded:** by name and reason (`refused_header`, `secret_header`,
+  `echoed_secret`, `possible_cut_echo`; never the value) in `automation_http_calls.dropped_values` (migration 0319,
+  with the call's guard extended), returned in the run view's `httpCalls` and shown on the run
+  page ("Not saved: …"); exported with the call.
+- **Editor:** "Value N from" (JSON path, Header, Body text, Status code) with the input the source
+  needs, inside the editor's hydration-gated fieldset; the simulator names each value's source.
+- **Docs:** ADR-406 (with the review), ARCHITECTURE, RUNBOOKS (a value that was not saved, an
+  echoed secret), DEPLOYMENT (0319, workers first, what a rollback breaks), BACKLOG P4-02,
+  THREAT-MODEL T355, FEATURE-MATRIX W-077.
+
+### Review fixes (second commit)
+
+An independent review found one High and two Mediums, all fixed: the echo check ran after
+clipping, so padding could save most of a secret across the cut (now on the whole value, plus the
+cut-start rule); ordinary encodings got past it (now read); answers left out left no trace (now
+recorded and shown). Also: short secret names refused X-Request-Id, deny-list gaps (`jwt`,
+`bearer`, `pwd`, `otp`, `sig`, parts ending in `key`; Author was refused), the first version of
+this entry claimed a test of the worker's secret-name check that did not exist (now written), and
+DEPLOYMENT had no note.
+
+### Second review fixes (third commit)
+
+A second review found no High and one Medium, fixed: secrets shorter than eight characters, which
+Settings still accepts, were no longer looked for, so an echoed PIN was saved (now found as a
+whole token in every decoded form; the status is left out only when a secret is exactly it). Also
+fixed: the end-overlap rule dropped ordinary values such as "live" as echoes (now only after other
+text, recorded as `possible_cut_echo` with its own runbook advice); a secret named `x_…` no longer
+matched its header (prefix ignored on both sides); base64 inside JSON escapes or percent-encoding
+was missed (now checked in every decoded form); answers left out are shown in the step's order;
+`authn`, `authz`, `passcode` and `hmac` are refused; T355 names a numeric secret parsed again as an
+unrecognised transform. 0319 was changed in place (unapplied): only its comment.
+
+### Third review fixes (fourth commit)
+
+A third review found no High and two Mediums, fixed: a member could defeat a short secret's token
+match from the step's own header (`q{{secret.pin}}q`, the secret twice, `%41` beside it), now
+refused by a separator check at save and publish (`secretAdjacencyProblem`) and,
+for steps published before, matched anywhere by the worker (`adjacentSecrets` over the rendered
+headers), with six- and seven-character secrets matched anywhere always; and a value that is a
+long secret's bare start was saved at any length (now dropped from eight characters; ADR-406 and
+T355 no longer claim a cut echo reveals at most three characters, and name truncated prefixes
+followed by an ellipsis as unrecognised). Also: new secret values need four characters; the token
+boundary applies only on a side where the secret's edge is a letter or digit; one matcher per
+response.
+
+### Fourth review fixes (fifth commit)
+
+A fourth review found no High or Medium. Fixed: cut echoes of six- to ten-character secrets could
+reveal almost all of them (cut-echo checks now cover secrets from six characters, and a bare start
+counts from eight characters or when it is at most two short of the secret; ADR-406 and T355 give
+the exact limit per secret length); the worker's passing of secrets sent beside text is now a
+helper (`looseSecretValuesOf`) with unit tests and an integration test that writes a version as a
+step could be before the separator check and expects the echo dropped; an integration test of
+the publish refusal; the fullwidth-digit case removed from the docs (header templates are
+printable ASCII and answers are percent-encoded); one shared `LETTER_OR_DIGIT`; a secret value
+of four spaces refused (spaces around a value do not count).
+
+### Tests
+
+- Unit (`automations/http-save.test.ts`, `outside-json.test.ts`, `apps/web` labels): each source,
+  old-shape compatibility (parsed graph identical to the stored one), refused headers at save and
+  those allowed, the publish checks (a secret's request header, a secret's name, short secret
+  names), content types and charsets, UTF-8 decoding, byte order marks, NUL, clipping, repeated
+  headers, a non-JSON body with other sources, runtime refusals and the reasons recorded, echoed
+  secrets across the 1,000-character cut for the header, text and JSON sources, a possible cut
+  echo and a value that is only a secret's start, each encoding, base64 inside escapes and
+  percent-encoding, short secrets as whole tokens and the status, values that only look encoded, the run page's wording of answers left
+  out, the editor's source changes and the simulator's labels, and the interpreter carrying
+  sources and saving the worker's values.
+- Integration (`automation-http.test.ts`, CI only): a header, a repeated header, a text body and
+  the status saved from the local target and used by a later message; a cookie and a
+  credential-like name refused at save; a secret's header and a secret's name refused at publish;
+  an echoing server's text left out while the status is saved, recorded as `echoed_secret` and
+  returned by `getRun`; a secret added after publishing makes the worker leave its header out
+  (`secret_header`); a secret beside other text refused at publish; a version written as a step
+  could be before the separator check (`q{{secret.crm_pin}}q`) has its echo dropped
+  (`echoed_secret`).
+- E2e (`web-requests.spec.ts`, CI only): a header and the status code chosen in the editor, a
+  refused Set-Cookie with its message, the simulator's labels and the live answer using them.
+- Manual mutation testing: 23/23 deliberate regressions caught by the unit tests in the first
+  commit (a 24th, a redundant fixed list of credential headers, survived and the list was
+  removed); for the first review's fixes 25/25 (24/25 first: base64url was not distinguished from
+  base64 until the test used a secret whose encoding holds +); for the second review's fixes 14/14
+  (13/14 first: the order of answers left out survived until the test's order differed from the
+  object's); for the third review's fixes 11/11; for the fourth review's fixes 6/6 (the worker's
+  call of `looseSecretValuesOf` is covered only by the integration test, in CI). The worker's loading of secret names and
+  the column, its check and guard are covered by the integration tests only.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                            | Result                                                     |
+| -------------------------------------------------- | ---------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                      |
+| `pnpm test` (unit)                                 | 1,993 of 1,993 passed (180 files)                          |
+| `pnpm build`                                       | passed                                                     |
+| migration 0319 parse check (pglast)                | parsed, PL/pgSQL included                                  |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: no local PostgreSQL or browser; CI runs them |
+
 ## 2026-10-21 — A/B template variants for campaigns (P3-04, ADR-405)
 
 Status: **Implemented (migrations 0317 and 0318); unit tests run locally, integration and e2e tests

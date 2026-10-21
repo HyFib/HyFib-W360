@@ -187,7 +187,7 @@ export function SecretForm({
       <Field
         id={`${prefix}-value`}
         label={secret ? 'New value' : 'Value'}
-        description="Stored encrypted. It is never shown again, to anyone."
+        description="At least 4 characters. Stored encrypted. It is never shown again, to anyone."
       >
         {(aria) => (
           <Input

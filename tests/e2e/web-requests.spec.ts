@@ -38,7 +38,7 @@ test.beforeAll(async () => {
     req.on('data', (chunk: string) => (body += chunk));
     req.on('end', () => {
       received.push({ method: req.method ?? '', url: req.url ?? '', headers: req.headers, body });
-      res.writeHead(200, { 'content-type': 'application/json' });
+      res.writeHead(200, { 'content-type': 'application/json', 'x-request-id': 'req-e2e-1' });
       res.end(JSON.stringify({ data: { status: 'shipped' } }));
     });
   });
@@ -105,9 +105,29 @@ test('an automation calls the company API with a stored secret and answers with 
   await page.locator('#step-http-request-1-body').fill('{"customer": "{{name}}"}');
   await page.getByRole('button', { name: 'Add value' }).click();
   await page.locator('#step-http-request-1-save-0-as').fill('status');
+  // A header and the status code saved too (ADR-406); a cookie is refused, and says why.
+  await page.getByRole('button', { name: 'Add value' }).click();
+  await page.getByLabel('Value 2 from', { exact: true }).selectOption('header');
+  const header = page.getByLabel('Value 2 header', { exact: true });
+  await header.fill('Set-Cookie');
+  await expect(
+    page
+      .getByText(
+        'The Set-Cookie header can carry credentials or a session, so HyFib does not save it.',
+      )
+      .first(),
+  ).toBeVisible();
+  await header.fill('X-Request-Id');
+  await page.locator('#step-http-request-1-save-1-as').fill('ref');
+  await page.getByRole('button', { name: 'Add value' }).click();
+  await page.getByLabel('Value 3 from', { exact: true }).selectOption('status');
+  await expect(page.getByLabel('Value 3 path', { exact: true })).toHaveCount(0);
+  await page.locator('#step-http-request-1-save-2-as').fill('code');
   await page.getByLabel('Add a step').selectOption('send_text');
   await page.getByRole('button', { name: 'Add step' }).click();
-  await page.locator('#step-send-text-1-text').fill('Your order is {{answer.status}}.');
+  await page
+    .locator('#step-send-text-1-text')
+    .fill('Your order is {{answer.status}} ({{answer.code}}, {{answer.ref}}).');
   await page.getByLabel('Add a step').selectOption('handoff');
   await page.getByRole('button', { name: 'Add step' }).click();
   await page.locator('#step-welcome-next').selectOption('http-request-1');
@@ -124,8 +144,10 @@ test('an automation calls the company API with a stored secret and answers with 
   await expect(page.getByText(`POST ${url}`)).toBeVisible();
   await expect(page.getByText('Authorization: Bearer {{secret.shop_token}}')).toBeVisible();
   await page.getByLabel('status (from data.status)').fill('packed');
+  await page.getByLabel('ref (from the X-Request-Id header)').fill('sim-1');
+  await page.getByLabel('code (from the status code)').fill('201');
   await page.getByRole('button', { name: 'Success', exact: true }).click();
-  await expect(page.getByText('Your order is packed.')).toBeVisible();
+  await expect(page.getByText('Your order is packed (201, sim-1).')).toBeVisible();
   expect(calledHere()).toHaveLength(0);
 
   await page.getByRole('button', { name: 'Save draft' }).click();
@@ -145,7 +167,7 @@ test('an automation calls the company API with a stored secret and answers with 
       .map((b) => b?.text?.body);
   await expect
     .poll(() => textsTo(customer), { timeout: 60_000 })
-    .toEqual(['Checking your order, Priya Customer.', 'Your order is shipped.']);
+    .toEqual(['Checking your order, Priya Customer.', 'Your order is shipped (200, req-e2e-1).']);
   const calls = calledHere();
   expect(calls).toHaveLength(1);
   expect(calls[0]?.method).toBe('POST');

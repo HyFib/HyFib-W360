@@ -410,23 +410,27 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   recipients only. Analytics compute rates with explicit denominators from `METRIC_DEFINITIONS`
   (`packages/domain/src/reports/definitions.ts`); clicks and conversions are reported as not
   measured. Per-recipient CSV export is formula-safe and audited.
-- **A/B variants (ADR-405, `campaigns/variants.ts`):** a draft may add variant B in
-  `app.campaign_variants` (labels B to Z, so more variants need no new table; two are built): a
-  second template of the number's account with its own mapping and its share (10% to 90% in steps
-  of 5); the campaign's own template is A. `evaluateReadiness` checks each variant with
-  `variantTemplateProblems` (with B, each problem names its variant) and builds one `AudienceArm`
-  per variant: its template's rules and `variantConditionSql`, the bucket of the MD5 of
-  "campaign:contact" (first 32 bits modulo 100, `variantBucket` in TypeScript), below B's share for
-  B. `insertSnapshot` freezes each arm's contacts with its label in
+- **A/B variants (ADR-405, ADR-410, `campaigns/variants.ts`):** a draft may add variants B to E
+  in `app.campaign_variants` (one row each; the table's labels B to Z needed no change), so a
+  campaign tests up to five templates: each a template of the number's account with its own mapping
+  and its share (10% to 90% in steps of 5), A, the campaign's own template, keeping the rest and at
+  least 10% (`variantSetProblem`). A web server lets a draft grow past two variants only up to
+  `CAMPAIGN_VARIANTS_MAX` (2 unless the deployment raised it, ADR-410's rolling-deploy gate;
+  `nextCampaignVariants`). Keys give `variants` (all after A) or ADR-405's `variantB` (B alone,
+  C to E kept). `evaluateReadiness` checks each variant with `variantTemplateProblems` (with
+  variants, each problem names its variant) and builds one `AudienceArm` per variant: its
+  template's rules and `variantConditionSql`, the bucket of the MD5 of "campaign:contact" (first 32
+  bits modulo 100, `variantBucket` in TypeScript) within the variant's range (`variantRanges`: B
+  the first buckets, then C, D and E, A the rest; with B alone ADR-405's rule). `insertSnapshot` freezes each arm's contacts with its label in
   `campaign_recipients.variant`, never updated (no grant). The review classifies and prices each
   arm (`estimateFromTable` at its category, summed by `combineEstimates`), refuses a variant
   nobody in its share can receive, and the messaging-limit notice counts all of them. Approval,
   resuming and the runner check each variant's template (`variantSendable`) while that variant has
-  pending recipients (`pendingByVariant`), so a finished variant never holds the other back; a tick
+  pending recipients (`pendingByVariant`), so a finished variant never holds the others back; a tick
   sends each recipient
   its recorded variant's template, checked against its variant's consent purpose and the
   frequency cap for marketing variants, priced at its category. `campaignVariantAnalytics` counts
-  each variant as `campaignAnalytics` counts the campaign; the page, `GET /campaigns/{id}`
+  each of the campaign's variants as `campaignAnalytics` counts the campaign; the page, `GET /campaigns/{id}`
   (`variants`), the recipients list and `campaign.recipient_skipped` (`variant`) show them.
   Descriptive only: no winner, no significance.
 - **Rate cards** (`ops.rate_cards`, `rate_card_prefixes`, `rate_card_prices`): entered by platform
@@ -789,7 +793,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   publish, pause, archive and restore, test runs, versions and run pages.
 - **HTTP step** (migrations 0014 and 0015, ADR-042, ADR-043): "Call a web address" calls a company's
   own API (GET, POST, PUT, PATCH, DELETE; a JSON body, or form fields since ADR-236; up to 10
-  headers; values saved from a JSON response by path) and branches on success (2xx) or failure. Only
+  headers; values saved from a successful response: a JSON path, a header, the body as text or the
+  status, ADR-406) and branches on success (2xx) or failure. Only
   domains on the company's list (`http_allowed_domains`) can be called, over https through the
   egress guard (`packages/core/src/egress.ts`: public addresses only, pinned DNS, no redirects, 64
   KiB/256 KiB/10 s). Secrets (`http_secrets`) are encrypted, write-only, referenced as
@@ -799,7 +804,16 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   a call that may have been received but has no result by the deadline is `unknown` and never
   retried. The minute sweep re-signals queued calls whose job was lost
   (`ops.automation_http_calls_due`). Settings → Web requests manages domains and secrets
-  (`integrations.manage`); run pages list each call (method, host, path, outcome).
+  (`integrations.manage`); run pages list each call (method, host, path, outcome). Saved headers
+  are matched without regard to case (repeated ones joined with ", "), a text body only from a
+  textual UTF-8 content type; headers that carry credentials or sessions, a header the step sends a
+  secret in or one named like a company secret are refused, and the worker leaves out any value
+  holding a secret the request carried, checked before clipping and in ordinary encodings (a secret
+  under six characters as a whole token; a step that saves values may not put a secret right
+  beside a letter, a digit or another placeholder; new secret values need four characters)
+  (`automations/echo.ts`; secrets transformed otherwise are not recognised). Answers left out are
+  recorded by name and reason in `dropped_values` (migration 0319) and shown on the run page
+  (`savedValuesFrom`, ADR-406).
 - **Enrolments** (`automations/enrollments.ts`, migration 0311, ADR-401): a member with
   `automations.publish` and `contacts.read` enrols the contacts the Contacts page's filters match
   (`contactFilterConditions`) or a saved segment's members (`segmentWhere`), at most 10,000, in an
@@ -830,6 +844,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   expired, the API and the scopes in the plan). Keys list (keyset pages), read and stop every
   enrolment of the company (`selectEnrollmentPage`, `readEnrollmentDetail`,
   `stopRunningEnrollment`, shared with members' pages).
+- **An enrolment's contacts** (ADR-408, no migration): `selectEnrolledContacts` pages an
+  enrolment's `app.automation_enrollment_contacts` rows by position (0311's unique key), of one
+  outcome when asked, with each contact as it is now, after `assertEnrollmentOfAutomation`;
+  `toEnrolledContact` maps them (erased and merged contacts without a name, number or id). The
+  enrolment's page lists them 50 per page (`listEnrolledContacts`, `automations.read` and
+  `contacts.read`, numbers masked as elsewhere) and
+  `GET /automations/{id}/enrollments/{enrollmentId}/contacts` gives them by id
+  (`apiListEnrolledContacts`, `automations.start` and `contacts.read`).
 - **Not built yet:** templates with media headers in template steps, usage billing. Form steps
   (ADR-248), runs started through the public API (ADR-077), template steps' website buttons whose
   link ends with a value (ADR-229), products steps (ADR-383), steps that set deal fields
@@ -1011,6 +1033,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `commerce/orders.ts`) in the same transaction as their message. Companies' Razorpay accounts
   notify `/api/webhooks/razorpay-links/<address id>` (256 KB limit) → `commerce/webhook.ts`, which
   verifies the company's signature, records the event id and signals a fetch of the link.
+- **Order reports** (ADR-409, `commerce/order-report.ts`): `orderReport` reads, for a period from
+  Reports' `resolvePeriod`, the orders per company day, status and currency, their subtotals summed
+  in SQL as numeric and carried as `bigint`, and the items by product (the 200 most ordered, from
+  one read of the period's visible items), over the order list's visibility, in one
+  repeatable-read, read-only snapshot; both statements select orders by the period, which
+  `commerce_orders_list_idx` covers. A day the database dates outside the period is left out and
+  logged by the page. `/c/{slug}/commerce/orders/report` shows them as tables.
 - **Web** (`/c/{slug}/commerce`): orders with status filters and paging; an order page with items,
   total, note, status buttons, Payment Links (status, address, not-sent reason) and the request and
   cancel actions; catalogs per WhatsApp account with the read state and a "Read from Meta" button;
@@ -1020,7 +1049,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Erasure** (`app.erase_contact`, replaced in 0018): clears the customer's note on their orders
   and requests cancellation of their open links; orders and amounts stay as business records.
 - **Not built yet:** writing to catalogs, stock updates, product enquiries (`referred_product`,
-  M-171), payments inside WhatsApp (`order_details`, M-174), refunds from HyFib, and order reports.
+  M-171), payments inside WhatsApp (`order_details`, M-174), and refunds from HyFib.
   Shopify and WooCommerce stores are §6J.
 
 ## 6J. Store connectors **[built — verified against the local Shopify and WooCommerce stand-ins only; no live store traffic]**
@@ -1572,6 +1601,50 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   label (`contact_fields` grants `UPDATE (label)` only); a deletion removes the field row, then the
   values (`attributes - key`), in the order a contact change locks them (ADR-112). 0092 widens the
   scope checks of `app.api_keys` and `ops.plans`.
+- **Choice-type contact fields (0320, ADR-407):** `app.contact_fields.options` (a text array of 1 to
+  50, in order; null for other types; 0301's shape check; `UPDATE (options)` for the runtime role).
+  Every reader and writer of values goes through `contacts/fields.ts`: `coerceFieldValue` (forms,
+  CSV import, bulk edits, automation steps, Flow answers, Settings → Webhooks' lines: any case,
+  stored as the option is written), `apiFieldValue` (the API: exactly as written) and
+  `apiFieldFilterValue` (`fields[<key>]`: any case, a value that is no option refused); they take a
+  `FieldShape` (label, type, options), so a caller that leaves out the options does not compile.
+  Deal fields share them (`coerceDealFieldValue` now delegates; `fieldOptionsSchema`, `sameOptions`
+  and `removedChosenOptions` moved from `crm/deal-fields.ts`, which re-exports them).
+  `setContactFieldOptions` (`field-definitions.ts`, for Settings and `PATCH /contact-fields/{key}`)
+  takes the `contact-fields:<company>` advisory lock exclusively, reads the distinct values
+  (`attributes ->> key`) and refuses a list that drops or rewrites a chosen one. Every write of
+  values takes that lock shared (`lockContactFieldValues`), then locks the rows of only the fields
+  it writes `FOR SHARE`, both before it locks a contact: the contacts service (create and change:
+  the keys given; bulk edit: its field; import: the mapped fields, read before its transaction and
+  compared again under the lock, `sameFieldShape`), the API's `lockFields`, the automation runner's
+  `set_field` (after a key share lock on the contact, which a deletion does not wait for) and Flow
+  answers (the form's `field:` targets). Merges (the service's and the API's) lock every field row
+  (`lockContactFieldsForMerge`), since `app.merge_contacts` copies values unfiltered. Deletions keep
+  ADR-112's row order and do not take the advisory lock; the row locks make them wait for writers of
+  their field, or those writers for them, and after deleting the row they lock the contacts holding
+  a value `FOR NO KEY UPDATE` in id order before removing the values. Bulk field edits and imports
+  lock contacts `FOR NO KEY UPDATE` in id order too; bulk tag edits, the API's many-contact calls
+  and imports that add tags lock `FOR UPDATE` in id order (they change tags). Imports lock every
+  existing contact the file names up front (contacts created or merged meanwhile when found) and
+  write `attributes || set - removed` (`attributePatch`). Renames of other fields never wait for
+  writers. What can still cycle, each detected by PostgreSQL, which fails one transaction: a bulk
+  tag edit, the API's call changing many contacts or an import that adds tags (all lock `FOR
+UPDATE`, as they change tags, which automation steps take turns on through their key share lock)
+  with an automation step waiting for a field being deleted and that deletion; a contact a merge
+  kept, or another request created, during an import, locked after the import's other contacts and
+  possibly out of id order (a created one usually has a later id, but ids come from the app servers'
+  clocks, and later chunks can find two in either order); and a Flow answer whose inbound transaction already
+  holds some contact locked by an earlier message of the same webhook change (an earlier form
+  answer, or the name filled in when a new identity joins an existing contact) that has a value of a
+  field being deleted, possibly with a change of options too. A member's or key's request then gets
+  a conflict, which the member or the API client sends again; a failed automation step rolls back
+  and its run stays due, so its job or the minute sweep runs it again (each failure counts toward
+  the five failed attempts in a row after which the run ends with `step_error`); a failed inbound
+  change rolls back whole, its receipt is marked failed and the webhook job retries it with backoff,
+  skipping changes already committed. The contact page sends only changed values
+  (`changedAttributes`, `lib/contact-fields.ts`). The company export carries `options`. Segments
+  compare a choice as text (`FIELD_OPS.choice`: equals, not equals, set, not set); webhook field
+  value filters tick options.
 - **Following message changes (0093, ADR-116):** triggers on `messages` (insert, and an update that
   changes the status, status time, error or content) call `app.message_changes_capture`, a SECURITY
   DEFINER function that upserts the message's one `app.message_changes` row with `xact` =

@@ -57,15 +57,21 @@ export const contactChanges = appSchema.table('contact_changes', {
     .default(sql`'{}'::jsonb`),
 });
 
-export const CONTACT_FIELD_TYPES = ['text', 'number', 'date', 'boolean'] as const;
+/** The types of a custom contact field: text, a number, a date, yes/no or a choice (ADR-407). */
+export const CONTACT_FIELD_TYPES = ['text', 'number', 'date', 'boolean', 'choice'] as const;
 export type ContactFieldType = (typeof CONTACT_FIELD_TYPES)[number];
 
+/**
+ * A company's custom contact fields (migration 0005): a choice field keeps 1 to 50 options in order
+ * (migration 0320, ADR-407; null for other types). A field's key and type never change.
+ */
 export const contactFields = appSchema.table('contact_fields', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),
   key: text('key').notNull(),
   label: text('label').notNull(),
   type: text('type', { enum: CONTACT_FIELD_TYPES }).notNull(),
+  options: text('options').array(),
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 

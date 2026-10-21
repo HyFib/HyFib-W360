@@ -63,7 +63,7 @@ export const apiSearchConditionSchema = z.discriminatedUnion('type', [
       op: z
         .enum(FIELD_COMPARISONS)
         .describe(
-          'For text: is_set, is_not_set, equals, not_equals, contains. For a number: is_set, is_not_set, equals, not_equals, greater_than, less_than. For a date: is_set, is_not_set, equals, before, after. For yes/no: is_set, is_not_set, is_true, is_false.',
+          'For text: is_set, is_not_set, equals, not_equals, contains. For a number: is_set, is_not_set, equals, not_equals, greater_than, less_than. For a date: is_set, is_not_set, equals, before, after. For yes/no: is_set, is_not_set, is_true, is_false. For a choice: is_set, is_not_set, equals, not_equals (its option, whatever its case).',
         ),
       value: z
         .union([z.string().max(200), z.number()])

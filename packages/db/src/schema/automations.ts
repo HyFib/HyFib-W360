@@ -256,6 +256,11 @@ export const automationHttpCalls = appSchema.table('automation_http_calls', {
     .notNull()
     .default(sql`'{}'::jsonb`)
     .$type<Record<string, string>>(),
+  /** Answers left out for safety, by name, with the reason (migration 0319, ADR-406). */
+  droppedValues: jsonb('dropped_values')
+    .notNull()
+    .default(sql`'{}'::jsonb`)
+    .$type<Record<string, string>>(),
   startedAt: tz('started_at'),
   leaseUntil: tz('lease_until'),
   finishedAt: tz('finished_at'),

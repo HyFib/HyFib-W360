@@ -404,6 +404,7 @@ async function init(): Promise<Runtime> {
     signer,
     clock: systemClock,
     notices: campaignNotices,
+    variantsLimit: config.CAMPAIGN_VARIANTS_MAX,
   });
   const rateCards = createRateCardsService({ platformDb, clock: systemClock });
   const razorpay = razorpayConfigFrom(config);

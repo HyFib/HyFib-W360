@@ -20,6 +20,7 @@ import {
   type ConditionRule,
   type DealFieldRule,
   type HttpHeaderPart,
+  type HttpSave,
   type HttpMethod,
   type NodeOf,
   type OrderPlaceholderValues,
@@ -180,7 +181,8 @@ export type RunEffect =
       path: string;
       headers: { name: string; parts: HttpHeaderPart[] }[];
       body: string | null;
-      save: { path: string; saveAs: string }[];
+      /** Values to save from a successful response (ADR-406: a JSON path when `from` is absent). */
+      save: HttpSave[];
     }
   /**
    * A CRM task about the run's contact for a member, created by the automation (ADR-244): the
@@ -871,7 +873,7 @@ export function advance(input: AdvanceInput): StepResult {
             sendsBody && current.body
               ? renderHttpText(current.body, vals, form ? encodeFormValue : encodeJsonString)
               : null,
-          save: current.save.map((item) => ({ path: item.path, saveAs: item.saveAs })),
+          save: current.save.map((item) => ({ ...item })),
         };
         return waitFor(
           'http',

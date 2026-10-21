@@ -65,6 +65,8 @@ import { CSV_BOM, csvLine } from '../contacts/csv';
 import { shownNumber } from '../contacts/number-masking';
 import { orderStatusChangedBy, type OrderStatusChange } from './orders';
 import { ORDER_CSV_COLUMNS, orderCsvLine, type OrderCsvRow } from './orders-csv';
+import { readOrderReport, type OrderReport } from './order-report';
+import { resolvePeriod } from '../reports/period';
 
 /** Orders one batch of an export reads (ADR-235). */
 const ORDER_EXPORT_BATCH = 500;
@@ -1065,6 +1067,24 @@ export function createCommerceService(deps: CommerceDeps) {
         if (!last || rows.length < ORDER_EXPORT_BATCH) break;
         before = { at: last.receivedAt, id: last.id };
       }
+    },
+
+    /**
+     * The order report for a period of whole days in the company's time zone (ADR-409), as Reports
+     * choose periods (`resolvePeriod`, at most 92 days, not after today): per day and status, the
+     * subtotals per currency and the items by product, over the orders the list shows the member
+     * (the inbox's visibility), in one repeatable-read, read-only snapshot. Totals only, no
+     * customer data, so `commerce.read` is enough.
+     */
+    async orderReport(ctx: TenantContext, input: unknown): Promise<OrderReport> {
+      assertCan(ctx, 'commerce.read');
+      const now = deps.clock.now();
+      const period = resolvePeriod(input, ctx.tenant.timezone, now);
+      return db.run(
+        ctx.scope,
+        (tx) => readOrderReport(tx, ctx.tenant.id, period, orderVisibility(ctx), now),
+        { isolationLevel: 'repeatable read', accessMode: 'read only' },
+      );
     },
 
     /** One order with its items, its Payment Links and what the member may do. */

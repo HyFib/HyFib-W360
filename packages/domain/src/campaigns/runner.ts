@@ -3,6 +3,7 @@ import { clipText, uuidv7, type Clock } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
+  asc,
   campaignRecipients,
   campaignVariants,
   campaigns,
@@ -50,7 +51,7 @@ import {
   type CampaignNoticeDeps,
 } from './service';
 import { readCampaignVariables, resolveVariables, type CampaignVariables } from './variables';
-import { variantSendable, type VariantLabel } from './variants';
+import { parseVariantLabel, variantSendable, type VariantLabel } from './variants';
 
 /** One variant as a tick sends it (ADR-405): its template, mapping, consent purpose and rates. */
 interface RunnerArm {
@@ -269,30 +270,34 @@ export async function runCampaignTick(
         : [];
       return row ?? null;
     };
-    // Each variant's template and mapping (ADR-405): A is the campaign's own; B, when the campaign
-    // has one, its second. Without B, A is checked as campaigns always were. With B, a variant is
-    // checked only while it still has pending recipients: one no longer sendable then pauses the
-    // whole campaign, but a variant that finished (or never got a recipient, as when a web server
-    // of the release before submitted the draft) never holds the other back.
-    const [variantRow] = await tx
-      .select({ templateId: campaignVariants.templateId, variables: campaignVariants.variables })
+    // Each variant's template and mapping (ADR-405, ADR-410): A is the campaign's own; B to E, when
+    // the campaign has them, the others. Without variants, A is checked as campaigns always were.
+    // With them, a variant is checked only while it still has pending recipients: one no longer
+    // sendable then pauses the whole campaign, but a variant that finished (or never got a
+    // recipient, as when a web server of a release before submitted the draft) never holds the
+    // others back.
+    const variantRows = await tx
+      .select({
+        label: campaignVariants.label,
+        templateId: campaignVariants.templateId,
+        variables: campaignVariants.variables,
+      })
       .from(campaignVariants)
       .where(
-        and(
-          eq(campaignVariants.tenantId, tenantId),
-          eq(campaignVariants.campaignId, campaignId),
-          eq(campaignVariants.label, 'B'),
-        ),
-      );
+        and(eq(campaignVariants.tenantId, tenantId), eq(campaignVariants.campaignId, campaignId)),
+      )
+      .orderBy(asc(campaignVariants.label));
+    const withVariants = variantRows.length > 0;
     const variantSources: { label: VariantLabel; templateId: string | null; variables: unknown }[] =
-      [{ label: 'A', templateId: c.templateId, variables: c.variables }];
-    if (variantRow)
-      variantSources.push({
-        label: 'B',
-        templateId: variantRow.templateId,
-        variables: variantRow.variables,
-      });
-    const pending = variantRow ? await pendingByVariant(tx, tenantId, campaignId) : null;
+      [
+        { label: 'A', templateId: c.templateId, variables: c.variables },
+        ...variantRows.map((row) => ({
+          label: parseVariantLabel(row.label),
+          templateId: row.templateId,
+          variables: row.variables,
+        })),
+      ];
+    const pending = withVariants ? await pendingByVariant(tx, tenantId, campaignId) : null;
     const arms = new Map<VariantLabel, RunnerArm>();
     for (const source of variantSources) {
       const checked = pending === null || pending.has(source.label);
@@ -309,7 +314,7 @@ export async function runCampaignTick(
         )
       ) {
         if (!checked) continue;
-        return pause('template_not_approved', variantRow ? { variant: source.label } : {});
+        return pause('template_not_approved', withVariants ? { variant: source.label } : {});
       }
       arms.set(source.label, {
         template,
@@ -420,6 +425,14 @@ export async function runCampaignTick(
       return result('busy', at);
     }
 
+    // A recipient recorded with a variant the campaign has no row for (never written by HyFib:
+    // variants change only in drafts) cannot be sent: the campaign pauses naming it, rather than
+    // leaving the recipient waiting for good (ADR-410). A label HyFib never writes throws.
+    const orphan = batch
+      .map((b) => parseVariantLabel(b.variant))
+      .find((label) => !variantSources.some((source) => source.label === label));
+    if (orphan) return pause('template_not_approved', { variant: orphan });
+
     // Fresh data for the batch.
     const contactIds = batch.map((b) => b.contactId);
     const people = await tx
@@ -522,7 +535,7 @@ export async function runCampaignTick(
       const person = people.find((p) => p.id === b.contactId);
       const skip = (reason: SkipReason) => skips.push({ recipientId: b.id, reason });
       // The variant recorded when the audience was taken (ADR-405); it never changes.
-      const arm = arms.get(b.variant as VariantLabel);
+      const arm = arms.get(parseVariantLabel(b.variant));
       // A recipient whose variant cannot be sent now (it became pending again after the check
       // above, as a send the worker returned does) waits: the next tick pauses for its template.
       if (!arm) continue;
