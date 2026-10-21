@@ -963,10 +963,15 @@ describe('order report (ADR-409)', () => {
       [{ retailerId: 'sku-1', quantity: 1, price: 100 }],
       '2026-10-02T06:00:00Z',
     );
+    // The owner's order also has sku-1, which the agent's report lists: its line must not reach
+    // the agent's priced subtotals either.
     const owners = await orderAt(
       c,
       '5550032',
-      [{ retailerId: 'sku-2', quantity: 5, price: 20 }],
+      [
+        { retailerId: 'sku-2', quantity: 5, price: 20 },
+        { retailerId: 'sku-1', quantity: 4, price: 50 },
+      ],
       '2026-10-02T07:00:00Z',
     );
     const queue = await orderAt(
@@ -997,10 +1002,13 @@ describe('order report (ADR-409)', () => {
 
     const all = await svc.orderReport(owner, PERIOD);
     expect(all.totals.orders).toBe(3);
-    expect(all.totals.subtotals).toMatchObject([{ currency: 'INR', count: 3, minor: 40000n }]);
+    expect(all.totals.subtotals).toMatchObject([{ currency: 'INR', count: 3, minor: 60000n }]);
     expect(all.products.map((p) => [p.retailerId, p.quantity])).toEqual([
+      ['sku-1', 7],
       ['sku-2', 5],
-      ['sku-1', 3],
+    ]);
+    expect(all.products[0]?.subtotals).toMatchObject([
+      { currency: 'INR', count: 3, minor: 50000n },
     ]);
 
     // An agent sees their own conversations and the unassigned queue, as in the list.
@@ -1013,6 +1021,9 @@ describe('order report (ADR-409)', () => {
     expect(theirs.products.map((p) => [p.retailerId, p.quantity, p.orders])).toEqual([
       ['sku-1', 3, 2],
     ]);
+    expect(theirs.products[0]?.subtotals).toMatchObject([
+      { currency: 'INR', count: 2, minor: 30000n },
+    ]);
     expect(theirs.productCount).toBe(1);
     // Marketers read commerce but see no conversations: nothing is counted for them.
     const none = await svc.orderReport(marketer, PERIOD);
@@ -1023,6 +1034,74 @@ describe('order report (ADR-409)', () => {
     const theirsAll = await svc.orderReport(otherOwner, PERIOD);
     expect(theirsAll.totals.orders).toBe(1);
     expect(theirsAll.totals.subtotals).toMatchObject([{ currency: 'INR', minor: 900000n }]);
+  });
+
+  it('names each product as the newest order in the period that had a name gave it', async () => {
+    const c = await fx.company();
+    await fx.query(`UPDATE app.tenants SET timezone = 'Asia/Kolkata' WHERE id = $1`, [c.tenant.id]);
+    const owner = await fx.ctx(c, c.owner);
+    await syncedCatalog(c, owner, '5550034', 1);
+    const svc = service(reportClock);
+    const line = [{ retailerId: 'sku-1', quantity: 1, price: 10 }];
+    // The catalog renamed the product between orders; the newest order had no name at all, and an
+    // order after the period has another name.
+    const named = [
+      ['2026-10-01T06:00:00Z', 'Old chai'],
+      ['2026-10-02T06:00:00Z', 'New chai'],
+      ['2026-10-03T06:00:00Z', null],
+      ['2026-10-05T06:00:00Z', 'Future chai'],
+    ] as const;
+    for (const [at, name] of named) {
+      const order = await orderAt(c, '5550034', line, at);
+      await fx.query(`UPDATE app.commerce_order_items SET name = $1 WHERE order_id = $2`, [
+        name,
+        order.id,
+      ]);
+    }
+    const report = await svc.orderReport(owner, PERIOD);
+    expect(report.products).toMatchObject([
+      { retailerId: 'sku-1', name: 'New chai', quantity: 3, orders: 3 },
+    ]);
+  });
+
+  it('buckets days by the company’s local midnights across a daylight-saving change', async () => {
+    const c = await fx.company();
+    await fx.query(`UPDATE app.tenants SET timezone = 'America/New_York' WHERE id = $1`, [
+      c.tenant.id,
+    ]);
+    const owner = await fx.ctx(c, c.owner);
+    await syncedCatalog(c, owner, '5550035', 1);
+    const svc = service({ now: () => new Date('2026-11-10T12:00:00Z') });
+    const line = [{ retailerId: 'sku-1', quantity: 1, price: 10 }];
+    // New York leaves daylight saving on Sunday 1 November 2026: that day starts at 04:00 UTC
+    // (midnight EDT) and the next at 05:00 UTC (midnight EST), so it lasts 25 hours.
+    for (const at of [
+      '2026-11-01T03:59:59Z', // 23:59:59 EDT on 31 October
+      '2026-11-01T04:00:00Z', // midnight EDT, 1 November
+      '2026-11-02T04:59:59Z', // 23:59:59 EST, still 1 November
+      '2026-11-02T05:00:00Z', // midnight EST, 2 November
+    ]) {
+      await orderAt(c, '5550035', line, at);
+    }
+    const around = await svc.orderReport(owner, {
+      preset: 'custom',
+      from: '2026-10-31',
+      to: '2026-11-02',
+    });
+    expect(around.days.map((d) => [d.day, d.orders])).toEqual([
+      ['2026-10-31', 1],
+      ['2026-11-01', 2],
+      ['2026-11-02', 1],
+    ]);
+    const day = await svc.orderReport(owner, {
+      preset: 'custom',
+      from: '2026-11-01',
+      to: '2026-11-01',
+    });
+    expect(day.period.start.toISOString()).toBe('2026-11-01T04:00:00.000Z');
+    expect(day.period.end.toISOString()).toBe('2026-11-02T05:00:00.000Z');
+    expect(day.totals.orders).toBe(2);
+    expect(day.outsidePeriod).toEqual([]);
   });
 
   it('needs commerce.read and a period Reports would accept', async () => {

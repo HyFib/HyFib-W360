@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import type { ReactNode } from 'react';
 import { isAppError } from '@w360/core';
 import {
   PERIOD_PRESETS,
@@ -27,6 +28,7 @@ import {
   THead,
   TR,
   Table,
+  cn,
 } from '@w360/ui';
 import { ORDER_STATUS } from '@/lib/commerce-labels';
 import { formatDateTime } from '@/lib/format';
@@ -56,6 +58,21 @@ const amountIn = (totals: CurrencyTotal[], currency: string) => {
   return line ? formatOrderTotal(line.minor, currency) : '—';
 };
 
+/** A row label cell: a header for assistive technology, styled like body text (as on Reports). */
+function RowHeader({ className, children }: { className?: string; children: ReactNode }) {
+  return (
+    <TH
+      scope="row"
+      className={cn(
+        'h-auto py-3 text-sm font-normal normal-case tracking-normal text-foreground',
+        className,
+      )}
+    >
+      {children}
+    </TH>
+  );
+}
+
 /**
  * WhatsApp order report (ADR-409): orders received per day and status, their subtotals per
  * currency and the items by product, over the orders the member sees in the list. Totals only.
@@ -71,7 +88,7 @@ export default async function OrderReportPage({
   const sp = await searchParams;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'commerce.read')) notFound();
-  const { commerce } = await getRuntime();
+  const { commerce, logger } = await getRuntime();
   let report: OrderReport;
   let periodError: string | null = null;
   try {
@@ -86,6 +103,22 @@ export default async function OrderReportPage({
     report = await commerce.orderReport(ctx, {});
   }
   const { period, totals } = report;
+  // Days PostgreSQL dated outside the period are left out, as Reports leave them out; only a skew
+  // between its time zone data and the runtime's can cause one, so it is logged for operators
+  // (RUNBOOKS §10H), with the zone and day only.
+  for (const skipped of report.outsidePeriod) {
+    logger.warn(
+      {
+        tenantId: ctx.tenant.id,
+        timezone: period.timezone,
+        day: skipped.day,
+        orders: skipped.orders,
+        from: period.from,
+        to: period.to,
+      },
+      'order report: a day outside the period was left out (time zone data skew)',
+    );
+  }
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/commerce`;
   const currencies = currenciesOf([totals.subtotals]);
@@ -199,6 +232,7 @@ export default async function OrderReportPage({
             </CardHeader>
             <CardContent className="overflow-x-auto p-0">
               <Table>
+                <caption className="sr-only">Orders by status</caption>
                 <THead>
                   <TR>
                     <TH>Status</TH>
@@ -212,7 +246,7 @@ export default async function OrderReportPage({
                 <TBody>
                   {report.statuses.map((s) => (
                     <TR key={s.status}>
-                      <TD>{ORDER_STATUS[s.status]?.label ?? s.status}</TD>
+                      <RowHeader>{ORDER_STATUS[s.status]?.label ?? s.status}</RowHeader>
                       <TD>{formatCount(s.orders)}</TD>
                       {currencies.map((c) => (
                         <TD key={c}>{amountIn(s.subtotals, c)}</TD>
@@ -228,10 +262,13 @@ export default async function OrderReportPage({
           <Card className="min-w-0">
             <CardHeader>
               <CardTitle>By day</CardTitle>
-              <CardDescription>Days in {tz}, by when HyFib received each order.</CardDescription>
+              <CardDescription>
+                Days in {tz}, by the time WhatsApp gives each order.
+              </CardDescription>
             </CardHeader>
             <CardContent className="overflow-x-auto p-0">
               <Table>
+                <caption className="sr-only">Orders by day</caption>
                 <THead>
                   <TR>
                     <TH>Day</TH>
@@ -249,7 +286,7 @@ export default async function OrderReportPage({
                 <TBody>
                   {report.days.map((d) => (
                     <TR key={d.day}>
-                      <TD className="whitespace-nowrap">{formatDay(d.day)}</TD>
+                      <RowHeader className="whitespace-nowrap">{formatDay(d.day)}</RowHeader>
                       <TD>{formatCount(d.orders)}</TD>
                       {report.statuses.map((s) => (
                         <TD key={s.status}>{formatCount(d.byStatus[s.status])}</TD>
@@ -271,8 +308,8 @@ export default async function OrderReportPage({
               <CardTitle>By product</CardTitle>
               <CardDescription>
                 Items HyFib read, by the retailer id the catalog gives each product, with the name
-                the catalog had when the latest order arrived. A subtotal counts the items whose
-                price HyFib read.
+                HyFib’s copy of the catalog gave on the latest order that had one. A subtotal counts
+                the items whose price HyFib read.
                 {report.productCount > report.products.length
                   ? ` The ${formatCount(report.products.length)} most ordered of ${formatCount(report.productCount)} products are listed.`
                   : ''}
@@ -280,6 +317,7 @@ export default async function OrderReportPage({
             </CardHeader>
             <CardContent className="overflow-x-auto p-0">
               <Table>
+                <caption className="sr-only">Items by product</caption>
                 <THead>
                   <TR>
                     <TH>Retailer id</TH>
@@ -295,7 +333,7 @@ export default async function OrderReportPage({
                 <TBody>
                   {report.products.map((p) => (
                     <TR key={p.retailerId}>
-                      <TD className="font-mono text-sm">{p.retailerId}</TD>
+                      <RowHeader className="font-mono">{p.retailerId}</RowHeader>
                       <TD>{p.name ?? 'Not in HyFib’s copy of the catalog'}</TD>
                       <TD>{formatCount(p.quantity)}</TD>
                       <TD>{formatCount(p.orders)}</TD>

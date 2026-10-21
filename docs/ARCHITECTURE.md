@@ -1031,9 +1031,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   verifies the company's signature, records the event id and signals a fetch of the link.
 - **Order reports** (ADR-409, `commerce/order-report.ts`): `orderReport` reads, for a period from
   Reports' `resolvePeriod`, the orders per company day, status and currency, their subtotals summed
-  in SQL as numeric and carried as `bigint`, and the items by product (the 200 most ordered), over
-  the order list's visibility, in one repeatable-read, read-only snapshot bounded by the period on
-  `commerce_orders_list_idx`; `/c/{slug}/commerce/orders/report` shows them as tables.
+  in SQL as numeric and carried as `bigint`, and the items by product (the 200 most ordered, from
+  one read of the period's visible items), over the order list's visibility, in one
+  repeatable-read, read-only snapshot; both statements select orders by the period, which
+  `commerce_orders_list_idx` covers. A day the database dates outside the period is left out and
+  logged by the page. `/c/{slug}/commerce/orders/report` shows them as tables.
 - **Web** (`/c/{slug}/commerce`): orders with status filters and paging; an order page with items,
   total, note, status buttons, Payment Links (status, address, not-sent reason) and the request and
   cancel actions; catalogs per WhatsApp account with the read state and a "Read from Meta" button;

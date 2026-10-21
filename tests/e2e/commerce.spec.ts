@@ -410,8 +410,11 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   await page.getByRole('link', { name: 'Order report', exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/c/${slug}/commerce/orders/report$`));
   await expect(page.getByRole('heading', { name: 'Order report', exact: true })).toBeVisible();
-  const rowWith = (cell: string) =>
-    page.getByRole('row').filter({ has: page.getByRole('cell', { name: cell, exact: true }) });
+  // Each table's first column labels its rows (row headers, as on Reports).
+  const rowWith = (label: string) =>
+    page
+      .getByRole('row')
+      .filter({ has: page.getByRole('rowheader', { name: label, exact: true }) });
   const fulfilledRow = rowWith('Fulfilled');
   await expect(fulfilledRow.getByRole('cell', { name: '₹320.50', exact: true })).toBeVisible();
   const chai = rowWith('chai-1');

@@ -17863,16 +17863,17 @@ Decision:
   from `resolvePeriod` (a preset or custom whole days in the company's time zone, at most 92 days,
   not after today; the same form and wording) and one repeatable-read, read-only snapshot
   (ADR-026) under the company's scope.
-- **What it counts:** the orders received in the period (by `received_at`, the order list's
-  time), per day of the company and per status (the order's status now, as the list shows it);
+- **What it counts:** the orders received in the period (by `received_at`, the time WhatsApp
+  gives the order message, as the order list shows it), per day of the company and per status (the order's status now, as the list shows it);
   their subtotals per currency, only for orders whose subtotal HyFib knows (every item read with a
   price in one currency, ADR-046), the others counted as "orders without a known total", never
   estimated; the totals by status; and the cart items HyFib could not read
   (`dropped_items`), counted apart, with the orders that had any. By product: each retailer id
   with the name HyFib's copy of the catalog gave on the latest order that had one ("Not in HyFib's
   copy of the catalog" otherwise), the quantity, the number of orders and, per currency, quantity
-  × unit price for the items whose price HyFib read (the quantity without a readable price is
-  shown apart), whether or not the order as a whole has a total. The 200 most ordered products
+  × unit price for the items whose price and currency HyFib read (the quantity of every other
+  line is shown apart, so the two always add up to the quantity), whether or not the order as a
+  whole has a total. The 200 most ordered products
   are listed and the page says how many there were.
 - **Money exact.** Sums are taken in SQL as numeric over the bigint minor units (quantity ×
   price as numeric, so no product overflows) and returned as text; `exactMinor` refuses anything
@@ -17885,14 +17886,35 @@ Decision:
   their list is). Totals carry no customer data: no names, numbers, notes or references, so
   neither `contacts.read` nor `contacts.export` is needed and the permission matrix is unchanged.
   Viewing is not audited, as viewing the list is not.
-- **Bounded:** three queries per page (orders grouped by day, status and currency; products;
-  their priced subtotals for the listed products), each bounded by the period on
-  `commerce_orders_list_idx (tenant_id, received_at DESC, id DESC)` and reaching items through
-  `commerce_order_items_position_uq (tenant_id, order_id, position)`, under the pool's 15-second
-  statement timeout as Reports are. Both indexes exist since 0018, so no migration (no 0322).
+- **Bounded:** two statements per page, both selecting orders by the period, which
+  `commerce_orders_list_idx (tenant_id, received_at DESC, id DESC)` covers, under the pool's
+  15-second statement timeout as Reports are: the orders grouped by day, status and currency, and
+  one products statement that reads the period's visible items once (a CTE, by order id, which
+  `commerce_order_items_position_uq (tenant_id, order_id, position)` leads with) and derives from
+  that set the product totals, the names (`distinct on`, for the listed products only) and the
+  priced subtotals (listed products only). Both indexes exist since 0018, so no migration (no
+  0322). No query plan was examined (no database here); the indexes say what the planner can use,
+  not what it chooses.
+- **Days the database and the runtime disagree on:** a group PostgreSQL dates outside the
+  period's days (possible only if its time zone data and Node's ICU data differ) is left out of
+  every figure, as Reports leave such rows out, and the page logs it (zone, day, count; RUNBOOKS
+  §10H) so the gap is not silent.
 - **Tables only**, as the Reports page has no charts.
 
 Not built: a CSV of the totals and the report through the public API (both would repeat the page's
 numbers; the CSV of the orders stays ADR-235's), a choice of statuses or numbers, totals by
 customer, totals by the status an order had on a given day (statuses are today's), and store
 orders (P4-06b), which have their own copy.
+
+Review (before merge): no High issue. A Medium issue: the threat model and the feature matrix said
+two service-level regressions were caught by the integration tests, which had not run; they now say
+those regressions survive the unit tests and the integration tests (CI only) are written to catch
+them. Low issues: the name rule and the priced subtotals' visibility had no integration proof (now
+tested: a product renamed between orders with a newer nameless order, and a listed product's line
+on an order the agent cannot see); index use was stated as fact without a plan (reworded, and the
+product figures now come from one read of the items, names chosen for listed products only); the
+tables lacked captions and row headers (added, as on Reports); a day outside the period failed the
+page (now left out and logged, as above, with a RUNBOOKS entry); and no case crossed a
+daylight-saving change (added for New York's on 1 November 2026). Nits: the day column is
+WhatsApp's time, the name is the latest order's that had one, and a line without a currency now
+counts as unpriced, so priced and unpriced lines always add up. All were fixed.

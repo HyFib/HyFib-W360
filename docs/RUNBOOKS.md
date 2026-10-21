@@ -1125,6 +1125,15 @@ another way (a template, or a reply after the customer writes again).
 HyFib then records what Razorpay reports (the order becomes paid when the link is paid in full).
 Refunds are made in the company's Razorpay Dashboard; HyFib does not change the order for them.
 
+**The order report's totals are lower than the order list's for the same days** (ADR-409). The
+web log has `order report: a day outside the period was left out (time zone data skew)` with the
+company id, its time zone, the day and how many orders. PostgreSQL dated orders by its own time
+zone data while the period's days come from Node's ICU data; when the two disagree about a zone's
+offsets (one was updated for a new daylight-saving rule and the other not), orders near midnight
+fall on a day outside the period and are left out, as Reports leave such rows out. Update the time
+zone data of the older side (the PostgreSQL server or image, or the Node.js runtime) so both carry
+the same IANA release; nothing in HyFib needs changing and the totals are right once they agree.
+
 **Migration 0018 failed.** It runs in one transaction, so a failure applies nothing. It replaces
 `app.erase_contact` through `SET ROLE w360_definer` (ADR-039) like 0011 and 0015–0017 and adds two
 definer functions (`ops.commerce_payment_webhook_target`, `ops.commerce_work_due`) with column

@@ -4,6 +4,8 @@ import { conversations, eq, isNull, or, sql, type SQL, type Tx } from '@w360/db'
 import { resolvePeriod } from '../reports/period';
 import {
   ORDER_REPORT_PRODUCT_LIMIT,
+  PRICED_LINE,
+  UNPRICED_LINE,
   addCurrencyTotal,
   exactMinor,
   formatOrderTotal,
@@ -129,8 +131,36 @@ describe('order report aggregation (ADR-409)', () => {
     expect(out[0]?.withoutSubtotal).toBe(2);
   });
 
-  it('refuses rows outside the period, with an unknown status or a subtotal without a currency', () => {
-    expect(() => summariseOrderGroups([row({ day: '2026-09-30' })], days)).toThrow(/outside/);
+  it('leaves rows dated outside the period out of every figure and returns them to log', () => {
+    const {
+      totals,
+      days: out,
+      statuses,
+      outsidePeriod,
+    } = summariseOrderGroups(
+      [
+        row({
+          day: '2026-09-30',
+          orders: 2,
+          subtotal: '500',
+          unreadableItems: 1,
+          withUnreadable: 1,
+        }),
+        row({ day: '2026-09-30', status: 'paid', orders: 1, subtotal: '100' }),
+        row({ day: '2026-10-02', orders: 1, subtotal: '700' }),
+      ],
+      days,
+    );
+    expect(outsidePeriod).toEqual([{ day: '2026-09-30', orders: 3 }]);
+    expect(totals.orders).toBe(1);
+    expect(totals.unreadableItems).toBe(0);
+    expect(totals.subtotals).toEqual([{ currency: 'INR', count: 1, minor: 700n }]);
+    expect(out.map((d) => d.orders)).toEqual([0, 1, 0]);
+    expect(statuses.find((s) => s.status === 'paid')?.orders).toBe(0);
+    expect(summariseOrderGroups([row({})], days).outsidePeriod).toEqual([]);
+  });
+
+  it('refuses rows with an unknown status or a subtotal without a currency', () => {
     expect(() => summariseOrderGroups([row({ status: 'shipped' })], days)).toThrow(/status/);
     expect(() => summariseOrderGroups([row({ currency: null, subtotal: '100' })], days)).toThrow(
       /without a currency/,
@@ -234,23 +264,26 @@ describe('reading the order report (ADR-409)', () => {
           orders: 2,
           unpriced_quantity: '1',
           product_count: 7,
+          priced: [
+            { currency: 'USD', lines: 1, subtotal: '12345678901234567890' },
+            { currency: 'INR', lines: 1, subtotal: '24000' },
+          ],
         },
       ],
     },
-    { rows: [{ retailer_id: 'sku-1', currency: 'INR', lines: 1, subtotal: '24000' }] },
   ];
+  /** The value bound to the first `$n` after `before` in the statement. */
+  const bound = (st: { sql: string; params: unknown[] }, before: string) => {
+    const at = st.sql.indexOf(before);
+    if (at < 0) return undefined;
+    const m = /^\$(\d+)/.exec(st.sql.slice(at + before.length));
+    return m ? st.params[Number(m[1]) - 1] : undefined;
+  };
 
-  it('bounds every statement by the company, the period and the member’s visibility', async () => {
+  it('bounds both statements by the company, the period and the member’s visibility', async () => {
     const { tx, statements } = answering(answers());
     await readOrderReport(tx, 'tenant-1', period, visibility, now);
-    expect(statements).toHaveLength(3);
-    /** The value bound to the first `$n` after `before` in the statement. */
-    const bound = (st: (typeof statements)[0], before: string) => {
-      const at = st.sql.indexOf(before);
-      if (at < 0) return undefined;
-      const m = /^\$(\d+)/.exec(st.sql.slice(at + before.length));
-      return m ? st.params[Number(m[1]) - 1] : undefined;
-    };
+    expect(statements).toHaveLength(2);
     for (const st of statements) {
       expect(bound(st, 'where o.tenant_id = ') ?? bound(st, 'and o.tenant_id = ')).toBe('tenant-1');
       expect(bound(st, 'o.received_at >= ')).toBe('2026-09-30T18:30:00.000Z');
@@ -263,20 +296,40 @@ describe('reading the order report (ADR-409)', () => {
         'join app.conversations on app.conversations.tenant_id = o.tenant_id and app.conversations.id = o.conversation_id',
       );
     }
-    const [groups, products, priced] = statements as [
-      (typeof statements)[0],
-      (typeof statements)[0],
-      (typeof statements)[0],
-    ];
+    const [groups, products] = statements as [(typeof statements)[0], (typeof statements)[0]];
     expect(bound(groups, 'to_char(o.received_at at time zone ')).toBe('Asia/Kolkata');
     expect(groups.sql).toContain('group by 1, 2, 3');
     expect(groups.sql).toContain('coalesce(sum(o.subtotal_minor), 0)::text as subtotal');
     expect(bound(products, 'where i.tenant_id = ')).toBe('tenant-1');
-    expect(bound(priced, 'where i.tenant_id = ')).toBe('tenant-1');
     expect(bound(products, 'limit ')).toBe(ORDER_REPORT_PRODUCT_LIMIT);
-    expect(priced.sql).toContain('sum(i.quantity::numeric * i.unit_price_minor)::text');
-    expect(priced.sql).toContain('group by 1, 2');
-    expect(bound(priced, 'i.retailer_id = any(')).toEqual(['sku-1']);
+    // The items are read once; the names and priced subtotals use that set, listed products only.
+    expect(products.sql.match(/app\.commerce_order_items/g)).toHaveLength(1);
+    expect(products.sql).toContain(
+      'select distinct on (l.retailer_id) l.retailer_id, l.name from lines l join listed p on p.retailer_id = l.retailer_id where l.name is not null order by l.retailer_id, l.received_at desc, l.order_id desc',
+    );
+    expect(products.sql).toContain('sum(l.quantity::numeric * l.unit_price_minor)::text');
+    expect(products.sql).toContain(
+      'from lines l join listed p on p.retailer_id = l.retailer_id where unit_price_minor is not null and currency is not null group by 1, 2',
+    );
+    expect(products.sql).toContain(
+      'coalesce(sum(quantity) filter (where unit_price_minor is null or currency is null), 0)',
+    );
+  });
+
+  it('counts each line once: priced and unpriced are exact complements', () => {
+    // Every combination of a read price and a read currency is either priced or unpriced, never
+    // both and never neither, so the two always add up to the product's quantity.
+    const priced = (price: boolean, currency: boolean) => price && currency;
+    const unpriced = (price: boolean, currency: boolean) => !price || !currency;
+    for (const price of [true, false]) {
+      for (const currency of [true, false]) {
+        expect(priced(price, currency)).not.toBe(unpriced(price, currency));
+      }
+    }
+    expect(query(sql`${PRICED_LINE}`).sql).toBe(
+      'unit_price_minor is not null and currency is not null',
+    );
+    expect(query(sql`${UNPRICED_LINE}`).sql).toBe('unit_price_minor is null or currency is null');
   });
 
   it('adds no condition for members who see every conversation', async () => {
@@ -304,13 +357,17 @@ describe('reading the order report (ADR-409)', () => {
         quantity: 3,
         orders: 2,
         unpricedQuantity: 1,
-        subtotals: [{ currency: 'INR', count: 1, minor: 24000n }],
+        subtotals: [
+          { currency: 'INR', count: 1, minor: 24000n },
+          { currency: 'USD', count: 1, minor: 12345678901234567890n },
+        ],
       },
     ]);
     expect(report.productCount).toBe(7);
+    expect(report.outsidePeriod).toEqual([]);
   });
 
-  it('skips the priced query when no product was ordered', async () => {
+  it('lists nothing when no product was ordered', async () => {
     const { tx, statements } = answering([{ rows: [] }, { rows: [] }]);
     const report = await readOrderReport(tx, 'tenant-1', period, undefined, now);
     expect(statements).toHaveLength(2);

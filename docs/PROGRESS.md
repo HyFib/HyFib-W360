@@ -23,30 +23,45 @@ catalog, but totals per day or per product took an export and a spreadsheet. Thi
 - **Money:** sums as numeric in SQL, carried as `bigint` (`exactMinor`), formatted from decimal
   text (`minorToMajorText`, `formatOrderTotal`), so nothing passes through a float.
 - **Access:** `commerce.read` over the order list's visibility (`orderVisibility`); no customer data,
-  so no contacts permission and no audit; the permission matrix is unchanged. Three queries bounded
-  by the period on the existing `(tenant_id, received_at)` index and the items' `(tenant_id,
-order_id, position)` key, so no migration (0322 unused).
+  so no contacts permission and no audit; the permission matrix is unchanged. Two statements, both
+  selecting orders by the period (the existing `(tenant_id, received_at)` index covers it; the
+  items are read once, by order id), so no migration (0322 unused). No query plan was examined.
 - **Docs:** ADR-409, ARCHITECTURE §6 commerce, SECURITY (Phase 4 commerce rules), THREAT-MODEL
   T358, BACKLOG P4-06a (order reports built; ADR-235's "Not built" line left as history), feature
   matrix W-113 evidence. No CSV of the totals and no API (not built, in the ADR).
+- **Review fixes (before merge):** the threat model and matrix no longer say the integration tests
+  caught the two service-level regressions (they have not run); index use reworded to what is
+  known, and the product figures now come from one CTE over the period's visible items, names
+  chosen with `distinct on` for the listed products only; captions and row headers on the three
+  tables; a day the database dates outside the period is left out (as Reports do) and logged by the
+  page, with a RUNBOOKS §10H entry on time zone data skew; the day column described as WhatsApp's
+  time and the name as the latest order's that had one; a line without a currency counts as
+  unpriced, so priced and unpriced add up. New integration cases: product names, the priced
+  subtotals' visibility, a daylight-saving change.
 
 ### Tests
 
-- Unit (`commerce/order-report.test.ts`, 13 tests): aggregation into every day of the period, per
+- Unit (`commerce/order-report.test.ts`, 15 tests): aggregation into every day of the period, per
   status and currency, orders without a total and unreadable items apart, rows outside the period
-  or without a currency refused; exact major-unit text and display beyond 2^53 minor units (INR,
+  left out of every figure and returned to log, a subtotal without a currency refused; exact major-unit text and display beyond 2^53 minor units (INR,
   USD, JPY, BHD); period bounds at Kolkata's midnight and the 92-day and "after today" refusals;
-  every statement checked for the company, the period's bounds, the time zone, the visibility
-  condition, the currency grouping and the numeric product. Deliberate regressions: 21 of 21 in
+  both statements checked for the company, the period's bounds, the time zone, the visibility
+  condition, the currency grouping, the numeric product, the single read of the items, the name
+  rule and the complementary priced and unpriced conditions. Deliberate regressions: 26 of 26 in
   `order-report.ts` caught; 2 in the service (visibility not passed, period in UTC) survive the unit
-  tests and are what the integration tests check.
+  tests, and the integration tests (CI only) are written to catch them. The page's log line is not
+  tested.
 - Integration (CI only, `commerce.test.ts`, "order report (ADR-409)"): exact totals across
   Kolkata's day boundaries (23:59:59 and midnight, before and after the period) and again in UTC,
   INR and USD, an unreadable item and an unreadable price, mixed currencies, product names and an
-  unknown product; an agent sees only their own and unassigned conversations' orders, a marketer
-  none, another company's orders never count; an analyst is refused; period refusals.
+  unknown product; a product renamed between orders, with a newer order without a name and one
+  after the period, named "New chai"; New York's daylight-saving change on 1 November 2026 (orders
+  either side of both local midnights, and the 25-hour day's bounds); an agent sees only their own
+  and unassigned conversations' orders, including in a listed product's priced subtotals, a
+  marketer none, another company's orders never count; an analyst is refused; period refusals.
 - E2E (CI only, `commerce.spec.ts`): after the stand-in's order is paid and fulfilled, the order
-  report shows it under Fulfilled with ₹320.50 and its products with exact subtotals.
+  report shows it under Fulfilled with ₹320.50 and its products with exact subtotals (rows found by
+  their row headers).
 
 ### Test commands and results (local, 2026-10-21)
 
@@ -54,9 +69,10 @@ order_id, position)` key, so no migration (0322 unused).
 | ------------------------------------------------------ | ----------------------------------------------------------------------------------- |
 | `eslint . --max-warnings=0`, prettier on changed files | clean                                                                               |
 | `pnpm typecheck`                                       | clean                                                                               |
-| `pnpm test` (unit)                                     | 2,039 of 2,039 passed (182 files)                                                   |
+| `pnpm test` (unit)                                     | 2,041 of 2,041 passed (182 files)                                                   |
 | `pnpm build`                                           | passed                                                                              |
-| deliberate regressions                                 | 21 of 21 caught in `order-report.ts`; 2 service-level left to the integration tests |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`    | clean                                                                               |
+| deliberate regressions                                 | 26 of 26 caught in `order-report.ts`; 2 service-level left to the integration tests |
 | `pnpm test:integration`, `pnpm test:e2e`               | not run here: no local PostgreSQL or browser; CI runs them                          |
 
 ## 2026-10-21 — An enrolment's contacts listed with their outcomes (P4-01, ADR-408)

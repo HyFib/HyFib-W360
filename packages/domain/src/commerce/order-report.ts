@@ -7,9 +7,10 @@ import type { ReportPeriod } from '../reports/period';
  * time zone, per day and status, their subtotals per currency, and the items by product. Amounts
  * are summed in SQL as numeric over the bigint minor units and carried as `bigint` here, so no
  * total ever passes through a float. Totals carry no customer data. The caller passes the order
- * list's visibility (the inbox's, ADR-235) and runs the queries in one repeatable-read, read-only
- * transaction, as Reports do (ADR-026); both are bounded by the period on the
- * `(tenant_id, received_at)` order index and reach items through `(tenant_id, order_id, position)`.
+ * list's visibility (the inbox's, ADR-235) and runs the two statements in one repeatable-read,
+ * read-only transaction, as Reports do (ADR-026). Both select orders by the period on the order
+ * list's `(tenant_id, received_at)` index; the products statement reads the period's visible items
+ * once, by order id, and derives every product figure from that one set.
  */
 
 /** Products a report lists, most ordered first; the rest are counted, not listed. */
@@ -66,6 +67,12 @@ export interface OrderReport {
   products: OrderReportProduct[];
   /** Distinct products ordered in the period, listed or not. */
   productCount: number;
+  /**
+   * Groups the database dated outside the period's days, left out of every figure as Reports leave
+   * them out. Only a disagreement between PostgreSQL's time zone data and the runtime's (ICU) can
+   * produce one; the page logs them (RUNBOOKS §10H).
+   */
+  outsidePeriod: { day: string; orders: number }[];
 }
 
 /** One row of the orders query: the period's orders grouped by day, status and currency. */
@@ -144,13 +151,19 @@ function isOrderStatus(status: string): status is OrderStatus {
 
 /**
  * Folds the orders query's rows into every day of the period (days without orders included), the
- * period's totals and the totals by status. A row for a day outside the period, an unknown status
- * or a subtotal without a currency is a bug, so it throws instead of being dropped.
+ * period's totals and the totals by status. A row dated outside the period's days is left out of
+ * every figure, as Reports leave such rows out, and returned in `outsidePeriod` so the caller can
+ * log it. An unknown status or a subtotal without a currency is a bug, so it throws.
  */
 export function summariseOrderGroups(
   rows: OrderGroupRow[],
   days: string[],
-): { totals: OrderReportCounts; days: OrderReportDay[]; statuses: OrderReportStatus[] } {
+): {
+  totals: OrderReportCounts;
+  days: OrderReportDay[];
+  statuses: OrderReportStatus[];
+  outsidePeriod: { day: string; orders: number }[];
+} {
   const byDay = new Map(days.map((day) => [day, { day, ...emptyCounts() }]));
   const totals = emptyCounts();
   const statuses = new Map<OrderStatus, OrderReportStatus>(
@@ -159,10 +172,14 @@ export function summariseOrderGroups(
       { status, orders: 0, subtotals: [], withoutSubtotal: 0 },
     ]),
   );
+  const outside = new Map<string, number>();
   for (const row of rows) {
-    const day = byDay.get(row.day);
-    if (!day) throw new Error(`Order group outside the report's period: ${row.day}`);
     if (!isOrderStatus(row.status)) throw new Error(`Unknown order status: ${row.status}`);
+    const day = byDay.get(row.day);
+    if (!day) {
+      outside.set(row.day, (outside.get(row.day) ?? 0) + row.orders);
+      continue;
+    }
     addGroup(day, row, row.status);
     addGroup(totals, row, row.status);
     const status = statuses.get(row.status) as OrderReportStatus;
@@ -170,7 +187,12 @@ export function summariseOrderGroups(
     status.withoutSubtotal += row.orders - row.withSubtotal;
     addKnownSubtotal(status.subtotals, row);
   }
-  return { totals, days: [...byDay.values()], statuses: [...statuses.values()] };
+  return {
+    totals,
+    days: [...byDay.values()],
+    statuses: [...statuses.values()],
+    outsidePeriod: [...outside].map(([day, orders]) => ({ day, orders })),
+  };
 }
 
 /** Minor units as exact text in the currency's major unit ("2500.50"; "120" for JPY). */
@@ -197,6 +219,11 @@ export function formatOrderTotal(minor: bigint, currency: string, locale = 'en-I
 }
 
 const ts = (d: Date) => sql`${d.toISOString()}::timestamptz`;
+
+/** A line whose price HyFib read, in a currency: counted in the product's subtotal. */
+export const PRICED_LINE = sql.raw('unit_price_minor is not null and currency is not null');
+/** Its exact complement: the line's quantity is shown without a price. */
+export const UNPRICED_LINE = sql.raw('unit_price_minor is null or currency is null');
 
 /**
  * Reads the report's numbers for `period`. `visibility` is the order list's condition over
@@ -250,6 +277,9 @@ export async function readOrderReport(
     period.days,
   );
 
+  // The period's visible items, read once (a CTE referenced several times is materialised), and
+  // every product figure derived from them: totals, names and priced subtotals for the listed
+  // products only. Priced and unpriced lines are exact complements, so they add up to the quantity.
   const products = await tx.execute<{
     retailer_id: string;
     name: string | null;
@@ -257,57 +287,62 @@ export async function readOrderReport(
     orders: number;
     unpriced_quantity: string;
     product_count: number;
+    priced: { currency: string; lines: number; subtotal: string }[];
   }>(sql`
-    select i.retailer_id,
-           (array_agg(i.name order by o.received_at desc, o.id desc)
-              filter (where i.name is not null))[1] as name,
-           sum(i.quantity)::text as quantity,
-           count(distinct o.id)::int as orders,
-           coalesce(sum(i.quantity) filter (where i.unit_price_minor is null), 0)::text
-             as unpriced_quantity,
-           (count(*) over ())::int as product_count
-      from app.commerce_order_items i
-      join app.commerce_orders o on o.tenant_id = i.tenant_id and o.id = i.order_id
-      join app.conversations
-        on app.conversations.tenant_id = o.tenant_id and app.conversations.id = o.conversation_id
-     where i.tenant_id = ${tenantId} and ${inPeriod} ${visible}
-     group by i.retailer_id
-     order by sum(i.quantity) desc, i.retailer_id
-     limit ${ORDER_REPORT_PRODUCT_LIMIT}`);
-  const listed = products.rows.map((r) => r.retailer_id);
-  const priced = listed.length
-    ? await tx.execute<{ retailer_id: string; currency: string; lines: number; subtotal: string }>(
-        sql`
-    select i.retailer_id, i.currency, count(*)::int as lines,
-           sum(i.quantity::numeric * i.unit_price_minor)::text as subtotal
-      from app.commerce_order_items i
-      join app.commerce_orders o on o.tenant_id = i.tenant_id and o.id = i.order_id
-      join app.conversations
-        on app.conversations.tenant_id = o.tenant_id and app.conversations.id = o.conversation_id
-     where i.tenant_id = ${tenantId} and ${inPeriod} ${visible}
-       and i.unit_price_minor is not null and i.currency is not null
-       and i.retailer_id = any(${sql.param(listed)}::text[])
-     group by 1, 2`,
-      )
-    : { rows: [] };
-  const subtotals = new Map<string, CurrencyTotal[]>();
-  for (const r of priced.rows) {
-    const lines = subtotals.get(r.retailer_id) ?? [];
-    addCurrencyTotal(lines, r.currency, Number(r.lines), exactMinor(r.subtotal));
-    subtotals.set(r.retailer_id, lines);
-  }
+    with lines as (
+      select i.retailer_id, i.name, i.quantity, i.unit_price_minor, i.currency,
+             o.id as order_id, o.received_at
+        from app.commerce_orders o
+        join app.conversations
+          on app.conversations.tenant_id = o.tenant_id and app.conversations.id = o.conversation_id
+        join app.commerce_order_items i on i.tenant_id = o.tenant_id and i.order_id = o.id
+       where i.tenant_id = ${tenantId} and ${inPeriod} ${visible}
+    ), listed as (
+      select retailer_id, sum(quantity) as quantity, count(distinct order_id)::int as orders,
+             coalesce(sum(quantity) filter (where ${UNPRICED_LINE}), 0) as unpriced_quantity,
+             (count(*) over ())::int as product_count
+        from lines
+       group by retailer_id
+       order by sum(quantity) desc, retailer_id
+       limit ${ORDER_REPORT_PRODUCT_LIMIT}
+    ), names as (
+      select distinct on (l.retailer_id) l.retailer_id, l.name
+        from lines l join listed p on p.retailer_id = l.retailer_id
+       where l.name is not null
+       order by l.retailer_id, l.received_at desc, l.order_id desc
+    ), priced as (
+      select l.retailer_id, l.currency, count(*)::int as lines,
+             sum(l.quantity::numeric * l.unit_price_minor)::text as subtotal
+        from lines l join listed p on p.retailer_id = l.retailer_id
+       where ${PRICED_LINE}
+       group by 1, 2
+    )
+    select p.retailer_id, n.name, p.quantity::text as quantity, p.orders,
+           p.unpriced_quantity::text as unpriced_quantity, p.product_count,
+           coalesce((select json_agg(json_build_object('currency', c.currency, 'lines', c.lines,
+                                                       'subtotal', c.subtotal) order by c.currency)
+                       from priced c where c.retailer_id = p.retailer_id), '[]'::json) as priced
+      from listed p
+      left join names n on n.retailer_id = p.retailer_id
+     order by p.quantity desc, p.retailer_id`);
   return {
     period,
     generatedAt: now,
     ...summary,
-    products: products.rows.map((r) => ({
-      retailerId: r.retailer_id,
-      name: r.name,
-      quantity: Number(r.quantity),
-      orders: Number(r.orders),
-      subtotals: subtotals.get(r.retailer_id) ?? [],
-      unpricedQuantity: Number(r.unpriced_quantity),
-    })),
+    products: products.rows.map((r) => {
+      const subtotals: CurrencyTotal[] = [];
+      for (const c of r.priced) {
+        addCurrencyTotal(subtotals, c.currency, Number(c.lines), exactMinor(c.subtotal));
+      }
+      return {
+        retailerId: r.retailer_id,
+        name: r.name,
+        quantity: Number(r.quantity),
+        orders: Number(r.orders),
+        subtotals,
+        unpricedQuantity: Number(r.unpriced_quantity),
+      };
+    }),
     productCount: Number(products.rows[0]?.product_count ?? 0),
   };
 }
