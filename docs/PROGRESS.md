@@ -272,6 +272,16 @@ started only from customer messages, store events, members' tests and the public
 - **Not built:** enrolling through the public API, scheduling an enrolment or a rate of its own,
   pacing shared across enrolments and campaigns of one number, stopping an enrolment's runs at
   once, choosing contacts one by one.
+- **CI's first run (PR #104, 2026-10-21):** 6 of `automation-enrollments.test.ts`'s integration
+  tests failed on PostgreSQL 17 and 18; every other file passed. One was a defect: the enrolment
+  page's "No progress since" (`stalledSince`) came back as the driver's text, not a date, and is
+  now mapped as its column is. The rest were the tests':
+  - `drain` ran each next batch at once, which the pacing leaves not yet due; it now makes each
+    batch due first, as its job's wait would (the pacing has tests of its own);
+  - an exact batch result left out `nextBatchAt`;
+  - two audit queries ordered by a `created_at` the table does not have (it is `occurred_at`);
+  - the skewed-clock test measured the next batch from a later `now()` instead of the batch's own
+    time.
 
 ### Test commands and results (local, 2026-10-16)
 

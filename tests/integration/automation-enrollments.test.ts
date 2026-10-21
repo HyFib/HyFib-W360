@@ -141,10 +141,22 @@ async function enrol(
   });
 }
 
-/** Runs the enrolment's batches the way the worker does, until it ends. */
+/**
+ * Makes a running enrolment's paced next batch due now, as the wait for its job's start leaves it
+ * (the pacing itself is tested on its own below).
+ */
+const dueNow = (id: string) =>
+  fx.query(
+    `UPDATE app.automation_enrollments SET next_batch_at = now()
+      WHERE id = $1 AND status = 'running' AND next_batch_at > now()`,
+    [id],
+  );
+
+/** Runs the enrolment's batches the way the worker does, each once it is due, until it ends. */
 async function drain(c: Company, enrollmentId: string, jobs: JobQueue = fx.jobs()) {
   const outcomes: string[] = [];
   for (let i = 0; i < 300; i += 1) {
+    await dueNow(enrollmentId);
     const result = await processEnrollmentBatch(
       enrollmentDeps(jobs),
       authorizedTenantScope(c.tenant.id, c.owner.id),
@@ -358,7 +370,7 @@ describe('enrolling contacts in an automation (ADR-401)', () => {
       metadata: Record<string, unknown>;
     }>(
       `SELECT action, actor_type, metadata FROM app.audit_events
-        WHERE tenant_id = $1 AND subject_id = $2 ORDER BY created_at`,
+        WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
       [c.tenant.id, started.id],
     );
     expect(audit.map((a) => [a.action, a.actor_type])).toEqual([
@@ -614,9 +626,15 @@ describe('enrolling contacts in an automation (ADR-401)', () => {
       authorizedTenantScope(c.tenant.id, c.owner.id),
       started.id,
     );
-    expect(first).toEqual({ outcome: 'batch', started: 50, refused: 0 });
-    // Two jobs for the next batch at once (a duplicate signal): the row lock makes them take turns,
-    // and the second finds nothing left.
+    expect(first).toEqual({
+      outcome: 'batch',
+      started: 50,
+      refused: 0,
+      nextBatchAt: expect.any(Date),
+    });
+    // Two jobs for the next batch at once, once it is due (a duplicate signal): the row lock makes
+    // them take turns, and the second finds nothing left.
+    await dueNow(started.id);
     const both = await Promise.all(
       [0, 1].map(() =>
         processEnrollmentBatch(
@@ -692,7 +710,7 @@ describe('enrolling contacts in an automation (ADR-401)', () => {
       code: 'conflict',
     });
     const audit = await fx.query<{ action: string; metadata: Record<string, unknown> }>(
-      `SELECT action, metadata FROM app.audit_events WHERE subject_id = $1 ORDER BY created_at`,
+      `SELECT action, metadata FROM app.audit_events WHERE subject_id = $1 ORDER BY occurred_at, id`,
       [started.id],
     );
     expect(audit.map((a) => a.action)).toEqual([
@@ -1162,8 +1180,9 @@ describe('enrolments after review: the sweep, pacing, consent, the job’s autho
       outcome: 'batch',
       started: 50,
     });
+    // From the batch's own database time (its update's `updated_at`), not the worker's.
     const [row] = await fx.query<{ seconds: number }>(
-      `SELECT extract(epoch FROM next_batch_at - now())::float AS seconds
+      `SELECT extract(epoch FROM next_batch_at - updated_at)::float AS seconds
          FROM app.automation_enrollments WHERE id = $1`,
       [started.id],
     );

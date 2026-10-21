@@ -880,8 +880,13 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
             r.e.status === 'running' &&
             ctx.tenant.status === 'active' &&
             (r.e.resignalCount > 0 || enrollmentStalled(r.e.nextBatchAt, await databaseNow(tx)));
+          // Mapped as the column is: the driver gives a computed timestamp as text.
           const [lastProgress] = await tx
-            .select({ at: sql<Date | null>`max(${automationEnrollmentContacts.processedAt})` })
+            .select({
+              at: sql`max(${automationEnrollmentContacts.processedAt})`.mapWith(
+                automationEnrollmentContacts.processedAt,
+              ),
+            })
             .from(automationEnrollmentContacts)
             .where(
               and(
