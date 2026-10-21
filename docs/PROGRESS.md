@@ -124,8 +124,9 @@ started only from customer messages, store events, members' tests and the public
     authorisation (authorised, deferred while suspended, another kind refused, `actor_not_member`
     and its clean-up) and `contact_gone` through `app.merge_contacts` (with `no_number`);
     `marketing_not_allowed` cannot be reached with today's roles, so it has no test; **L4:** a
-    partial index `automation_runs (tenant_id, enrollment_id)`, with a test that the foreign key's
-    generic plan uses it; **L5:** the enrolment takes `contactFilterSchema`.
+    partial index `automation_runs (tenant_id, enrollment_id)`, built concurrently by migration 0314
+    (as 0053; not inside 0311, which holds the runs table's exclusive lock), with a test that the
+    foreign key's generic plan uses it; **L5:** the enrolment takes `contactFilterSchema`.
   - Nits: the inputs' refusal is caught only as `validation_failed`, the counts come from
     `RETURNING`, the browser's requests clear `busy` on failure, the migration's comment is fixed.
   - Mutation checks: 33 deliberate regressions (the 23 above, the pacing delay, the stall bound,
@@ -142,7 +143,7 @@ started only from customer messages, store events, members' tests and the public
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
 | `pnpm test` (unit)                                 | 177 files, 1,921 tests passed (after the review fixes)          |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
-| Migrations 0311 and 0312 parsed with pglast        | 29 and 2 statements (not applied to a database)                 |
+| Migrations 0311, 0312 and 0314 parsed with pglast  | 28, 2 and 1 statements (not applied to a database)              |
 | `pnpm build`                                       | passed                                                          |
 
 ## 2026-10-16 — A campaign's notice of its number's messaging limit (P3-04, ADR-400)

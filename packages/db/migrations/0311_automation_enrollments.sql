@@ -122,11 +122,8 @@ GRANT UPDATE (outcome, reason, run_id, processed_at) ON app.automation_enrollmen
 -- either. The new check replaces 0052's (validated by 0054) under the same name; rows already there
 -- have no enrolment, so for them it is the check they were validated against. It and the foreign key
 -- (a new column, NULL in every existing row) are added NOT VALID so app.automation_runs is not read
--- under this migration's lock; 0312 validates them without blocking writes. The partial index
--- serves the foreign key's check when an enrolment is deleted (company deletion step 692, after the
--- company's runs at 690): PostgreSQL proves `enrollment_id = $n` implies the index's predicate.
--- Building it reads the table once under the lock this migration already holds; every existing
--- row has no enrolment, so nothing is written to it, and runs are deleted 180 days after they end.
+-- under this migration's lock; 0312 validates them without blocking writes, and 0314 builds the
+-- index the foreign key's check uses, concurrently.
 ALTER TABLE app.automation_runs
   ADD COLUMN enrollment_id uuid,
   DROP CONSTRAINT automation_runs_api_key,
@@ -135,8 +132,6 @@ ALTER TABLE app.automation_runs
     NOT VALID,
   ADD CONSTRAINT automation_runs_enrollment_fk FOREIGN KEY (tenant_id, enrollment_id)
     REFERENCES app.automation_enrollments (tenant_id, id) NOT VALID;
-CREATE INDEX automation_runs_enrollment_idx ON app.automation_runs (tenant_id, enrollment_id)
-  WHERE enrollment_id IS NOT NULL;
 
 -- What started a run stays fixed (0011, 0022, 0028, 0052, 0147), now including the enrolment.
 CREATE OR REPLACE FUNCTION app.guard_automation_run() RETURNS trigger

@@ -16773,7 +16773,7 @@ draft of 251 eligible contacts on `TIER_250`, reviewed as over without a problem
 (`__proto__`, `constructor`) are tested as unknown, the API's `limit` is bounded to 64 characters
 as kept, and the schema test checks the field's types, formats and nullability. All were fixed.
 
-## ADR-401 Members enrol contacts or a segment in an automation (P4-01) (2026-10-16)
+Members enrol contacts or a segment in an automation (P4-01) (2026-10-16)
 
 Context: runs start from customer messages (ADR-034), store events (ADR-050), members' test runs
 (ADR-038) and the public API, one contact per call (ADR-077) or up to 50 (ADR-161). A member who
@@ -16920,11 +16920,11 @@ Decision:
   key, partial index and guard, and the sweep's due list. The check replaces 0052's under its name
   and, with the foreign key, is added `NOT VALID`: the rows already there have no enrolment, so
   for them it is the check 0054 validated. **Migration 0312** validates both without blocking
-  writes, as 0054 did for 0052. The partial index on `(tenant_id, enrollment_id)` serves the
-  foreign key's check when company deletion removes enrolments (step 692; PostgreSQL proves
-  `enrollment_id = $n` implies its predicate, which an integration test checks with the check's
-  generic plan); building it reads the table once under the lock 0311 already holds, writing
-  nothing. A merged contact's outcome keeps its row with no contact
+  writes, as 0054 did for 0052. **Migration 0314** builds a partial index on `(tenant_id,
+enrollment_id)` concurrently (`-- migrate:no-transaction`, as 0053), so runs stay readable and
+  writable while it is built; it serves the foreign key's check when company deletion removes
+  enrolments (step 692; PostgreSQL proves `enrollment_id = $n` implies its predicate, which an
+  integration test checks with the check's generic plan). A merged contact's outcome keeps its row with no contact
   (`ON DELETE SET NULL`), and retention deleting a run clears the outcome's run, so neither the
   merge (ADR-224) nor retention needs a change. Exported with the company (both tables and the
   run's column). One definer function (the due list), granted to the runtime role before its
@@ -16945,7 +16945,9 @@ remaining risk documented); that 0311's check and foreign key were never validat
 DEPLOYMENT note sat inside 0309's, that marketing consent, the job's authorisation and merged
 contacts had no database tests (added; `marketing_not_allowed` cannot be reached with today's
 roles, since every role holding `automations.publish` holds `campaigns.send`, so it stays a guard
-covered by no test), that company deletion probed the runs without an index (added), and that the
+covered by no test), that company deletion probed the runs without an index (added by 0314,
+built concurrently: a first fix built it inside 0311, which would have scanned the runs under
+0311's exclusive lock), and that the
 enrolment repeated the Contacts filter's schema (it now uses it). Smaller fixes: the inputs'
 refusal is caught only as a validation error, the counts come from the rows changed, and the
 browser's requests clear their busy state when they fail.

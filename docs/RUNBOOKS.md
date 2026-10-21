@@ -1601,6 +1601,15 @@ constraints without blocking writes; it fails only if a stored run breaks one, w
 find it with `SELECT id, trigger_type, api_key_id FROM app.automation_runs WHERE (trigger_type =
 'api') <> (api_key_id IS NOT NULL)` before running it again.
 
+**Migration 0311, 0312 or 0314 failed (ADR-401).** 0311 and 0312 each run in one transaction, so a
+failure applies nothing. 0312 validates the run's check `automation_runs_api_key` and foreign key
+`automation_runs_enrollment_fk`; it fails only if a stored run breaks one, which no code writes:
+find it with `SELECT id, trigger_type, api_key_id, enrollment_id FROM app.automation_runs WHERE
+num_nonnulls(api_key_id, enrollment_id) <> CASE WHEN trigger_type = 'api' THEN 1 ELSE 0 END`.
+0314 runs outside a transaction (one `CREATE INDEX CONCURRENTLY`): a failure can leave an INVALID
+index; run `DROP INDEX CONCURRENTLY IF EXISTS app.automation_runs_enrollment_idx;` and run the
+migrations again.
+
 **Migration 0051 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `app.api_keys.allowed_networks` with its check and grants, creates
 `ops.api_key_authenticate(text, inet)` and rebuilds the one-argument lookup on it (dropped and
