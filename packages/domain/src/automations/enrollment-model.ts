@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AppError } from '@w360/core';
 import type { AutomationEnrollmentEndReason } from '@w360/db';
+import { contactFilterSchema } from '../contacts/service';
 import { startRefusalOf, type StartRefusal } from './starts';
 
 /**
@@ -21,20 +22,35 @@ export const ENROLLMENT_LIMITS = {
    * PostgreSQL caches 64 per transaction (ADR-161's reason for 50).
    */
   batch: 50,
+  /**
+   * Minutes a running enrolment's next batch may be overdue before the minute sweep signals it
+   * again (its job lost or out of retries) and its page says it has made no progress.
+   */
+  stallMinutes: 10,
 } as const;
+
+/**
+ * How long after a batch the next one may start: the runs it started, at the number's send rate
+ * (`META_SEND_RATE_PER_SECOND`, the rate campaigns pace by when they have none of their own), so an
+ * enrolment starts runs, and their first messages, no faster than the number sends.
+ */
+export function enrollmentBatchDelayMs(started: number, sendRatePerSecond: number): number {
+  if (started <= 0) return 0;
+  return Math.ceil((started * 1000) / Math.max(1, sendRatePerSecond));
+}
+
+/** Whether a running enrolment's next batch is overdue by more than the stall bound. */
+export function enrollmentStalled(nextBatchAt: Date | null, now: Date): boolean {
+  return (
+    nextBatchAt !== null &&
+    now.getTime() - nextBatchAt.getTime() > ENROLLMENT_LIMITS.stallMinutes * 60_000
+  );
+}
 
 /** Whom an enrolment takes: the contacts the contacts page's filters match, or a saved segment. */
 export const enrollmentAudienceSchema = z.discriminatedUnion('kind', [
-  z.object({
-    kind: z.literal('contacts'),
-    filter: z.object({
-      q: z.string().trim().max(100).optional(),
-      tag: z.string().trim().max(40).optional(),
-      consent: z
-        .enum(['any', 'marketing_opted_in', 'marketing_opted_out', 'marketing_unknown'])
-        .default('any'),
-    }),
-  }),
+  // The Contacts page's own filter schema, so a filter it adds is never silently ignored here.
+  z.object({ kind: z.literal('contacts'), filter: contactFilterSchema }),
   z.object({ kind: z.literal('segment'), segmentId: z.uuid({ error: 'Choose a segment.' }) }),
 ]);
 export type EnrollmentAudience = z.infer<typeof enrollmentAudienceSchema>;

@@ -11,6 +11,8 @@ import {
   ENROLLMENT_LIMITS,
   ENROLLMENT_REFUSAL_LABELS,
   assertEnrollableCount,
+  enrollmentBatchDelayMs,
+  enrollmentStalled,
   enrollmentEndForRefusal,
   enrollmentJobKey,
   runEnrollmentBatch,
@@ -21,7 +23,9 @@ import {
 import {
   createAutomationEnrollmentService,
   endEnrollmentForRemovedMember,
+  findDueEnrollments,
   processEnrollmentBatch,
+  signalDueEnrollments,
 } from './enrollments';
 import { START_REFUSALS, startInputVariables, startRefusalOf, type StartRefusal } from './starts';
 
@@ -53,7 +57,7 @@ const refusalOf = (reason: StartRefusal) =>
 
 describe('enrolment bounds and input (ADR-401)', () => {
   it('takes at most 10,000 contacts, 50 starts per transaction (under PostgreSQL’s 64 cached subtransactions)', () => {
-    expect(ENROLLMENT_LIMITS).toEqual({ contacts: 10_000, batch: 50 });
+    expect(ENROLLMENT_LIMITS).toEqual({ contacts: 10_000, batch: 50, stallMinutes: 10 });
     expect(ENROLLMENT_LIMITS.batch).toBeLessThan(64);
   });
 
@@ -403,6 +407,8 @@ interface Scenario {
   requireMarketingOptIn?: boolean;
   failRunInsert?: boolean;
   cursor?: number;
+  /** How many outcome rows the update finds still pending (default: all). */
+  updatedRows?: number;
 }
 
 function scenarioAnswers(s: Scenario) {
@@ -438,6 +444,13 @@ function scenarioAnswers(s: Scenario) {
         if (runsLeft <= 0) return { rows: [] };
         runsLeft -= 1;
         return { rows: [{ used: 1 }] };
+      }
+      if (step.sql?.includes('update app.automation_enrollment_contacts')) {
+        // RETURNING: the rows still pending (all of them, unless a test says how many).
+        const kinds = (step.params.filter((p) => Array.isArray(p))[1] ?? []) as string[];
+        return {
+          rows: kinds.slice(0, s.updatedRows ?? kinds.length).map((outcome) => ({ outcome })),
+        };
       }
       return { rows: [] };
     }
@@ -583,11 +596,17 @@ function scenarioAnswers(s: Scenario) {
 
 const scope = { kind: 'tenant', tenantId: TENANT, userId: USER } as unknown as TenantScope;
 
-async function batchOf(s: Scenario) {
+async function batchOf(s: Scenario, sendRatePerSecond?: number) {
   const recording = recordingDb(scenarioAnswers(s));
   const jobs = new RecordingJobQueue();
   const result = await processEnrollmentBatch(
-    { db: recording.db, clock, jobs, signer },
+    {
+      db: recording.db,
+      clock,
+      jobs,
+      signer,
+      ...(sendRatePerSecond ? { sendRatePerSecond } : {}),
+    },
     scope,
     ENROLLMENT,
   );
@@ -670,7 +689,12 @@ describe('processEnrollmentBatch (ADR-401)', () => {
   it('handles 50 contacts and queues the next batch after the 50th, signed with the member', async () => {
     const contacts = Array.from({ length: 60 }, (_, i) => ({ n: i + 1 }));
     const { result, jobs, steps } = await batchOf({ contacts, pendingRows: 51 });
-    expect(result).toEqual({ outcome: 'batch', started: 50, refused: 0 });
+    expect(result).toEqual({
+      outcome: 'batch',
+      started: 50,
+      refused: 0,
+      nextBatchAt: new Date(NOW.getTime() + 2_500),
+    });
     const next = jobs.filter((j) => j.queue === QUEUES.automationEnroll.name);
     expect(
       next.map((j) => [
@@ -942,6 +966,7 @@ describe('startEnrollment and stopEnrollment (ADR-401)', () => {
       segmentId: null,
       inputs: { patient: 'Asha' },
       total: 3,
+      nextBatchAt: NOW,
       createdByMembershipId: MEMBER,
       createdByUserId: USER,
     });
@@ -1112,5 +1137,141 @@ describe('startEnrollment and stopEnrollment (ADR-401)', () => {
         )
       ).code,
     ).toBe('forbidden');
+  });
+});
+
+describe('pacing, progress and the sweep (ADR-401 review)', () => {
+  it('spaces batches by the runs they started at the number’s send rate', () => {
+    expect(enrollmentBatchDelayMs(50, 20)).toBe(2_500);
+    expect(enrollmentBatchDelayMs(50, 1)).toBe(50_000);
+    expect(enrollmentBatchDelayMs(3, 20)).toBe(150);
+    expect(enrollmentBatchDelayMs(1, 3)).toBe(334);
+    expect(enrollmentBatchDelayMs(0, 20)).toBe(0);
+    expect(enrollmentBatchDelayMs(10, 0)).toBe(10_000);
+  });
+
+  it('calls an enrolment stalled only when its next batch is more than 10 minutes overdue', () => {
+    const at = (minutesAgo: number) => new Date(NOW.getTime() - minutesAgo * 60_000);
+    expect(enrollmentStalled(at(11), NOW)).toBe(true);
+    expect(enrollmentStalled(at(10), NOW)).toBe(false);
+    expect(enrollmentStalled(at(-5), NOW)).toBe(false);
+    expect(enrollmentStalled(null, NOW)).toBe(false);
+  });
+
+  it('queues the next batch to start after the runs this one started take at the send rate', async () => {
+    const contacts = Array.from({ length: 60 }, (_, i) => ({ n: i + 1 }));
+    const paced = await batchOf({ contacts, pendingRows: 51 }, 10);
+    const next = paced.jobs.find((j) => j.queue === QUEUES.automationEnroll.name);
+    expect(next?.options.startAfter).toEqual(new Date(NOW.getTime() + 5_000));
+    expect(paced.result).toMatchObject({
+      outcome: 'batch',
+      nextBatchAt: new Date(NOW.getTime() + 5_000),
+    });
+    const progress = paced.steps.find(
+      (st) =>
+        st.op === 'update' &&
+        st.table === 'automation_enrollments' &&
+        st.set?.cursorPosition !== undefined,
+    );
+    expect(progress?.set?.nextBatchAt).toEqual(new Date(NOW.getTime() + 5_000));
+    // The configured rate's default when none is given (20 a second).
+    const byDefault = await batchOf({ contacts, pendingRows: 51 });
+    expect(
+      byDefault.jobs.find((j) => j.queue === QUEUES.automationEnroll.name)?.options.startAfter,
+    ).toEqual(new Date(NOW.getTime() + 2_500));
+    // Refused contacts send nothing: a batch that started none queues the next one at once.
+    const refused = await batchOf(
+      { contacts: contacts.map((c) => ({ ...c, suppressed: true })), pendingRows: 51 },
+      10,
+    );
+    const now = refused.jobs.find((j) => j.queue === QUEUES.automationEnroll.name);
+    expect(now?.options.startAfter).toBeUndefined();
+  });
+
+  it('counts the outcomes the update recorded, not the ones it was given', async () => {
+    const { result } = await batchOf({ contacts: [{ n: 1 }, { n: 2 }, { n: 3 }], updatedRows: 1 });
+    expect(result).toMatchObject({ outcome: 'finished', started: 1, refused: 0 });
+  });
+
+  it('clears the next batch’s time when the enrolment ends, and sets it when it starts', async () => {
+    const { steps } = await batchOf({ contacts: [{ n: 1 }] });
+    expect(endOf(steps)).toMatchObject({ status: 'completed', nextBatchAt: null });
+    const recording = recordingDb(startAnswers({ contacts: 3 }));
+    await createAutomationEnrollmentService({
+      db: recording.db,
+      clock,
+      jobs: new RecordingJobQueue(),
+      signer,
+    }).startEnrollment(memberCtx(ENROLLER), {
+      automationId: AUTOMATION,
+      audience: { kind: 'contacts', filter: {} },
+      inputs: { patient: 'Asha' },
+      expectedCount: 3,
+    });
+    const inserted = recording.steps.find(
+      (st) => st.op === 'insert' && st.table === 'automation_enrollments',
+    );
+    expect(inserted?.values?.nextBatchAt).toEqual(NOW);
+  });
+
+  it('signals each overdue enrolment again under its batch’s own key, signed with its member', async () => {
+    const other = '0192a1b2-0000-7000-8000-0000000000e9';
+    const recording = recordingDb((step) =>
+      step.op === 'execute' && step.sql?.includes('ops.automation_enrollments_due')
+        ? {
+            rows: [
+              {
+                tenant_id: TENANT,
+                enrollment_id: ENROLLMENT,
+                actor_user_id: USER,
+                cursor_position: 50,
+              },
+              {
+                tenant_id: TENANT,
+                enrollment_id: other,
+                actor_user_id: 'user-2',
+                cursor_position: 0,
+              },
+            ],
+          }
+        : { rows: [] },
+    );
+    expect(await findDueEnrollments(recording.db, 7)).toEqual([
+      { tenantId: TENANT, enrollmentId: ENROLLMENT, actorUserId: USER, cursorPosition: 50 },
+      { tenantId: TENANT, enrollmentId: other, actorUserId: 'user-2', cursorPosition: 0 },
+    ]);
+    expect(recording.steps[0]?.params).toEqual([7]);
+    const jobs = new RecordingJobQueue();
+    expect(await signalDueEnrollments({ db: recording.db, jobs, signer })).toBe(2);
+    expect(
+      jobs.jobs.map((j) => [
+        j.queue,
+        j.envelope.kind,
+        j.envelope.tenantId,
+        j.envelope.ref,
+        j.envelope.actorUserId,
+        j.options.singletonKey,
+        j.options.startAfter,
+      ]),
+    ).toEqual([
+      [
+        QUEUES.automationEnroll.name,
+        'automation.enroll',
+        TENANT,
+        ENROLLMENT,
+        USER,
+        `${ENROLLMENT}:50`,
+        undefined,
+      ],
+      [
+        QUEUES.automationEnroll.name,
+        'automation.enroll',
+        TENANT,
+        other,
+        'user-2',
+        `${other}:0`,
+        undefined,
+      ],
+    ]);
   });
 });

@@ -28,6 +28,9 @@ CREATE TABLE app.automation_enrollments (
   cancelled_count integer NOT NULL DEFAULT 0 CHECK (cancelled_count >= 0),
   -- The position of the last contact handled: the next batch takes the contacts after it.
   cursor_position integer NOT NULL DEFAULT 0,
+  -- When the next batch is due (its job's start, paced by the number's send rate); NULL once ended.
+  -- The minute sweep signals a running enrolment whose next batch is more than 10 minutes overdue.
+  next_batch_at timestamptz,
   created_by_membership_id uuid NOT NULL,
   created_by_user_id text NOT NULL,
   stopped_by_membership_id uuid,
@@ -56,7 +59,8 @@ CREATE TABLE app.automation_enrollments (
                            'inputs_changed', 'marketing_not_allowed'))),
   CONSTRAINT automation_enrollments_stopped_by CHECK (
     (end_reason = 'stopped_by_member') = (stopped_by_membership_id IS NOT NULL)),
-  CONSTRAINT automation_enrollments_inputs_cleared CHECK (status = 'running' OR inputs = '{}'::jsonb)
+  CONSTRAINT automation_enrollments_inputs_cleared CHECK (status = 'running' OR inputs = '{}'::jsonb),
+  CONSTRAINT automation_enrollments_next_batch CHECK ((status = 'running') = (next_batch_at IS NOT NULL))
 );
 -- At most one running enrolment per automation (ADR-401): a second waits until the first ends.
 CREATE UNIQUE INDEX automation_enrollments_running_uq ON app.automation_enrollments (tenant_id, automation_id)
@@ -70,7 +74,11 @@ SELECT ops.apply_tenant_rls('app.automation_enrollments');
 -- Members insert an enrolment whole; the job and a member's stop change only its progress and end.
 GRANT SELECT, INSERT ON app.automation_enrollments TO w360_app;
 GRANT UPDATE (status, end_reason, started_count, refused_count, cancelled_count, cursor_position,
-  inputs, stopped_by_membership_id, ended_at, updated_at) ON app.automation_enrollments TO w360_app;
+  next_batch_at, inputs, stopped_by_membership_id, ended_at, updated_at)
+  ON app.automation_enrollments TO w360_app;
+-- The sweep's due list reads running enrolments by when their next batch is due.
+CREATE INDEX automation_enrollments_due_idx ON app.automation_enrollments (next_batch_at)
+  WHERE status = 'running';
 
 CREATE TABLE app.automation_enrollment_contacts (
   id uuid PRIMARY KEY,
@@ -114,9 +122,11 @@ GRANT UPDATE (outcome, reason, run_id, processed_at) ON app.automation_enrollmen
 -- either. The new check replaces 0052's (validated by 0054) under the same name; rows already there
 -- have no enrolment, so for them it is the check they were validated against. It and the foreign key
 -- (a new column, NULL in every existing row) are added NOT VALID so app.automation_runs is not read
--- under this migration's lock; a later migration may validate them without blocking writes. No
--- index: the foreign key is checked only when an enrolment is deleted, with its company, after the
--- company's runs (steps 690 and 692 below).
+-- under this migration's lock; 0312 validates them without blocking writes. The partial index
+-- serves the foreign key's check when an enrolment is deleted (company deletion step 692, after the
+-- company's runs at 690): PostgreSQL proves `enrollment_id = $n` implies the index's predicate.
+-- Building it reads the table once under the lock this migration already holds; every existing
+-- row has no enrolment, so nothing is written to it, and runs are deleted 180 days after they end.
 ALTER TABLE app.automation_runs
   ADD COLUMN enrollment_id uuid,
   DROP CONSTRAINT automation_runs_api_key,
@@ -125,6 +135,8 @@ ALTER TABLE app.automation_runs
     NOT VALID,
   ADD CONSTRAINT automation_runs_enrollment_fk FOREIGN KEY (tenant_id, enrollment_id)
     REFERENCES app.automation_enrollments (tenant_id, id) NOT VALID;
+CREATE INDEX automation_runs_enrollment_idx ON app.automation_runs (tenant_id, enrollment_id)
+  WHERE enrollment_id IS NOT NULL;
 
 -- What started a run stays fixed (0011, 0022, 0028, 0052, 0147), now including the enrolment.
 CREATE OR REPLACE FUNCTION app.guard_automation_run() RETURNS trigger
@@ -188,3 +200,27 @@ CREATE POLICY tenant_deletion_read ON app.automation_enrollments FOR SELECT TO w
   USING (tenant_id = (SELECT ops.deleting_tenant_id()));
 CREATE POLICY tenant_deletion_delete ON app.automation_enrollments FOR DELETE TO w360_definer
   USING (tenant_id = (SELECT ops.deleting_tenant_id()));
+
+-- Enrolments whose job was lost or ran out of retries (ADR-401): the minute sweep signals each
+-- running enrolment of an active company whose next batch is more than 10 minutes overdue, with
+-- what a signal needs (ids, the member who signs its job, the position its batch starts after).
+-- Under the enrolment's row lock a batch only starts contacts after the stored position, so a
+-- signal never starts a contact twice. Read through a policy for running rows only.
+CREATE FUNCTION ops.automation_enrollments_due(p_limit integer)
+  RETURNS TABLE (tenant_id uuid, enrollment_id uuid, actor_user_id text, cursor_position integer)
+  LANGUAGE sql STABLE SECURITY DEFINER
+  SET search_path = pg_catalog, pg_temp
+  AS $$
+  SELECT e.tenant_id, e.id, e.created_by_user_id, e.cursor_position
+    FROM app.automation_enrollments e
+    JOIN app.tenants t ON t.id = e.tenant_id AND t.status = 'active'
+   WHERE e.status = 'running' AND e.next_batch_at <= now() - interval '10 minutes'
+   ORDER BY e.next_batch_at
+   LIMIT least(greatest(p_limit, 1), 100)
+$$;
+GRANT SELECT (status, created_by_user_id, cursor_position, next_batch_at)
+  ON app.automation_enrollments TO w360_definer;
+CREATE POLICY enrollment_sweep_read ON app.automation_enrollments FOR SELECT TO w360_definer
+  USING (status = 'running');
+GRANT EXECUTE ON FUNCTION ops.automation_enrollments_due(integer) TO w360_app;
+ALTER FUNCTION ops.automation_enrollments_due(integer) OWNER TO w360_definer;

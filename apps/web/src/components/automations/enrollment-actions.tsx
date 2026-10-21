@@ -8,6 +8,9 @@ import { startEnrollmentAction, stopEnrollmentAction } from '@/app/actions/autom
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 
+/** When the request could not be completed at all. */
+const NOT_SENT = 'The request could not be completed. Check your connection and try again.';
+
 type Audience =
   | { kind: 'contacts'; filter: { q?: string; tag?: string; consent?: string } }
   | { kind: 'segment'; segmentId: string };
@@ -47,14 +50,20 @@ export function EnrollmentForm({
           audience,
           inputs: Object.fromEntries(inputs.map((i) => [i, values[i] ?? ''])),
           expectedCount: count,
-        }).then((r) => {
-          if (!r.ok) {
+        })
+          .then((r) => {
+            if (!r.ok) {
+              setBusy(false);
+              setError(r.message);
+              return;
+            }
+            router.push(`/c/${slug}/automations/${automationId}/enrollments/${r.data.id}`);
+          })
+          .catch(() => {
+            // The request itself failed (network, a server restart): the member may try again.
             setBusy(false);
-            setError(r.message);
-            return;
-          }
-          router.push(`/c/${slug}/automations/${automationId}/enrollments/${r.data.id}`);
-        });
+            setError(NOT_SENT);
+          });
       }}
     >
       <FormError message={error} />
@@ -107,14 +116,19 @@ export function StopEnrollmentButton({
         onConfirm={() => {
           setBusy(true);
           setError(null);
-          void stopEnrollmentAction(slug, enrollmentId).then((r) => {
-            setBusy(false);
-            if (!r.ok) setError(r.message);
-            else
-              setNotice(
-                `Enrolment stopped; ${r.data.cancelled.toLocaleString('en-IN')} contacts were not started.`,
-              );
-          });
+          void stopEnrollmentAction(slug, enrollmentId)
+            .then((r) => {
+              setBusy(false);
+              if (!r.ok) setError(r.message);
+              else
+                setNotice(
+                  `Enrolment stopped; ${r.data.cancelled.toLocaleString('en-IN')} contacts were not started.`,
+                );
+            })
+            .catch(() => {
+              setBusy(false);
+              setError(NOT_SENT);
+            });
         }}
         trigger={
           <ClientButton variant="outline" className="text-destructive" disabled={busy}>

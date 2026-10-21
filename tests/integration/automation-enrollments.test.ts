@@ -5,7 +5,15 @@ import { authorizedTenantScope, contactTags, conversations, sql, type Tx } from 
 import {
   RUN_BUDGETS,
   advanceAutomationRun,
+  authorizeJob,
   contactForPhone,
+  createContactMergeService,
+  createTemplatesService,
+  findDueEnrollments,
+  processTemplateSubmit,
+  signalDueEnrollments,
+  syncTemplates,
+  type TemplateDefinition,
   createAutomationEnrollmentService,
   createAutomationService,
   createConsentService,
@@ -892,12 +900,13 @@ describe('enrolling contacts in an automation (ADR-401)', () => {
     ]);
     const columns = await fx.query<{ c: string; ok: boolean }>(
       `SELECT c, has_column_privilege('w360_app', 'app.automation_enrollments', c, 'UPDATE') AS ok
-         FROM unnest(ARRAY['status', 'cursor_position', 'inputs', 'automation_id', 'source',
+         FROM unnest(ARRAY['status', 'cursor_position', 'next_batch_at', 'inputs', 'automation_id', 'source',
                            'segment_id', 'total', 'created_by_membership_id', 'tenant_id']) c`,
     );
     expect(Object.fromEntries(columns.map((r) => [r.c, r.ok]))).toEqual({
       status: true,
       cursor_position: true,
+      next_batch_at: true,
       inputs: true,
       automation_id: false,
       source: false,
@@ -979,5 +988,373 @@ describe('enrolling contacts in an automation (ADR-401)', () => {
         WHERE conrelid = 'app.automation_runs'::regclass AND conname = 'automation_runs_api_key'`,
     );
     expect(check!.definition).toContain('num_nonnulls(api_key_id, enrollment_id)');
+  });
+});
+
+let templateCounter = 0;
+/** A template created, submitted and approved through the Graph stand-in, then synced. */
+async function approvedTemplate(c: Company, definition: TemplateDefinition) {
+  templateCounter += 1;
+  const name = `enrol_tpl_${templateCounter}_${Date.now().toString(36)}`;
+  const owner = await fx.ctx(c, c.owner);
+  const templateDeps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+  const templates = createTemplatesService(templateDeps);
+  const { id } = await templates.createDraft(owner, {
+    whatsappAccountId: c.whatsappAccountId,
+    name,
+    language: 'en',
+    definition,
+  });
+  await templates.submitTemplate(owner, id);
+  const graphDeps = { ...templateDeps, keyring: fx.keyring, graph: fx.graph };
+  const scope = authorizedTenantScope(c.tenant.id, null);
+  expect(await processTemplateSubmit(graphDeps, scope, id)).toBe('done');
+  const t = fx.standIn.state.templates.get(c.wabaId)?.find((x) => x.name === name);
+  if (!t) throw new Error('template not at the stand-in');
+  t.status = 'APPROVED';
+  await syncTemplates(graphDeps, scope, c.whatsappAccountId);
+  return id;
+}
+
+const festiveSale: TemplateDefinition = {
+  category: 'MARKETING',
+  header: { type: 'none' },
+  body: { text: 'Hello {{1}}, our festive sale starts today.', examples: ['Asha'] },
+  footer: null,
+  buttons: [{ type: 'QUICK_REPLY', text: 'Stop promotions' }],
+};
+
+/** The waiting or running jobs of an enrolment's batch, by its key. */
+const batchJobs = async (key: string) =>
+  fx.query<{ state: string; delayed: boolean }>(
+    `SELECT state, start_after > created_on + interval '2 seconds' AS delayed FROM pgboss.job
+      WHERE name = $1 AND singleton_key = $2 AND state IN ('created', 'retry', 'active')`,
+    [QUEUES.automationEnroll.name, key],
+  );
+
+describe('enrolments after review: the sweep, pacing, consent, the job’s authorisation, merges (ADR-401)', () => {
+  it('paces the next batch by the number’s send rate', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const automationId = await publish(owner, c, 'Paced');
+    await contactsOf(c, 55, 'paced');
+    const started = await enrol(owner, automationId, byTag('paced'), 55);
+    const first = await processEnrollmentBatch(
+      { ...enrollmentDeps(), sendRatePerSecond: 20 },
+      authorizedTenantScope(c.tenant.id, c.owner.id),
+      started.id,
+    );
+    expect(first).toMatchObject({ outcome: 'batch', started: 50 });
+    // 50 runs at 20 a second: the next batch's job may start 2.5 seconds later, not before.
+    expect(await batchJobs(`${started.id}:50`)).toEqual([{ state: 'created', delayed: true }]);
+    const [row] = await fx.query<{ seconds: number }>(
+      `SELECT extract(epoch FROM next_batch_at - updated_at)::float AS seconds
+         FROM app.automation_enrollments WHERE id = $1`,
+      [started.id],
+    );
+    expect(row!.seconds).toBeGreaterThan(2);
+    expect(row!.seconds).toBeLessThan(3);
+  });
+
+  it('signals an enrolment whose next batch is 10 minutes overdue again, and the signal starts nobody twice', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const automationId = await publish(owner, c, 'Stalled');
+    const ids = await contactsOf(c, 60, 'stalled');
+    const started = await enrol(owner, automationId, byTag('stalled'), 60);
+    await processEnrollmentBatch(
+      enrollmentDeps(),
+      authorizedTenantScope(c.tenant.id, c.owner.id),
+      started.id,
+    );
+    // Not due yet: the next batch is paced, not overdue.
+    expect((await findDueEnrollments(fx.dbs.app)).map((d) => d.enrollmentId)).not.toContain(
+      started.id,
+    );
+    // Its job ran out of retries: the next batch is now 11 minutes overdue.
+    await fx.query(
+      `UPDATE pgboss.job SET state = 'failed' WHERE name = $1 AND singleton_key = $2`,
+      [QUEUES.automationEnroll.name, `${started.id}:50`],
+    );
+    await fx.query(
+      `UPDATE app.automation_enrollments SET next_batch_at = now() - interval '11 minutes'
+        WHERE id = $1`,
+      [started.id],
+    );
+    expect((await enrollments().getEnrollment(owner, started.id)).stalledSince).toBeInstanceOf(
+      Date,
+    );
+    expect(await findDueEnrollments(fx.dbs.app)).toContainEqual({
+      tenantId: c.tenant.id,
+      enrollmentId: started.id,
+      actorUserId: c.owner.id,
+      cursorPosition: 50,
+    });
+    // The sweep signals it under its batch's own key; a second sweep collapses into that job.
+    expect(await signalDueEnrollments(enrollmentDeps())).toBeGreaterThanOrEqual(1);
+    await signalDueEnrollments(enrollmentDeps());
+    expect(await batchJobs(`${started.id}:50`)).toEqual([{ state: 'created', delayed: false }]);
+    // The signalled job and two duplicates at once: one batch runs, the others find nothing.
+    const all = await Promise.all(
+      [0, 1, 2].map(() =>
+        processEnrollmentBatch(
+          enrollmentDeps(),
+          authorizedTenantScope(c.tenant.id, c.owner.id),
+          started.id,
+        ),
+      ),
+    );
+    expect(all.map((r) => r.outcome).sort()).toEqual(['ended', 'ended', 'finished']);
+    const runs = await runsOf(started.id);
+    expect(runs).toHaveLength(60);
+    expect(new Set(runs.map((r) => r.contact_id))).toEqual(new Set(ids));
+    expect((await enrollments().getEnrollment(owner, started.id)).stalledSince).toBeNull();
+    expect((await findDueEnrollments(fx.dbs.app)).map((d) => d.enrollmentId)).not.toContain(
+      started.id,
+    );
+    // The due list is a definer function only the runtime role may call, and leaves out the
+    // enrolments of a suspended company.
+    const [grants] = await fx.query<{
+      app: boolean;
+      platform: boolean;
+      pub: boolean;
+      definer: boolean;
+    }>(
+      `SELECT has_function_privilege('w360_app', 'ops.automation_enrollments_due(integer)', 'EXECUTE') AS app,
+              has_function_privilege('w360_platform', 'ops.automation_enrollments_due(integer)', 'EXECUTE') AS platform,
+              has_function_privilege('public', 'ops.automation_enrollments_due(integer)', 'EXECUTE') AS pub,
+              (SELECT prosecdef FROM pg_proc WHERE oid = 'ops.automation_enrollments_due(integer)'::regprocedure) AS definer`,
+    );
+    expect(grants).toEqual({ app: true, platform: false, pub: false, definer: true });
+    await contactsOf(c, 1, 'suspended');
+    const held = await enrol(owner, automationId, byTag('suspended'), 1);
+    await fx.query(
+      `UPDATE app.automation_enrollments SET next_batch_at = now() - interval '11 minutes'
+        WHERE id = $1`,
+      [held.id],
+    );
+    await fx.dbs.adminPool.query(`UPDATE app.tenants SET status = 'suspended' WHERE id = $1`, [
+      c.tenant.id,
+    ]);
+    try {
+      expect((await findDueEnrollments(fx.dbs.app)).map((d) => d.enrollmentId)).not.toContain(
+        held.id,
+      );
+    } finally {
+      await fx.dbs.adminPool.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [
+        c.tenant.id,
+      ]);
+    }
+    expect((await findDueEnrollments(fx.dbs.app)).map((d) => d.enrollmentId)).toContain(held.id);
+    await drain(c, held.id);
+  });
+
+  it('checks marketing consent when each run of a marketing automation starts', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, festiveSale);
+    const svc = automationService();
+    const { id: automationId } = await svc.createAutomation(owner, { name: 'Festive sale' });
+    const saved = await svc.updateAutomation(owner, {
+      id: automationId,
+      expectedVersion: 0,
+      name: 'Festive sale',
+      description: null,
+      channelAccountId: c.channelAccountId,
+      trigger: apiTrigger,
+      graph: {
+        version: 1,
+        start: 'sale',
+        nodes: [
+          {
+            id: 'sale',
+            type: 'send_template',
+            templateId: template,
+            header: [],
+            body: ['{{input.campaign}}'],
+            next: null,
+          },
+        ],
+      },
+    });
+    expect(saved.issues.filter((i) => i.level === 'error')).toEqual([]);
+    await svc.publishAutomation(owner, {
+      id: automationId,
+      expectedVersion: saved.version,
+      note: null,
+    });
+    const [optedIn, unknown, optedOut] = await contactsOf(c, 3, 'promo');
+    const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
+    await consent.recordConsent(owner, {
+      contactId: optedIn!,
+      purpose: 'marketing',
+      action: 'opt_in',
+      note: 'At the counter',
+    });
+    await consent.recordConsent(owner, {
+      contactId: optedOut!,
+      purpose: 'marketing',
+      action: 'opt_out',
+    });
+    const started = await enrol(owner, automationId, byTag('promo'), 3);
+    await drain(c, started.id);
+    const outcomes = await outcomesOf(started.id);
+    const of = (id: string) => outcomes.find((o) => o.contact_id === id);
+    // The company requires a marketing opt-in (the default): only the contact who gave one starts.
+    expect([of(optedIn!)?.outcome, of(unknown!)?.reason, of(optedOut!)?.reason]).toEqual([
+      'started',
+      'no_marketing_opt_in',
+      'opted_out',
+    ]);
+  });
+
+  it('runs the worker’s authorisation of the job: deferred while suspended, ended when its member left', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const automationId = await publish(owner, c, 'Authorised');
+    await contactsOf(c, 2, 'authorised');
+    const adminUser = await createUser(fx.dbs, { name: 'Admin' });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, adminUser.email, ['admin']);
+    await acceptInvitation(fx.dbs, adminUser, token);
+    const started = await enrol(await fx.ctx(c, adminUser), automationId, byTag('authorised'), 2);
+    const [job] = await fx.query<{ data: unknown }>(
+      `SELECT data FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
+      [QUEUES.automationEnroll.name, `${started.id}:0`],
+    );
+    const options = {
+      expectedKind: 'automation.enroll',
+      requireActiveTenant: true,
+      requireActiveActor: true,
+    };
+    const authorised = await authorizeJob(
+      { db: fx.dbs.app, signer: fx.signer },
+      job!.data,
+      options,
+    );
+    expect(authorised).toMatchObject({
+      outcome: 'authorized',
+      envelope: { ref: started.id, actorUserId: adminUser.id },
+    });
+    await fx.dbs.adminPool.query(`UPDATE app.tenants SET status = 'suspended' WHERE id = $1`, [
+      c.tenant.id,
+    ]);
+    try {
+      expect(
+        await authorizeJob({ db: fx.dbs.app, signer: fx.signer }, job!.data, options),
+      ).toMatchObject({
+        outcome: 'deferred',
+      });
+    } finally {
+      await fx.dbs.adminPool.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [
+        c.tenant.id,
+      ]);
+    }
+    expect(await runsOf(started.id)).toHaveLength(0);
+    // Another kind of job, or a tampered one, is refused.
+    expect(
+      await authorizeJob({ db: fx.dbs.app, signer: fx.signer }, job!.data, {
+        ...options,
+        expectedKind: 'automation.run',
+      }),
+    ).toMatchObject({ outcome: 'rejected', reason: 'unexpected_kind' });
+    // The member leaves: the job is refused with a scope for the clean-up, which ends the enrolment.
+    await fx.query(
+      `UPDATE app.memberships SET status = 'removed' WHERE tenant_id = $1 AND user_id = $2`,
+      [c.tenant.id, adminUser.id],
+    );
+    const removed = await authorizeJob({ db: fx.dbs.app, signer: fx.signer }, job!.data, options);
+    expect(removed).toMatchObject({ outcome: 'rejected', reason: 'actor_not_member' });
+    if (removed.outcome !== 'rejected' || !('cleanupScope' in removed))
+      throw new Error('no clean-up');
+    expect(
+      await endEnrollmentForRemovedMember(
+        { db: fx.dbs.app, clock: systemClock },
+        removed.cleanupScope,
+        removed.envelope.ref,
+      ),
+    ).toBe(true);
+    expect(await enrollmentRow(started.id)).toMatchObject({
+      status: 'stopped',
+      end_reason: 'member_removed',
+      cancelled_count: 2,
+      inputs: {},
+    });
+    expect(await runsOf(started.id)).toHaveLength(0);
+  });
+
+  it('refuses a contact merged away after the snapshot as gone, and one without a number', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const automationId = await publish(owner, c, 'Merged');
+    const [kept] = await contactsOf(c, 1, 'kept');
+    const phoneless: string[] = [];
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, c.owner.id), async (tx: Tx) => {
+      for (const name of ['Duplicate', 'No number']) {
+        const id = await contactForPhone(tx, c.tenant.id, {
+          phoneE164: null,
+          displayName: name,
+          source: 'manual',
+        });
+        await tx
+          .insert(contactTags)
+          .values({ id: uuidv7(), tenantId: c.tenant.id, contactId: id, tag: 'merging' });
+        phoneless.push(id);
+      }
+    });
+    const started = await enrol(owner, automationId, byTag('merging'), 2);
+    // The duplicate is merged into the contact with the number: app.merge_contacts deletes it.
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: kept!,
+      mergeContactId: phoneless[0]!,
+    });
+    const before = await fx.query<{ contact_id: string | null }>(
+      `SELECT contact_id FROM app.automation_enrollment_contacts WHERE enrollment_id = $1 ORDER BY position`,
+      [started.id],
+    );
+    expect(before.map((r) => r.contact_id).filter((x) => x === null)).toHaveLength(1);
+    await drain(c, started.id);
+    expect((await outcomesOf(started.id)).map((o) => o.reason).sort()).toEqual([
+      'contact_gone',
+      'no_number',
+    ]);
+    expect(await runsOf(started.id)).toHaveLength(0);
+  });
+
+  it('validates the run’s check and foreign key (0312) and indexes the runs by their enrolment', async () => {
+    const constraints = await fx.query<{ conname: string; validated: boolean }>(
+      `SELECT conname, convalidated AS validated FROM pg_constraint
+        WHERE conrelid = 'app.automation_runs'::regclass
+          AND conname IN ('automation_runs_api_key', 'automation_runs_enrollment_fk') ORDER BY conname`,
+    );
+    expect(constraints).toEqual([
+      { conname: 'automation_runs_api_key', validated: true },
+      { conname: 'automation_runs_enrollment_fk', validated: true },
+    ]);
+    const [index] = await fx.query<{ definition: string }>(
+      `SELECT pg_get_indexdef('app.automation_runs_enrollment_idx'::regclass) AS definition`,
+    );
+    expect(index!.definition).toContain(
+      '(tenant_id, enrollment_id) WHERE (enrollment_id IS NOT NULL)',
+    );
+    // The foreign key's check, as PostgreSQL runs it, can use the partial index.
+    const client = await fx.dbs.adminPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET LOCAL enable_seqscan = off');
+      await client.query(
+        `PREPARE ri_probe(uuid, uuid) AS SELECT 1 FROM ONLY app.automation_runs x
+          WHERE tenant_id = $1 AND enrollment_id = $2 FOR KEY SHARE OF x`,
+      );
+      await client.query(`SET LOCAL plan_cache_mode = force_generic_plan`);
+      const plan = await client.query<{ 'QUERY PLAN': string }>(
+        `EXPLAIN EXECUTE ri_probe('${uuidv7()}', '${uuidv7()}')`,
+      );
+      expect(plan.rows.map((r) => r['QUERY PLAN']).join('\n')).toContain(
+        'automation_runs_enrollment_idx',
+      );
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
   });
 });

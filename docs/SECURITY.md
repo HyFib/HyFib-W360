@@ -402,9 +402,15 @@ Phase 4 rules (automations, P4-01):
   `app.automation_enrollments` and `app.automation_enrollment_contacts` have FORCE row security,
   composite foreign keys to the company's automation, segment, members, contacts and runs, and give
   the app role select and insert, updates of the progress, end and outcome columns only (never who,
-  which automation, whom or the positions), and no delete; w360_definer may only read the key
-  columns and delete the rows of a company being deleted (steps 685 and 692). No function is new or
-  widened, and no permission is new.
+  which automation, whom or the positions), and no delete; w360_definer may read the key columns
+  and delete the rows of a company being deleted (steps 685 and 692), and read the status, member,
+  position and next batch time of running enrolments (a policy for running rows only) for
+  `ops.automation_enrollments_due` (SECURITY DEFINER, pinned search path, executable by the runtime
+  role only, granted before its ownership moved), the minute sweep's list of enrolments whose next
+  batch is more than 10 minutes overdue, in active companies; the company comes from the database,
+  never from a payload, and the signal it sends is the member's signed job, verified as any. The
+  runs' webhook payloads now carry `run.enrollmentId`. No other function is new or widened, and no
+  permission is new.
 - Automations start only in unassigned conversations of an active (not suspended) company, never
   after an opt-out keyword, and every bot message re-checks the channel, the 24-hour window and the
   contact's WhatsApp number when queued (a template step checks its template and the contact's

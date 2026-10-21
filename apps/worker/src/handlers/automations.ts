@@ -8,6 +8,7 @@ import {
   findDueHttpCalls,
   processEnrollmentBatch,
   processHttpCall,
+  signalDueEnrollments,
   signalEnrollment,
   signalAutomationRun,
   signalHttpCall,
@@ -115,7 +116,14 @@ export function automationEnrollHandler(rt: WorkerRuntime) {
       return;
     }
     const result = await processEnrollmentBatch(
-      { db: rt.db, jobs: rt.jobs, signer: rt.signer, clock: rt.clock },
+      {
+        db: rt.db,
+        jobs: rt.jobs,
+        signer: rt.signer,
+        clock: rt.clock,
+        // Batches are paced by the number's send rate, as campaigns are (ADR-401).
+        sendRatePerSecond: rt.sendRate.refillPerSecond,
+      },
       auth.scope,
       auth.envelope.ref,
     );
@@ -182,6 +190,10 @@ export async function sweepAutomationRuns(rt: WorkerRuntime): Promise<{ signalle
   }
   // Queued HTTP calls whose job was lost (tenant ids from the definer sweep query).
   for (const call of await findDueHttpCalls(rt.db)) await signalHttpCall(rt, call);
+  // Members' enrolments whose next batch is more than 10 minutes overdue: a lost job, or one that
+  // ran out of retries (ADR-401). Tenant ids come from the definer due list.
+  const enrollments = await signalDueEnrollments(rt);
+  if (enrollments > 0) rt.logger.info({ enrollments }, 'automation enrolments signalled again');
   const retention = await applyAutomationRetention(rt.db);
   if (retention.cleared + retention.deleted > 0) {
     rt.logger.info(retention, 'automation retention applied');

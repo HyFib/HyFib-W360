@@ -661,7 +661,7 @@ const invalidRunEndStatuses = () =>
   });
 
 const runTriggersField = webhookRunTriggersSchema.describe(
-  'What started the runs whose events the endpoint receives, as `run.trigger` names it (keyword, conversation_started, any_message, store_event, api), only with automation.run_started, automation.run_ended or automation.run_step; the three events are narrowed alike. null receives every run.',
+  'What started the runs whose events the endpoint receives, as `run.trigger` names it (keyword, conversation_started, any_message, store_event, api), only with automation.run_started, automation.run_ended or automation.run_step; the three events are narrowed alike. api takes the runs keys started and the runs members’ enrolments started (run.apiKeyId or run.enrollmentId says which). null receives every run.',
 );
 
 /** What started the runs is chosen only for an endpoint that receives run events (ADR-183). */

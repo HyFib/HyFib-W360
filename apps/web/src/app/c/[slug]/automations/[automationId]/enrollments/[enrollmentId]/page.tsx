@@ -4,6 +4,7 @@ import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
 import { ENROLLMENT_END_REASON_LABELS, can } from '@w360/domain';
 import {
+  Alert,
   Badge,
   Card,
   CardContent,
@@ -96,6 +97,13 @@ export default async function EnrollmentPage({
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4">
+            {enrollment.stalledSince ? (
+              <Alert tone="warning">
+                No progress since {formatDateTime(enrollment.stalledSince.toISOString(), tz)}. HyFib
+                tries the next batch again every few minutes; if this stays, stop the enrolment and
+                tell HyFib support.
+              </Alert>
+            ) : null}
             <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-5">
               {[
                 ['Contacts', enrollment.total],

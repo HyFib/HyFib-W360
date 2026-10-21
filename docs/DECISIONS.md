@@ -16823,8 +16823,19 @@ Decision:
   launcher) and the automation's checks of a start, once per batch (published, active, `api`, its
   number active, the inputs its live version takes), then starts the pending contacts after the
   stored position, **at most 50 per transaction** for ADR-161's reason (each savepoint keeps its
-  transaction id until the commit; PostgreSQL caches 64). It records each outcome, the counts and
-  the new position, and queues the next batch's job, all in the same transaction.
+  transaction id until the commit; PostgreSQL caches 64). It records each outcome (the counts
+  taken from the rows the update changed), the counts and the new position, and queues the next
+  batch's job, all in the same transaction.
+- **Paced by the number's send rate:** the next batch's job starts (`startAfter`, stored as
+  `next_batch_at`) no sooner than the runs this batch started take at `META_SEND_RATE_PER_SECOND`,
+  the rate campaigns pace by when they have no rate of their own (50 runs at the default 20 a second:
+  2.5 seconds; a batch that started none queues the next one at once). Runs, and so their first
+  messages, start no faster than the number sends; campaigns' own `rate_per_minute` has no
+  equivalent here (a later slice could add one). Meta's messaging limit is not paced: it counts
+  unique customers reached outside a service window in a moving 24 hours, per business portfolio
+  and shared by its numbers (ADR-398), so an enrolment whose first step is a template can reach it;
+  Settings → Channels shows the number's limit (ADR-398), as a campaign's page warns of it
+  (ADR-400), and RUNBOOKS says to compare the count with it before enrolling.
 - **The start steps are the API's** (`automations/starts.ts`, moved from `api/automations.ts`):
   `loadStartableAutomation`, `startInputVariables`, `automationSendsMarketing`,
   `activeStartChannel` and `startRunForContact`, each contact in a savepoint of its own: erasure,
@@ -16850,10 +16861,21 @@ Decision:
   `startRunForContact` refuses a conversation that already has an active run, so the enrolment
   never starts a second run for a contact. A suspended company's job is queued again five minutes
   later (no run starts while it is suspended); a job whose member left ends the enrolment
-  (`member_removed`). A job that fails all its retries goes to the dead letters as any (ADR-108);
-  members can stop its enrolment meanwhile, and no sweep signals it again (a definer function would
-  be needed to find enrolments across companies, and the job is queued in the transaction that
-  needs it, so it is never lost before it runs).
+  (`member_removed`).
+- **Lost and failed jobs: the minute sweep signals again, as runs and campaigns are (H-026).** A
+  job that fails all its retries goes to the dead letters (ADR-108), and the enrolment would stay
+  running, refusing every other enrolment of its automation. So the minute sweep reads
+  `ops.automation_enrollments_due` (SECURITY DEFINER, pinned search path, executable by the runtime
+  role only, reading running rows through a policy of their own: ids, the member and the position)
+  for running enrolments of active companies whose next batch is more than 10 minutes overdue, and
+  signals each under its batch's own key: a job still waiting or retrying collapses with it, one
+  that ran out of retries is replaced. The batch starts only contacts after the stored position,
+  under the row lock, so a signal never starts a contact twice (integration test: three jobs at
+  once after a re-signal). The enrolment's page says "No progress since" the last change while it
+  is that overdue. Ending it as failed on a dead letter (ADR-111's stranded work) was not chosen:
+  most failures (a deadlock, a lost connection) succeed when tried again, which a sweep does without
+  anyone; a batch that keeps failing dead-letters again each time, which platform staff see
+  (ADR-091), and a member can stop it.
 - **Who started a run:** `automation_runs.enrollment_id` (migration 0311), as `api_key_id` records a
   key: a check keeps exactly one of the two on a run of an `api` automation and neither on any other
   run, and the run guard keeps it fixed. Runs act for the company, as live runs do (ADR-038): their
@@ -16877,10 +16899,14 @@ Decision:
   (contacts, started, refused, not started, waiting), the refusals by reason, the end and who
   stopped it, and Stop (`ConfirmDialog`). The page re-renders every 15 seconds while it runs.
 - **Webhooks:** a run an enrolment starts is a live run inserted as any, so the capture of 0055 and
-  0241 sends `automation.run_started` and `automation.run_ended` as before, with `trigger: "api"`
-  and `apiKeyId: null`, which tells it from a key's run; an endpoint limited to API keys' runs
-  (`runApiKeyIds`, ADR-319) does not receive it. The payload's descriptions say so; no migration
-  touches the capture.
+  0241 sends `automation.run_started`, `automation.run_ended` and `automation.run_step` as before,
+  with `trigger: "api"`, `apiKeyId: null` and the new `run.enrollmentId` (null for every other run),
+  read from the run when the event is delivered: additive, and it tells receivers which runs one
+  enrolment started. An endpoint filtering `runTriggers: ["api"]` therefore receives members'
+  enrolled runs too (up to 10,000 per enrolment), as the filter's descriptions (`runTriggers` in the
+  API, "API or a member's enrolment" in Settings → Webhooks) and the payload's say; one limited to
+  API keys' runs (`runApiKeyIds`, ADR-319) does not. No migration touches the capture or the
+  filter.
 - **Public API: out of scope.** Members enrol from the web app; keys already start up to 50 runs per
   call (ADR-161), and an integration holding the contacts can page through them. A later slice
   could add `POST /api/v1/automations/{id}/enrollments` (a segment id or contact ids, the inputs,
@@ -16891,16 +16917,35 @@ Decision:
   runtime role's grants (insert and read; updates only of progress, end and outcome columns; no
   delete), the definer role's deletion policies, deletion steps 685 (outcomes, before the runs they
   name) and 692 (enrolments, after the runs that name them), and the run's column, check, foreign
-  key and guard. The check replaces 0052's under its name and, with the foreign key, is added
-  `NOT VALID` so `app.automation_runs` is not read under the migration's lock: the rows already
-  there have no enrolment, so for them it is the check 0054 validated. A later migration may
-  validate both without blocking writes. A merged contact's outcome keeps its row with no contact
+  key, partial index and guard, and the sweep's due list. The check replaces 0052's under its name
+  and, with the foreign key, is added `NOT VALID`: the rows already there have no enrolment, so
+  for them it is the check 0054 validated. **Migration 0312** validates both without blocking
+  writes, as 0054 did for 0052. The partial index on `(tenant_id, enrollment_id)` serves the
+  foreign key's check when company deletion removes enrolments (step 692; PostgreSQL proves
+  `enrollment_id = $n` implies its predicate, which an integration test checks with the check's
+  generic plan); building it reads the table once under the lock 0311 already holds, writing
+  nothing. A merged contact's outcome keeps its row with no contact
   (`ON DELETE SET NULL`), and retention deleting a run clears the outcome's run, so neither the
   merge (ADR-224) nor retention needs a change. Exported with the company (both tables and the
-  run's column). No definer function, no function executable by PUBLIC.
+  run's column). One definer function (the due list), granted to the runtime role before its
+  ownership moves to `w360_definer`; nothing executable by PUBLIC.
 
-Not built: enrolling through the public API; scheduling an enrolment for later or pacing it;
-stopping an enrolment's runs at once; choosing contacts one by one on the Contacts page (it has no
-row selection); enrolling in automations started otherwise; an enrolment's contacts listed with
-their outcomes (the page summarises them by reason); validating 0311's check and foreign key; an
-index on `automation_runs.enrollment_id` (no read needs it: the outcomes name the runs).
+Not built: enrolling through the public API; scheduling an enrolment for later, or a rate of its
+own; stopping an enrolment's runs at once; choosing contacts one by one on the Contacts page (it
+has no row selection); enrolling in automations started otherwise; an enrolment's contacts listed
+with their outcomes (the page summarises them by reason).
+
+Review (before merge): an independent review found no High issue. It found that a job out of
+retries left its enrolment running for ever, refusing every other enrolment of the automation (now
+the minute sweep signals it again, and the page says it has made no progress); that endpoints
+filtering `runTriggers: ["api"]` would receive enrolled runs undocumented (now documented, and
+`run.enrollmentId` tells them apart); that batches were not paced, so 10,000 contacts with a
+template first could leave one number in minutes (now paced by the send rate, the messaging limit's
+remaining risk documented); that 0311's check and foreign key were never validated (0312), that the
+DEPLOYMENT note sat inside 0309's, that marketing consent, the job's authorisation and merged
+contacts had no database tests (added; `marketing_not_allowed` cannot be reached with today's
+roles, since every role holding `automations.publish` holds `campaigns.send`, so it stays a guard
+covered by no test), that company deletion probed the runs without an index (added), and that the
+enrolment repeated the Contacts filter's schema (it now uses it). Smaller fixes: the inputs'
+refusal is caught only as a validation error, the counts come from the rows changed, and the
+browser's requests clear their busy state when they fail.

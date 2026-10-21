@@ -1070,7 +1070,7 @@ export const WEBHOOK_RUN_TRIGGER_LABELS: Record<WebhookRunTrigger, string> = {
   conversation_started: 'New conversation',
   any_message: 'Any message',
   store_event: 'Order messages',
-  api: 'API',
+  api: 'API or a member’s enrolment',
 };
 
 /**

@@ -304,6 +304,8 @@ export const automationEnrollments = appSchema.table('automation_enrollments', {
   refusedCount: integer('refused_count').notNull().default(0),
   cancelledCount: integer('cancelled_count').notNull().default(0),
   cursorPosition: integer('cursor_position').notNull().default(0),
+  /** When the next batch is due (paced by the number's send rate); null once ended. */
+  nextBatchAt: tz('next_batch_at'),
   createdByMembershipId: uuid('created_by_membership_id').notNull(),
   createdByUserId: text('created_by_user_id').notNull(),
   stoppedByMembershipId: uuid('stopped_by_membership_id'),

@@ -1494,7 +1494,7 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.enum(WEBHOOK_RUN_TRIGGERS))
     .nullable()
     .describe(
-      'What started the runs whose events (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.trigger names it; null receives every run.',
+      'What started the runs whose events (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.trigger names it; null receives every run. api takes both the runs API keys started and the runs members’ enrolments started (run.apiKeyId or run.enrollmentId says which); runApiKeyIds narrows to keys’ runs.',
     ),
   runApiKeyIds: z
     .array(z.uuid())

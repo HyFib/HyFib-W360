@@ -1134,6 +1134,7 @@ describe('webhook payload schemas', () => {
       automationName: 'Welcome',
       trigger: 'api',
       apiKeyId: '0192a1b2-0000-7000-8000-000000000006',
+      enrollmentId: null,
       status: 'running',
       endReason: null,
       startedAt: base.createdAt,
@@ -7818,7 +7819,7 @@ describe('run trigger filters (ADR-183)', () => {
       conversation_started: 'New conversation',
       any_message: 'Any message',
       store_event: 'Order messages',
-      api: 'API',
+      api: 'API or a member’s enrolment',
     });
   });
 
@@ -8654,6 +8655,7 @@ describe('the event of an automation run step (ADR-326)', () => {
       'automationName',
       'trigger',
       'apiKeyId',
+      'enrollmentId',
       'startedAt',
     ]);
     // Every kind of node and every outcome a run's log records.
@@ -8671,6 +8673,7 @@ describe('the event of an automation run step (ADR-326)', () => {
           automationName: 'Welcome',
           trigger: 'keyword',
           apiKeyId: null,
+          enrollmentId: null,
           startedAt: startedAt.toISOString(),
         },
         step: { number: 2, nodeType: 'ask_buttons', outcome: 'asked', messageId: message, ...step },
@@ -8733,6 +8736,7 @@ describe('the event of an automation run step (ADR-326)', () => {
           automationName: 'Welcome',
           trigger: 'api',
           apiKeyId: key,
+          enrollmentId: null,
           startedAt: '2026-10-08T08:59:00.000Z',
         },
         step: { number: 3, nodeType: 'send_text', outcome: 'sent', messageId: message },
@@ -8757,6 +8761,18 @@ describe('the event of an automation run step (ADR-326)', () => {
       contact: { id: contact, phone: null, name: null },
     });
     expect(erased.unread()).toBe(0);
+    // A run a member's enrolment started names the enrolment and no key (ADR-401).
+    const enrollment = '0192a1b2-0000-7000-8000-0000000000e7';
+    const enrolled = answering([
+      [step],
+      [{ ...runRow, apiKeyId: null, enrollmentId: enrollment }],
+      [{ phone: '+919845012345', name: 'Asha', erasedAt: null }],
+    ]);
+    const fromEnrolment = await buildWebhookPayload(enrolled.tx, event(id), 'endpoint');
+    expect(fromEnrolment).toMatchObject({
+      data: { run: { trigger: 'api', apiKeyId: null, enrollmentId: enrollment } },
+    });
+    expect(automationRunStepPayloadSchema.safeParse(fromEnrolment).success).toBe(true);
   });
 
   it('sends nothing for a step or a run that is gone, reading nothing for an id that is not one', async () => {

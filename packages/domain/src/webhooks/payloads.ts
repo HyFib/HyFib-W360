@@ -452,13 +452,19 @@ const webhookRunSchema = z.object({
   trigger: z
     .enum(WEBHOOK_RUN_TRIGGERS)
     .describe(
-      'What started it: a keyword, a new conversation, any message, a store’s order event, or a call through the API or a member’s enrolment of the contact (api; apiKeyId tells them apart).',
+      'What started it: a keyword, a new conversation, any message, a store’s order event, or a call through the API or a member’s enrolment of the contact (api; apiKeyId or enrollmentId says which).',
     ),
   apiKeyId: z
     .uuid()
     .nullable()
     .describe(
       'The API key that started it, for a run started through the API; null for every other run, including a run of an automation started through the API that a member’s enrolment started.',
+    ),
+  enrollmentId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The member’s enrolment that started it (trigger api, apiKeyId null); null for every other run. One enrolment starts many runs, one per contact.',
     ),
   status: z
     .enum(AUTOMATION_RUN_STATUSES)
@@ -528,6 +534,7 @@ export const automationRunStepPayloadSchema = envelope(
         automationName: true,
         trigger: true,
         apiKeyId: true,
+        enrollmentId: true,
         startedAt: true,
       })
       .describe('The run the step belongs to, as it is when the event is delivered.'),
@@ -1589,6 +1596,7 @@ async function runOf(tx: Tx, tenantId: string, runId: string | null) {
       automationName: automations.name,
       triggerType: automationRuns.triggerType,
       apiKeyId: automationRuns.apiKeyId,
+      enrollmentId: automationRuns.enrollmentId,
       startedAt: automationRuns.startedAt,
       conversationId: automationRuns.conversationId,
       contactId: automationRuns.contactId,
@@ -2342,6 +2350,7 @@ export async function buildWebhookPayload(
             automationName: run.automationName ?? null,
             trigger: run.triggerType,
             apiKeyId: run.apiKeyId,
+            enrollmentId: run.enrollmentId ?? null,
             status: event.status,
             endReason: ended ? str(event.detail.endReason) : null,
             startedAt: run.startedAt.toISOString(),
@@ -2367,6 +2376,7 @@ export async function buildWebhookPayload(
             automationName: run.automationName ?? null,
             trigger: run.triggerType,
             apiKeyId: run.apiKeyId,
+            enrollmentId: run.enrollmentId ?? null,
             startedAt: run.startedAt.toISOString(),
           },
           step: {

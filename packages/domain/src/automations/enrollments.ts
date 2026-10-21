@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { QUEUES } from '@w360/contracts';
-import { AppError, notFound, uuidv7, type Clock } from '@w360/core';
+import { AppError, isAppError, notFound, uuidv7, type Clock } from '@w360/core';
 import {
   and,
   asc,
@@ -25,6 +25,7 @@ import {
   type Database,
   type SQL,
   type TemplateCategory,
+  systemScope,
   type TenantScope,
   type Tx,
 } from '@w360/db';
@@ -45,8 +46,10 @@ import { triggerSchema } from './graph';
 import {
   ENROLLMENT_LIMITS,
   assertEnrollableCount,
+  enrollmentBatchDelayMs,
   enrollmentEndForRefusal,
   enrollmentJobKey,
+  enrollmentStalled,
   enrollmentPreviewSchema,
   runEnrollmentBatch,
   startEnrollmentSchema,
@@ -76,11 +79,19 @@ import {
  * cancels the contacts not handled yet; runs already started go on.
  */
 
+/** `META_SEND_RATE_PER_SECOND`'s default, for callers that do not give the configured rate. */
+const DEFAULT_SEND_RATE_PER_SECOND = 20;
+
 export interface EnrollmentDeps {
   db: Database;
   clock: Clock;
   jobs: JobQueue;
   signer: JobSigner;
+  /**
+   * The per-number send rate (`META_SEND_RATE_PER_SECOND`) that paces batches; the web tier, which
+   * only queues the first batch, need not give it.
+   */
+  sendRatePerSecond?: number;
 }
 
 /** An automation members can enrol contacts in: published, active, started by a member or the API. */
@@ -122,6 +133,11 @@ export interface EnrollmentDetail extends EnrollmentSummary {
   pending: number;
   /** Refusals by reason, most frequent first. */
   refusals: { reason: string; label: string; count: number }[];
+  /**
+   * When a running enrolment last made progress, if its next batch is more than 10 minutes
+   * overdue (its job lost or out of retries; the minute sweep signals it again); otherwise null.
+   */
+  stalledSince: Date | null;
 }
 
 /** The permissions of a member as their roles give them now, or null when they are not active. */
@@ -191,6 +207,7 @@ async function endEnrollment(
       endReason: end.reason,
       cancelledCount: sql`${automationEnrollments.cancelledCount} + ${cancelled.length}`,
       inputs: {},
+      nextBatchAt: null,
       stoppedByMembershipId: end.stoppedByMembershipId ?? null,
       endedAt: end.now,
     })
@@ -233,7 +250,7 @@ export type EnrollmentBatchOutcome =
   /** It had ended: nothing to do. */
   | { outcome: 'ended' }
   /** A batch was handled and the next one signalled. */
-  | { outcome: 'batch'; started: number; refused: number }
+  | { outcome: 'batch'; started: number; refused: number; nextBatchAt: Date }
   /** The last batch was handled (or the enrolment could not go on). */
   | {
       outcome: 'finished';
@@ -307,8 +324,9 @@ export async function processEnrollmentBatch(
     let variables: Record<string, string>;
     try {
       variables = startInputVariables(automation, enrollment.inputs, 'inputs');
-    } catch {
+    } catch (error) {
       // A version published since takes other inputs than the ones the member gave.
+      if (!isAppError(error) || error.code !== 'validation_failed') throw error;
       return finish('inputs_changed');
     }
     const marketing = await automationSendsMarketing(tx, tenantId, automation);
@@ -365,12 +383,22 @@ export async function processEnrollmentBatch(
 
     const batch = await recordOutcomes(tx, tenantId, result.outcomes, now);
     const last = result.outcomes.at(-1);
+    // Paced: the next batch starts no sooner than the runs this one started take at the number's
+    // send rate (the rate campaigns use when they have none of their own).
+    const nextBatchAt = new Date(
+      now.getTime() +
+        enrollmentBatchDelayMs(
+          batch.started,
+          deps.sendRatePerSecond ?? DEFAULT_SEND_RATE_PER_SECOND,
+        ),
+    );
     await tx
       .update(automationEnrollments)
       .set({
         startedCount: sql`${automationEnrollments.startedCount} + ${batch.started}`,
         refusedCount: sql`${automationEnrollments.refusedCount} + ${batch.refused}`,
         cursorPosition: last ? last.position : enrollment.cursorPosition,
+        nextBatchAt,
       })
       .where(
         and(
@@ -386,8 +414,9 @@ export async function processEnrollmentBatch(
       enrollmentId: enrollment.id,
       actorUserId: enrollment.createdByUserId,
       key: enrollmentJobKey(enrollment.id, last?.position ?? enrollment.cursorPosition),
+      ...(nextBatchAt > now ? { at: nextBatchAt } : {}),
     });
-    return { outcome: 'batch', ...batch };
+    return { outcome: 'batch', ...batch, nextBatchAt };
   });
 }
 
@@ -403,16 +432,18 @@ async function recordOutcomes(
   const kinds = outcomes.map((o) => o.outcome);
   const reasons = outcomes.map((o) => (o.outcome === 'refused' ? o.reason : null));
   const runs = outcomes.map((o) => (o.outcome === 'started' ? o.runId : null));
-  await tx.execute(sql`
+  const updated = await tx.execute<{ outcome: string }>(sql`
     update app.automation_enrollment_contacts c
        set outcome = o.outcome, reason = o.reason, run_id = o.run_id,
            processed_at = ${now.toISOString()}::timestamptz
       from unnest(${sql.param(ids)}::uuid[], ${sql.param(kinds)}::text[],
                   ${sql.param(reasons)}::text[], ${sql.param(runs)}::uuid[])
            as o(id, outcome, reason, run_id)
-     where c.tenant_id = ${tenantId}::uuid and c.id = o.id and c.outcome = 'pending'`);
-  const started = outcomes.filter((o) => o.outcome === 'started').length;
-  return { started, refused: outcomes.length - started };
+     where c.tenant_id = ${tenantId}::uuid and c.id = o.id and c.outcome = 'pending'
+     returning c.outcome`);
+  // Counted from the rows the statement changed, so the counts never exceed the outcomes recorded.
+  const started = updated.rows.filter((r) => r.outcome === 'started').length;
+  return { started, refused: updated.rows.filter((r) => r.outcome === 'refused').length };
 }
 
 /**
@@ -644,6 +675,7 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
             segmentId: data.audience.kind === 'segment' ? data.audience.segmentId : null,
             inputs,
             total: ids.length,
+            nextBatchAt: clock.now(),
             createdByMembershipId: ctx.membership.id,
             createdByUserId: ctx.user.id,
           });
@@ -807,6 +839,10 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
             refusals: summariseRefusals(
               reasons.map((x) => ({ reason: x.reason ?? '', count: x.count })),
             ),
+            stalledSince:
+              r.e.status === 'running' && enrollmentStalled(r.e.nextBatchAt, clock.now())
+                ? r.e.updatedAt
+                : null,
           };
         },
         { accessMode: 'read only' },
@@ -889,4 +925,62 @@ function toSummary(
     createdAt: e.createdAt,
     endedAt: e.endedAt,
   };
+}
+
+/** A running enrolment whose next batch is more than 10 minutes overdue (the minute sweep). */
+export interface DueEnrollment {
+  tenantId: string;
+  enrollmentId: string;
+  actorUserId: string;
+  cursorPosition: number;
+}
+
+/**
+ * Running enrolments of active companies whose next batch is more than 10 minutes overdue, from the
+ * narrow definer function `ops.automation_enrollments_due` (the company comes from the database,
+ * never from a payload).
+ */
+export async function findDueEnrollments(db: Database, limit = 100): Promise<DueEnrollment[]> {
+  const res = await db.run(
+    systemScope,
+    (tx) =>
+      tx.execute<{
+        tenant_id: string;
+        enrollment_id: string;
+        actor_user_id: string;
+        cursor_position: number;
+      }>(
+        sql`select tenant_id, enrollment_id, actor_user_id, cursor_position
+              from ops.automation_enrollments_due(${limit})`,
+      ),
+    { accessMode: 'read only' },
+  );
+  return res.rows.map((r) => ({
+    tenantId: r.tenant_id,
+    enrollmentId: r.enrollment_id,
+    actorUserId: r.actor_user_id,
+    cursorPosition: r.cursor_position,
+  }));
+}
+
+/**
+ * Signals each overdue enrolment again under its batch's own key, so a job still waiting or being
+ * retried collapses with it and one that ran out of retries is replaced. A batch starts only the
+ * contacts after the stored position, under the enrolment's row lock, so a signal never starts a
+ * contact twice.
+ */
+export async function signalDueEnrollments(
+  deps: Pick<EnrollmentDeps, 'db' | 'jobs' | 'signer'>,
+  limit = 100,
+): Promise<number> {
+  const due = await findDueEnrollments(deps.db, limit);
+  for (const e of due) {
+    await signalEnrollment(deps, null, {
+      tenantId: e.tenantId,
+      enrollmentId: e.enrollmentId,
+      actorUserId: e.actorUserId,
+      key: enrollmentJobKey(e.enrollmentId, e.cursorPosition),
+    });
+  }
+  return due.length;
 }

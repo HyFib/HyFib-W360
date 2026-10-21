@@ -79,14 +79,14 @@ started only from customer messages, store events, members' tests and the public
   run pages and lists name the enrolment. Pages re-check permissions; logic stays in the services.
 - **Webhooks:** enrolled runs reach `automation.run_started`/`run_ended` as before, with trigger
   `api` and `apiKeyId: null` (descriptions updated).
-- **Tests:** unit (`automations/enrollments.test.ts`, 28 tests: bounds, the schema, the count
+- **Tests:** unit (`automations/enrollments.test.ts`, 34 tests after the review fixes: bounds, the schema, the count
   check, the inputs, refusal codes, job keys, the refusal summary, the batch logic (50 in order,
   refusals, the plan ending it, other errors thrown), and against a recording database a batch
   (runs naming the enrolment, outcomes, next job and position, the cursor, every refusal, the
   plan's runs, marketing consent, each way it ends, ended and missing enrolments, an unexpected
   error), a start (the snapshot, the audit without inputs, the first job, a segment, permissions,
   inputs, counts, the second running enrolment) and a stop; `api-trigger.test.ts` updated);
-  integration (`tests/integration/automation-enrollments.test.ts`, 10 tests: the snapshot and
+  integration (`tests/integration/automation-enrollments.test.ts`, 16 tests (6 added by the review fixes): the snapshot and
   batches of 50 with the run's records and audit, a segment and the webhook event, each refusal
   with its reason, the plan's runs and a plan without automations, a crash mid-batch and two jobs
   at once without a second run, stop, who may, ends mid-way (paused, demoted member, removed
@@ -104,17 +104,45 @@ started only from customer messages, store events, members' tests and the public
 - **Docs:** ADR-401; ARCHITECTURE (worker, §6E), SECURITY (rules and grants), THREAT-MODEL T353,
   DATA-RETENTION, DEPLOYMENT (migration 0311), RUNBOOKS (§10D), BACKLOG P4-01 and the matrix's
   H-053.
-- **Not built:** enrolling through the public API, scheduling or pacing an enrolment, stopping an
-  enrolment's runs at once, choosing contacts one by one, validating 0311's check and foreign key.
+- **Review fixes (no High finding; second commit):**
+  - **M1, enrolments stuck running after a dead letter:** `next_batch_at` records when the next batch
+    is due; the minute sweep (`signalDueEnrollments`) reads `ops.automation_enrollments_due`
+    (SECURITY DEFINER, pinned search path, runtime role only, a definer policy for running rows) and
+    signals each enrolment more than 10 minutes overdue under its batch's own key; the page says "No
+    progress since …" (`stalledSince`). Integration test: a dead-lettered batch is due, a second
+    sweep collapses into the first signal, three jobs at once start each contact once, a suspended
+    company's enrolment is left out; unit tests of the due list, its keys and the stall bound.
+  - **M2, webhook trigger filters:** run payloads (`run_started`, `run_ended`, `run_step`) carry
+    `run.enrollmentId`; the `runTriggers` descriptions (API and Settings label "API or a member's
+    enrolment"), the payload's and ADR-401 say an `api` filter receives enrolled runs.
+  - **M3, pacing:** the next batch's job starts after `enrollmentBatchDelayMs` (runs started at
+    `META_SEND_RATE_PER_SECOND`, the worker's send rate); the messaging limit's remaining risk is in
+    ADR-401 and RUNBOOKS. Unit tests of the delay and the job's `startAfter`; an integration test
+    of the queued job's delay and `next_batch_at`.
+  - **L1:** migration 0312 validates 0311's check and foreign key; **L2:** the DEPLOYMENT note moved
+    out of 0309's; **L3:** integration tests of marketing consent at run start, the job's
+    authorisation (authorised, deferred while suspended, another kind refused, `actor_not_member`
+    and its clean-up) and `contact_gone` through `app.merge_contacts` (with `no_number`);
+    `marketing_not_allowed` cannot be reached with today's roles, so it has no test; **L4:** a
+    partial index `automation_runs (tenant_id, enrollment_id)`, with a test that the foreign key's
+    generic plan uses it; **L5:** the enrolment takes `contactFilterSchema`.
+  - Nits: the inputs' refusal is caught only as `validation_failed`, the counts come from
+    `RETURNING`, the browser's requests clear `busy` on failure, the migration's comment is fixed.
+  - Mutation checks: 33 deliberate regressions (the 23 above, the pacing delay, the stall bound,
+    the delayed job, the stored, cleared and initial `next_batch_at`, counts not from `RETURNING`,
+    the sweep's key, the run step's `enrollmentId`, and any error read as changed inputs): 32
+    caught; the last cannot be observed, as `startInputVariables` throws only validation errors.
+- **Not built:** enrolling through the public API, scheduling an enrolment or a rate of its own,
+  stopping an enrolment's runs at once, choosing contacts one by one.
 
 ### Test commands and results (local, 2026-10-16)
 
 | Command                                            | Result                                                          |
 | -------------------------------------------------- | --------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
-| `pnpm test` (unit)                                 | 177 files, 1,915 tests passed                                   |
+| `pnpm test` (unit)                                 | 177 files, 1,921 tests passed (after the review fixes)          |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
-| Migration 0311 parsed with pglast                  | 22 statements, 1 PL/pgSQL function (not applied to a database)  |
+| Migrations 0311 and 0312 parsed with pglast        | 29 and 2 statements (not applied to a database)                 |
 | `pnpm build`                                       | passed                                                          |
 
 ## 2026-10-16 — A campaign's notice of its number's messaging limit (P3-04, ADR-400)

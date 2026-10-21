@@ -759,8 +759,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   its code), and records the outcomes, counts and position and queues the next batch's job in the
   same transaction, so a retry or a duplicate job never starts a second run. Runs record their
   enrolment (`automation_runs.enrollment_id`) and act for the company. Stopping cancels the
-  contacts not handled; started runs go on. A suspended company's job is queued again five minutes
-  later; a job whose member left ends the enrolment.
+  contacts not handled; started runs go on. Each next batch's job starts no sooner than the runs
+  the batch started take at the number's send rate (`next_batch_at`), and the minute sweep signals
+  again, through the definer due list `ops.automation_enrollments_due`, a running enrolment whose
+  next batch is more than 10 minutes overdue (a lost job, or one out of retries). A suspended
+  company's job is queued again five minutes later; a job whose member left ends the enrolment.
 - **Not built yet:** templates with media headers in template steps, usage billing. Form steps
   (ADR-248), runs started through the public API (ADR-077), template steps' website buttons whose
   link ends with a value (ADR-229), products steps (ADR-383), steps that set deal fields
