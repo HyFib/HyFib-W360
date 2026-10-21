@@ -287,9 +287,14 @@ verification, app review, Embedded Signup configuration).
   refusals, crash and late results, timeouts, cancellation, sweep, erasure, retention, settings,
   isolation), e2e `web-requests.spec.ts`. **[Form bodies built; their database test runs only in
   CI]** (ADR-236: a step's body as URL-encoded form fields, placeholders URL-encoded, sent as
-  `application/x-www-form-urlencoded`; no migration). **Remaining:** calls against a real company
-  API in an authorized environment (release checklist), response headers or non-JSON bodies as
-  values, retries a company opts into for idempotent requests, OAuth client flows.
+  `application/x-www-form-urlencoded`; no migration). **[Response headers, text bodies and the
+  status as values built; unit tests run locally, the database and browser tests only in CI]**
+  (ADR-406: each saved value comes from a JSON path, a header, the body as text or the status;
+  credential and session headers, a header carrying the step's secret or named like a company
+  secret refused; echoed secrets never saved; stored graphs unchanged; no migration).
+  **Remaining:** calls against a real company API in an authorized environment (release
+  checklist), values from failure responses, retries a company opts into for idempotent requests,
+  OAuth client flows.
 - **P4-03 WhatsApp Flows** — _implemented and locally verified (2026-09-27) against the Graph
   stand-in and signed, encrypted test requests; no live WhatsApp traffic yet_: Flow JSON written as
   text with checks while typing; drafts sent to Meta by the worker, one written-ahead operation at a

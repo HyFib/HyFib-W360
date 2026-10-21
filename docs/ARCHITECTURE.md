@@ -789,7 +789,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   publish, pause, archive and restore, test runs, versions and run pages.
 - **HTTP step** (migrations 0014 and 0015, ADR-042, ADR-043): "Call a web address" calls a company's
   own API (GET, POST, PUT, PATCH, DELETE; a JSON body, or form fields since ADR-236; up to 10
-  headers; values saved from a JSON response by path) and branches on success (2xx) or failure. Only
+  headers; values saved from a successful response: a JSON path, a header, the body as text or the
+  status, ADR-406) and branches on success (2xx) or failure. Only
   domains on the company's list (`http_allowed_domains`) can be called, over https through the
   egress guard (`packages/core/src/egress.ts`: public addresses only, pinned DNS, no redirects, 64
   KiB/256 KiB/10 s). Secrets (`http_secrets`) are encrypted, write-only, referenced as
@@ -799,7 +800,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   a call that may have been received but has no result by the deadline is `unknown` and never
   retried. The minute sweep re-signals queued calls whose job was lost
   (`ops.automation_http_calls_due`). Settings → Web requests manages domains and secrets
-  (`integrations.manage`); run pages list each call (method, host, path, outcome).
+  (`integrations.manage`); run pages list each call (method, host, path, outcome). Saved headers
+  are matched without regard to case (repeated ones joined with ", "), a text body only from a
+  textual UTF-8 content type; headers that carry credentials or sessions, a header the step sends a
+  secret in or one named like a company secret are never saved, and the worker leaves out any value
+  holding a secret the request carried (`savedValuesFrom`, ADR-406).
 - **Enrolments** (`automations/enrollments.ts`, migration 0311, ADR-401): a member with
   `automations.publish` and `contacts.read` enrols the contacts the Contacts page's filters match
   (`contactFilterConditions`) or a saved segment's members (`segmentWhere`), at most 10,000, in an

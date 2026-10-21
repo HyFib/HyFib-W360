@@ -905,6 +905,15 @@ delete it to stop every step that uses it. The audit log shows who created, repl
 secrets and domains (`http.*`). Values are never shown, so a leak points at the receiving server
 (one that echoes request headers, for example) or at the keyring (section 13).
 
+**A web request succeeded but a value was not saved.** Values are saved only from a 2xx response
+(ADR-406). A JSON path finds nothing in a body that is not JSON; body text is saved only from a
+`text/*`, JSON or XML response in UTF-8 (no charset, utf-8 or us-ascii) and not when the body is
+empty; a header the response lacks saves nothing. A header named like a company secret (one added
+after publishing included) or one the step sends a secret in is never saved, and any value holding
+a secret the request carried is left out: the company's server is echoing the request, so treat
+that secret as possibly exposed to whoever can read that server's logs and replace it if in doubt.
+Values are never logged; check the response with the company's own tools.
+
 **Worker restarts and deploys.** Runs are rows, so a restart delays steps but never loses or repeats
 one: queued `automation.run` jobs continue, and runs whose signal was lost are picked up by the sweep
 within about 90 seconds. A test run stops when the member who started it leaves the company ("test

@@ -17611,3 +17611,62 @@ submitted by a web server of the release before could get stuck (now ignored, an
 to use variants after the web rollout); the top-level template fields did not say they are
 variant A's; the audit recorded only A's category, and an unread submission field was removed; and
 0317 took the campaigns' lock before the recipients' (now the reverse). All were fixed.
+
+## ADR-406 HTTP steps save response headers, a text body and the status as values (P4-02) (2026-10-21)
+
+Context: an automation's "Call a web address" step saved values only from a JSON response body, by
+path (ADR-043). Many company systems answer in plain text ("OK 4411"), put what matters in a header
+(a request id, a resource's `Location`, a rate limit) or only say how a call went by its status
+(201 created, 202 accepted). A body that was not JSON saved nothing.
+
+Decision:
+
+- **Where a saved value comes from:** each saved value has a source, `from`: `json` (a path in a
+  JSON body, as before), `header` (a response header by name), `text` (the whole body) or `status`
+  (the status code, as digits). A saved value without `from` is a JSON path: every stored graph,
+  published version, run in progress and request already written ahead (`{path, saveAs}`) means
+  what it meant, and reads back exactly as stored (parsing adds no `from`, so a version's
+  definition hash and an automation's exports are unchanged). The graph's version stays 1, as for
+  `bodyFormat` (ADR-236): the field is optional and its absence keeps the old meaning. A run uses
+  its pinned version's definition, as before.
+- **Only successful responses save values,** as before: a failure branch sees nothing saved, so
+  the status saved is always 2xx (it tells 200 from 201, 202 or 204). Values are clipped to an
+  answer's 1,000 characters without splitting an emoji, kept in the call's `saved_values` and the
+  run's answers as before, and cleared by retention and erasure as before; nothing new is stored.
+- **Headers:** matched by name without regard to case; the name is validated as a header name
+  (letters, digits and -, at most 60). Node joins a header received several times with ", "
+  (keeping only the first for headers that allow one value, such as Content-Type), and the egress
+  client joins any list the same way, so a repeated header is saved as its values in the order
+  received, separated by a comma and a space (RFC 9110, section 5.3). A header the response lacks
+  saves nothing.
+- **Body text:** only when the content type is textual: `text/*`, `application/json`,
+  `application/xml` and the `+json`/`+xml` types, with no charset, `utf-8` or `us-ascii`. It is
+  decoded as UTF-8 (invalid bytes as U+FFFD, a byte order mark dropped, each NUL as U+FFFD as
+  ADR-130 requires), trimmed of outer white space and clipped as answers are. An image, a PDF, an
+  octet stream, another charset, no content type or an empty body saves nothing.
+- **Headers that are never saved:** any whose name contains `cookie`, `auth`, `token`, `secret`,
+  `passw`, `session`, `credential`, `csrf`, `xsrf`, `apikey` or `signature`, or has `key` as a
+  part (Set-Cookie, Authorization, WWW-Authenticate, X-Api-Key, X-Session-Id, X-Functions-Key):
+  refused when the draft is saved ("The Set-Cookie header can carry credentials or a session, so
+  HyFib does not save it."). Two refusals need the company's settings and run with the checks
+  that block publishing: a header the step itself sends a secret in (a server may echo it back) and
+  a header named like a company secret (X-Crm-Ref for `crm_ref`, the name lowercased with - read
+  as _). The worker applies all three again when it saves, with the company's current secret names
+  (a secret added after publishing counts), and leaves out any value, from any source, that holds
+  a secret value the request carried, so an echoing server cannot hand a secret to whoever reads
+  the run's answers (T355).
+- **Editor:** each saved value has "Value N from" (JSON path, Header, Body text, Status code) and
+  the input its source needs: the path, the header's name, or a line saying what is saved. The
+  domain's `withHttpSaveSource` changes a value's source keeping its answer name; the simulator
+  names each value's source ("ref (from the X-Request-Id header)"). Messages are written as the
+  editor's others are. No migration: sources live in the automation's graph.
+- **Run pages, webhooks and the API:** run pages list saved answers by name and calls by method,
+  host, path and outcome; `automation.run_step` events carry no saved values; neither assumed a
+  JSON path, and no field was added to them.
+
+Known limits: a value is saved only from a 2xx response; a secret the server transforms (encodes,
+splits or hashes) before echoing it is not recognised; headers are matched as Node presents them,
+so one Node drops as a duplicate (a second Content-Type) cannot be saved.
+
+Not built: values from failure responses, the body of a non-UTF-8 charset, binary bodies, a part
+of a text body (a pattern or a line), and saving all headers at once.

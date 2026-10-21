@@ -10,6 +10,8 @@ import {
   HTTP_BODY_METHODS,
   HTTP_METHODS,
   HTTP_WAIT_MINUTES,
+  httpSaveSource,
+  withHttpSaveSource,
   PRODUCT_MESSAGE_LIMITS,
   PRODUCT_PICKER_LIMIT,
   type AutomationNode,
@@ -2454,29 +2456,81 @@ function HttpRequestFields({
           Save from the response (up to {AUTOMATION_LIMITS.httpSaves})
         </legend>
         <p className="text-sm text-muted-foreground">
-          Values from a successful JSON response, by path (for example data.order.status). Use them
-          as {'{{answer.<name>}}'}; a value the response lacks stays empty.
+          Values from a successful response: by path in a JSON body (for example data.order.status),
+          a header by name, the whole body as text (text, JSON or XML responses, cut to{' '}
+          {AUTOMATION_LIMITS.answerLength} characters) or the status code. A header sent several
+          times is saved as its values joined by a comma. Cookies and headers that carry
+          credentials, tokens, keys or a session are never saved. Use them as {'{{answer.<name>}}'};
+          a value the response lacks stays empty.
         </p>
         {node.save.map((item, i) => (
           <div
             key={i}
-            className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-[2fr_1fr_auto]"
+            className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-[1fr_2fr_1fr_auto]"
           >
-            <Field id={`${p}-save-${i}-path`} label={`Value ${i + 1} path`}>
+            <Field id={`${p}-save-${i}-from`} label={`Value ${i + 1} from`}>
               {(aria) => (
-                <Input
+                <Select
                   {...aria}
-                  value={item.path}
-                  maxLength={200}
-                  spellCheck={false}
+                  value={httpSaveSource(item)}
                   onChange={(e) =>
                     patch({
-                      save: node.save.map((s, j) => (j === i ? { ...s, path: e.target.value } : s)),
+                      save: node.save.map((s, j) =>
+                        j === i ? withHttpSaveSource(s, e.target.value) : s,
+                      ),
                     })
                   }
-                />
+                >
+                  <option value="json">JSON path</option>
+                  <option value="header">Header</option>
+                  <option value="text">Body text</option>
+                  <option value="status">Status code</option>
+                </Select>
               )}
             </Field>
+            {item.from === 'header' ? (
+              <Field id={`${p}-save-${i}-header`} label={`Value ${i + 1} header`}>
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={item.header}
+                    maxLength={60}
+                    spellCheck={false}
+                    onChange={(e) =>
+                      patch({
+                        save: node.save.map((s, j) =>
+                          j === i ? { ...item, header: e.target.value } : s,
+                        ),
+                      })
+                    }
+                  />
+                )}
+              </Field>
+            ) : item.from === 'text' || item.from === 'status' ? (
+              <p className="self-end text-sm text-muted-foreground">
+                {item.from === 'text'
+                  ? 'The whole body, when the response is text, JSON or XML in UTF-8.'
+                  : 'The response’s status code, for example 200 or 201.'}
+              </p>
+            ) : (
+              <Field id={`${p}-save-${i}-path`} label={`Value ${i + 1} path`}>
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={item.path}
+                    maxLength={200}
+                    spellCheck={false}
+                    onChange={(e) =>
+                      patch({
+                        save: node.save.map((s, j) =>
+                          j === i ? { ...item, path: e.target.value } : s,
+                        ),
+                      })
+                    }
+                  />
+                )}
+              </Field>
+            )}
             <Field id={`${p}-save-${i}-as`} label={`Save value ${i + 1} as`}>
               {(aria) => (
                 <Input

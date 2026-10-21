@@ -1,5 +1,60 @@
 # Progress
 
+## 2026-10-21 — HTTP steps save response headers, a text body and the status (P4-02, ADR-406)
+
+Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI
+only; no call against a real company API.** An automation's "Call a web address" step saved values
+only from a JSON body by path, so a plain-text answer, a header such as a request id or the status
+saved nothing. This closes P4-02's "response headers or non-JSON bodies as values".
+
+### Completed
+
+- **Sources** (`automations/graph.ts`, `automations/http.ts`): each saved value has `from`: `json`
+  (a path, the default and what a value without `from` means), `header` (by name, without regard to
+  case; a repeated header joined with ", " in the order received), `text` (the whole body, only for
+  `text/*`, JSON and XML content types in UTF-8; decoded as UTF-8, NUL as U+FFFD, trimmed, clipped
+  to 1,000 characters) or `status` (as digits). Values are still saved only from 2xx responses.
+- **Compatibility:** stored graphs, published versions, runs in progress and requests already
+  written ahead (`{path, saveAs}`) parse and read back unchanged (no `from` added, so definition
+  hashes and exports are the same); the graph stays version 1, as for ADR-236's `bodyFormat`.
+- **Refused headers:** names containing cookie, auth, token, secret, passw, session, credential,
+  csrf, xsrf, apikey or signature, or with key as a part, are refused when the draft is saved; a
+  header the step sends a secret in, or one named like a company secret, is refused by the
+  publish checks. The worker repeats all three with the company's current secret names and leaves
+  out any value holding a secret value the request carried (T355).
+- **Editor:** "Value N from" (JSON path, Header, Body text, Status code) with the input the source
+  needs, inside the editor's hydration-gated fieldset; the simulator names each value's source.
+  Run pages and `automation.run_step` webhooks needed no change (no field added).
+- **Docs:** ADR-406, ARCHITECTURE, RUNBOOKS (a value that was not saved), BACKLOG P4-02,
+  THREAT-MODEL T355, FEATURE-MATRIX W-077.
+
+### Tests
+
+- Unit (`automations/http-save.test.ts`, `outside-json.test.ts`): each source, old-shape
+  compatibility (parsed graph identical to the stored one), refused headers at save, the publish
+  checks (a secret's request header, a secret's name), content types and charsets, UTF-8 decoding,
+  byte order marks, NUL, clipping, repeated headers, a non-JSON body with other sources, runtime
+  refusals, echoed secrets, the editor's source changes and the simulator's labels, and the
+  interpreter carrying sources and saving the worker's values.
+- Integration (`automation-http.test.ts`, CI only): a header, a repeated header, a text body and
+  the status saved from the local target and used by a later message; a cookie and a
+  credential-like name refused at save; a secret's header and a secret's name refused at publish;
+  an echoing server's text left out while the status is saved.
+- E2e (`web-requests.spec.ts`, CI only): a header and the status code chosen in the editor, a
+  refused Set-Cookie with its message, the simulator's labels and the live answer using them.
+- Manual mutation testing: 23/23 deliberate regressions caught by the unit tests (a 24th, a fixed
+  list of credential headers, survived because the name parts already cover it; the list was
+  removed). The worker's loading of secret names is checked only by the integration tests.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                            | Result                                                     |
+| -------------------------------------------------- | ---------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                      |
+| `pnpm test` (unit)                                 | 1,978 of 1,978 passed (180 files)                          |
+| `pnpm build`                                       | passed                                                     |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: no local PostgreSQL or browser; CI runs them |
+
 ## 2026-10-21 — A/B template variants for campaigns (P3-04, ADR-405)
 
 Status: **Implemented (migrations 0317 and 0318); unit tests run locally, integration and e2e tests

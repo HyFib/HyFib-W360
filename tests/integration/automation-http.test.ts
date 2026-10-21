@@ -52,6 +52,17 @@ beforeAll(async () => {
       } else if (req.url === '/down') {
         res.writeHead(503, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: 'maintenance' }));
+      } else if (req.url === '/receipt') {
+        // A plain-text answer with headers to save (ADR-406): one repeated, one a cookie.
+        res.setHeader('x-request-id', 'req-7781');
+        res.setHeader('x-trace', ['first', 'second']);
+        res.setHeader('set-cookie', ['sid=abc; HttpOnly']);
+        res.writeHead(201, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('Receipt R-55 noted.\n');
+      } else if (req.url === '/echo') {
+        // A server that echoes the request back as text, the secret's header included.
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end(`You sent ${String(req.headers.authorization ?? '')}`);
       } else if (req.url === '/hang') {
         // Never answers: the client's deadline ends the exchange.
       } else {
@@ -532,6 +543,137 @@ describe('automation HTTP step', () => {
       [conv],
     );
     expect(contact?.attributes).toEqual({ city: 'x'.repeat(499) });
+  });
+
+  it('saves a header, the body as text and the status for a later step (ADR-406)', async () => {
+    const s = await setup();
+    const graph = orderGraph('/receipt');
+    const receiptGraph = {
+      ...graph,
+      nodes: graph.nodes.map((n) =>
+        n.id === 'call'
+          ? {
+              ...n,
+              save: [
+                { from: 'header', header: 'X-Request-ID', saveAs: 'ref' },
+                { from: 'header', header: 'X-Trace', saveAs: 'trace' },
+                { from: 'text', saveAs: 'note' },
+                { from: 'status', saveAs: 'code' },
+                // A JSON path into a text body finds nothing; the others still save.
+                { path: 'data.status', saveAs: 'status' },
+              ],
+            }
+          : n.id === 'tell'
+            ? {
+                ...n,
+                text: '{{answer.code}} {{answer.ref}} [{{answer.trace}}] {{answer.note}}',
+              }
+            : n,
+      ),
+    };
+    await publish(s.owner, receiptGraph);
+    const { conv, run, call } = await waitingAtCall(s);
+    expect(await processHttpCall(httpDeps(), scopeOf(s), call.id)).toBe('succeeded');
+    const done = await onlyCall(run.id);
+    expect(done).toMatchObject({ state: 'succeeded', status_code: 201 });
+    expect(done.saved_values).toStrictEqual({
+      ref: 'req-7781',
+      trace: 'first, second',
+      note: 'Receipt R-55 noted.',
+      code: '201',
+    });
+    expect(await drive(s.c, conv, run.id)).toBe('ended');
+    expect((await onlyRun(conv)).variables).toStrictEqual({
+      ref: 'req-7781',
+      trace: 'first, second',
+      note: 'Receipt R-55 noted.',
+      code: '201',
+    });
+    expect(await botTexts(conv)).toEqual(['201 req-7781 [first, second] Receipt R-55 noted.']);
+  });
+
+  it('refuses to save a cookie or a secret’s header, and never saves an echoed secret (ADR-406)', async () => {
+    const s = await setup();
+    const svc = automations();
+    const withSave = (path: string, save: unknown[]) => {
+      const graph = orderGraph(path);
+      return {
+        ...graph,
+        nodes: graph.nodes.map((n) => (n.id === 'call' ? { ...n, save } : n)),
+      };
+    };
+    // A cookie is refused when the draft is saved.
+    const name = `Cookies ${randomInt(1e6)}`;
+    const { id } = await svc.createAutomation(s.owner, { name });
+    await expectAppError(
+      svc.updateAutomation(s.owner, {
+        id,
+        expectedVersion: 0,
+        name,
+        description: null,
+        channelAccountId: null,
+        trigger: keyword('order'),
+        graph: withSave('/receipt', [{ from: 'header', header: 'Set-Cookie', saveAs: 'sid' }]),
+      }),
+      'validation_failed',
+      /Set-Cookie header can carry credentials or a session/,
+    );
+    await expectAppError(
+      publish(
+        s.owner,
+        withSave('/receipt', [{ from: 'header', header: 'Shop-Token', saveAs: 'status' }]),
+      ),
+      'validation_failed',
+      /Shop-Token header can carry credentials/,
+    );
+    // A header the step sends its secret in is refused when it is published.
+    const echoes = orderGraph('/receipt', {
+      headers: [{ name: 'X-Shop', value: 'Bearer {{secret.shop_token}}' }],
+    });
+    await expectAppError(
+      publish(s.owner, {
+        ...echoes,
+        nodes: echoes.nodes.map((n) =>
+          n.id === 'call'
+            ? { ...n, save: [{ from: 'header', header: 'X-Shop', saveAs: 'status' }] }
+            : n,
+        ),
+      }),
+      'precondition_failed',
+      /This step sends a secret in the X-Shop header/,
+    );
+
+    // A server echoing the request: the text holding the secret is not saved; the status is.
+    await publish(
+      s.owner,
+      withSave('/echo', [
+        { from: 'text', saveAs: 'status' },
+        { from: 'status', saveAs: 'code' },
+      ]),
+    );
+    const { run, call } = await waitingAtCall(s);
+    expect(await processHttpCall(httpDeps(), scopeOf(s), call.id)).toBe('succeeded');
+    const done = await onlyCall(run.id);
+    expect(done.saved_values).toStrictEqual({ code: '200' });
+    expect(JSON.stringify(done.saved_values)).not.toContain(TOKEN);
+  });
+
+  it('refuses at publish a header named like a company secret (ADR-406)', async () => {
+    const s = await setup();
+    const graph = orderGraph('/receipt');
+    await webRequests().saveSecret(s.owner, { name: 'crm_ref', domain: HOST, value: 'crm-9f' });
+    await expectAppError(
+      publish(s.owner, {
+        ...graph,
+        nodes: graph.nodes.map((n) =>
+          n.id === 'call'
+            ? { ...n, save: [{ from: 'header', header: 'X-Crm-Ref', saveAs: 'status' }] }
+            : n,
+        ),
+      }),
+      'precondition_failed',
+      /X-Crm-Ref header is named like the secret “crm_ref”/,
+    );
   });
 
   it('takes the failure branch on an error status, a removed domain or a missing secret', async () => {
