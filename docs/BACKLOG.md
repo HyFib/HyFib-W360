@@ -289,8 +289,16 @@ verification, app review, Embedded Signup configuration).
   reason of a refusal, the run and when it was handled, 50 per keyset page, filtered by outcome,
   for members with `automations.read` and `contacts.read`, numbers masked as elsewhere and erased
   contacts named as erased; `GET /automations/{id}/enrollments/{enrollmentId}/contacts` gives them
-  by id with `automations.start` and `contacts.read`). **Remaining:** starting runs from
-  campaigns, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox
+  by id with `automations.start` and `contacts.read`). **[Runs started by replies to a campaign
+  built; their database and browser tests run only in CI]** (ADR-414, migration 0324: a
+  `campaign_reply` trigger starts when a customer quotes a campaign message or taps one of its
+  template's quick-reply buttons within 72 hours of its queueing, for any campaign or a chosen one
+  and optionally one button's text, ranked above every keyword; the run records the campaign, the
+  variant sent and the button, `{{campaign.name}}`, `{{campaign.variant}}` and
+  `{{campaign.button}}` read them, and the run's page and run webhooks name the campaign;
+  saving, publishing and testing need `campaigns.read`). **Remaining:** starting runs when a
+  campaign message is sent rather than answered, a trigger for replies to template messages that
+  are not a campaign's (a key's send, an order message), a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox
   run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded

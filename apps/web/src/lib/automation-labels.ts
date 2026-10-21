@@ -81,6 +81,7 @@ export const STEP_DETAILS: Record<string, string> = {
   test: 'a test started by a member',
   api: 'a call through the HyFib W360 API',
   enrollment: 'an enrolment by a member',
+  campaign_reply: 'a customer’s reply to a campaign message',
   'store_event:order_placed': 'a new order in a store',
   'store_event:order_shipped': 'an order shipped by a store',
   'store_event:order_delivered': 'an order delivered',
@@ -220,6 +221,7 @@ export const TRIGGER_TYPE_LABELS: Record<string, string> = {
   test: 'Test',
   store_event: 'Order messages',
   api: 'API',
+  campaign_reply: 'Reply to a campaign',
 };
 
 /**

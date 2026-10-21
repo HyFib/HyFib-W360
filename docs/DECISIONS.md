@@ -18214,3 +18214,107 @@ description, an official SDK or sample) gives their shape; M-203 records what to
 customer's reaction webhook that carries no `emoji` at all is already stored with the preview
 "Reaction removed" (`meta-webhook.ts`); that reading is kept as it was, and this research neither
 confirms nor refutes it.
+
+## ADR-414 Automations started by replies to a campaign (P4-01) (2026-10-21)
+
+Context: P4-01's Remaining listed "starting runs from campaigns". A company that sends a campaign
+with quick-reply buttons ("Interested", "Not now") wants the customers who tap one to get a
+follow-up at once: a question, a hand-off to sales, a tag. The only way was a keyword automation on
+the button's words, which also fired for anyone who typed them, could not tell one campaign from
+another, and lost to nothing more specific. HyFib already stores what it needs: each inbound
+message keeps the WAMID it quotes or whose button it taps (`messages.context_external_id`, from
+`context.id`: research M-178 for quick-reply taps, which Meta's description requires, and M-186
+for a quoting reply, which pywa reads and the spec does not describe), a tap's button text
+(`content.text`, `button.text` in M-178), and each campaign recipient keeps the message it was sent
+(`campaign_recipients.message_id`, unique per company since 0006) and its variant (0317, ADR-405
+and ADR-410). No Meta field is used that was not parsed before, so no research row is added.
+
+Decision:
+
+- **A trigger, `campaign_reply`.** "A customer replies to a campaign message": any campaign
+  (`campaignId` null) or one chosen campaign; any reply or, when `button` is given, only a tap on a
+  quick-reply button with that text (at most 25 characters, `TEMPLATE_LIMITS.buttonText`, trimmed
+  with runs of spaces joined). It is a message trigger like the others: business hours, the
+  cooldown per conversation, the automation's number, unassigned conversations without an active
+  run, 10 runs per conversation per hour and the plan's runs all apply unchanged. A button is
+  compared apart from case, surrounding spaces and runs of spaces, after Unicode NFC
+  (`campaignButtonKey`), so an emoji or punctuation counts (a keyword's normalisation would drop
+  them and could match "Yes!" to "Yes"). A quoting reply has no button, so it never starts an
+  automation that names one, whatever its text says.
+- **What counts as a reply to a campaign.** The message has a `context.id`; an outbound message of
+  the same number has that WAMID (`messages_external_uq`); a campaign recipient row names that
+  message (`campaign_recipients_message_uq`), is of the same contact and was queued at most 72
+  hours before the customer sent the reply (Meta's timestamp, compared at second precision as
+  attribution does). Two unique-index lookups, made only when an active automation of the company
+  starts from replies to a campaign and the message names one (`findCampaignReply`; an integration
+  test checks the plan uses the index and no sequential scan). A member's, a bot's, a key's or an
+  order message's template is not a campaign's: it has no recipient row. Another contact's message
+  named by its WAMID, or one of another number, is not found. CSAT and cash on delivery taps are
+  taken by their own features first, as before, and start no automation.
+- **Old campaigns: 72 hours after queueing.** `CAMPAIGN_REPLY_HOURS` equals campaign attribution's
+  window (`ATTRIBUTION_WINDOW_HOURS`, a unit test keeps them equal), so a run starts exactly for a
+  reply the campaign's results can count as one, and the two never disagree about whether a reply
+  answered the campaign. Within it, a tap is almost always a direct answer to the offer; a tap days
+  later on an old message, or a quote while scrolling back, is more likely about something else, and
+  the follow-up (built for that campaign's offer, perhaps ended) would then mislead. The customer
+  service window a reply opens is 24 hours from the reply either way, so the bound does not limit
+  what the run may send. A later reply starts what any other message would (a keyword, any message);
+  nothing is refused. Queueing time rather than delivery time: it is recorded for every recipient
+  sent, whereas delivery receipts can be missing.
+- **Ranking (ADR-240's extended).** Every campaign reply outranks every keyword: WhatsApp ties the
+  reply to a message the business sent, which says more about what the customer answers than
+  matching their words, and a quick-reply tap's text is the template's, not the customer's, so a
+  keyword automation matching it ("yes") would be an accident. Among campaign replies the chosen
+  campaign and button come first, then the chosen campaign, then any campaign with the button, then
+  any campaign: a chosen campaign is more specific than a button text, which campaigns often share
+  ("Yes"). Then exact keyword, contained keyword, keyword with typos, new conversation, any message,
+  as before (`TriggerRank` 0 to 8; `TRIGGER_TYPE_OF_RANK` records each run's trigger). Ties go to
+  the name, as before, and exactly one automation starts per message: dispatch runs under the
+  conversation's lock and one active run per conversation is a unique index, so a tap and a quoting
+  reply arriving together, or the same webhook twice, start one run (integration test). Opt-out
+  keywords still stop and never start runs, before any trigger.
+- **What the run keeps.** `app.automation_run_campaigns` (migration 0324), one row per run,
+  written with it: the campaign, the variant the recipient row recorded, and the button's text as
+  WhatsApp sent it, trimmed and clipped to 60 characters (null for a quoting reply). Insert-only,
+  deleted with its run. A table of its own rather than columns on `app.automation_runs`, so that
+  table's guard function (0311) and its lock are untouched; the runs' trigger check is replaced
+  `NOT VALID` (every stored row passed the check it replaces), and no index is built on a large
+  table. Steps read it as `{{campaign.name}}` (the name as it is when the step runs, as order fields
+  are read), `{{campaign.variant}}` and `{{campaign.button}}` (empty for a quoting reply), only in
+  automations started this way (`checkGraph` refuses them elsewhere, naming the rule), in texts,
+  template variables and web requests alike.
+- **Pages and permissions.** The editor offers "Any campaign" and the company's 200 most recent
+  campaigns with their status (and the chosen one when older), then, for a chosen campaign, "Any
+  reply" or each quick-reply button of its templates (every variant's); for any campaign, a text
+  field. Checks with the server's code: the chosen campaign must be the company's, and send from the
+  automation's number when both name one (an error: replies would never reach it); a button none of
+  its templates has is a warning (templates change at Meta). Saving, publishing and testing such an
+  automation need `campaigns.read` besides the automations permissions; every role that holds those
+  holds it today, so nobody loses anything, and the editor lists no campaign to a member without it.
+  Saving refuses another company's campaign id as an unknown one. The run's page says "A reply to
+  Diwali launch, variant B, tapping “Interested”." with a link to the campaign, the campaign only to
+  members with `campaigns.read` (others read that it was a reply to a campaign they cannot see),
+  the button only to members who can see the conversation, as the run's answers. A test run of a
+  draft that names a campaign acts as a reply to it with the trigger's button and no variant (no
+  campaign message was answered). The simulator answers as a reply to the chosen campaign (or
+  "Sample campaign"), variant A, with the trigger's button.
+- **Webhooks and API, additive.** `run.trigger` takes `campaign_reply` in `automation.run_started`,
+  `automation.run_ended` and `automation.run_step`, and the first two give `run.campaign` (id,
+  name when delivered, variant), null for every other run. The button is not given: like a
+  question's answer (ADR-326), it is the customer's reply. Endpoints' run trigger filters
+  (`runTriggers`, ADR-183) take `campaign_reply` (the database check now takes six); a stored list
+  never held it, so an endpoint that chose some triggers keeps receiving exactly those, and one
+  that takes every run receives these too. OpenAPI and its schema tests follow. Automations
+  themselves are exposed through the API only for those started by the API (ADR-077), so no API
+  route changes.
+- **Rolling deploy.** Workers first, then web, and such automations published only after both;
+  before a worker rollback they are paused, since an older runner would send `{{campaign.*}}` as
+  written (DEPLOYMENT).
+
+Not built: starting runs when a campaign message is sent rather than answered; a trigger for
+replies to template messages that are not a campaign's (a key's send, an order message); a window
+other than 72 hours or chosen per automation; matching a quick-reply payload rather than its text;
+choosing several campaigns or buttons in one trigger; the button in webhooks; reading an inbound
+reply that arrives before the send worker records WhatsApp's acceptance of the campaign message
+(it names a WAMID not stored yet, so it starts what any other message would); any verification
+against Meta (the Graph stand-in only).

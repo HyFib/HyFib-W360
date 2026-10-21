@@ -323,7 +323,13 @@ export type WebhookRunStepNodeType =
  * (ADR-183), as the event's `run.trigger` says; members' test runs send no events.
  */
 export type WebhookRunTrigger =
-  'keyword' | 'conversation_started' | 'any_message' | 'store_event' | 'api';
+  | 'keyword'
+  | 'conversation_started'
+  | 'any_message'
+  | 'store_event'
+  | 'api'
+  /** A reply to a campaign message (migration 0324, ADR-414). */
+  | 'campaign_reply';
 
 /**
  * A `consent.changed` change, its purpose and action (ADR-018), which an endpoint can choose

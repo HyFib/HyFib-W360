@@ -724,7 +724,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 ## 6E. Automations **[built — bot messages verified against a local Graph stand-in only]**
 
 - **Model** (`packages/domain/src/automations/graph.ts`, browser-safe): a trigger (a message is or
-  contains a keyword; a customer starts a conversation; any customer message; optionally only while
+  contains a keyword; a customer starts a conversation; any customer message; a customer's reply to
+  a campaign message, of any campaign or a chosen one, optionally only a tap on one quick-reply
+  button (ADR-414); optionally only while
   the business is open or closed; a cooldown per conversation; started by a store's order messages,
   §6M; or started by a member's enrolment or through the API with the inputs it declares, §6N) and a
   graph of typed steps: send a message, ask with reply buttons (Meta's limits: 1–3 buttons, titles ≤
@@ -757,10 +759,24 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Dispatch** (`automations/dispatch.ts`, inside the ingestion transaction): an opt-out keyword
   stops the active run; a run waiting for a reply receives the message (`input_message_id`, a job
   keyed by the message); otherwise, in an unassigned conversation of an active company with no
-  active run, the best match starts (exact keyword, contained keyword, keyword with small typos when
+  active run, the best match starts (a reply to a campaign message: the chosen campaign and
+  button, the chosen campaign, any campaign with the button, any campaign (ADR-414); then exact
+  keyword, contained keyword, keyword with small typos when
   the trigger allows them (ADR-240: optimal string alignment per word in `inbox/keywords.ts`), new
   conversation, any message; then name order), subject to business-hours filters, cooldowns and 10
   runs per conversation per hour.
+- **Campaign replies** (ADR-414, migration 0324): when an active automation starts from replies to
+  a campaign and the message has a `context.id`, `findCampaignReply` finds the outbound message
+  of the same number with that WAMID (`messages_external_uq`) and its campaign recipient row
+  (`campaign_recipients_message_uq`), of the same contact, queued at most 72 hours before the
+  reply (`CAMPAIGN_REPLY_HOURS`, the attribution window); a quick-reply tap (`button` message)
+  brings its text. The run records the campaign, the variant and the button in
+  `app.automation_run_campaigns` (insert-only, deleted with the run); `{{campaign.name}}` (read
+  when the step runs), `{{campaign.variant}}` and `{{campaign.button}}` read it, as do the run's
+  page (the campaign to members with `campaigns.read`, the button to those who see the
+  conversation) and run webhooks (`run.campaign`: id, name, variant). Saving, publishing and testing
+  such an automation need `campaigns.read`; a test run of one that names a campaign acts as a
+  reply to it with the trigger's button and no variant.
 - **Runner** (`automations/runner.ts`, queue `automation.run`, ADR-035): one transaction per step,
   conversation lock then run lock; checks the hand-off lock, resolve and the 7-day age; loads the
   pinned version's graph (cached: versions never change) and the contact facts; applies effects —

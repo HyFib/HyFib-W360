@@ -585,6 +585,9 @@ async function ingestMessagesChange(
           text: keywordText,
           newCase,
           consent,
+          contextExternalId: m.context?.id ?? null,
+          buttonText: type === 'button' && typeof content.text === 'string' ? content.text : null,
+          sentAt: providerAt,
         });
         if (dispatched === 'delivered') ctx.summary.automationReplies += 1;
         if (dispatched === 'started') ctx.summary.automationStarts += 1;

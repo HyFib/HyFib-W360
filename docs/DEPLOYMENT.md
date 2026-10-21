@@ -2084,6 +2084,43 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
 
    Rolling forward needs no step; raise the setting again once every server runs the release.
 
+   Migration 0324 (ADR-414, automations started by replies to a campaign) runs in one transaction.
+   It replaces `automation_runs_trigger_type_check` with one that also takes `campaign_reply`,
+   `NOT VALID`, so `app.automation_runs` is not read under the migration's brief exclusive lock
+   (every stored row passed the check it replaces, validated by 0054, whose values are a subset;
+   the check stays unvalidated and nothing relies on `convalidated`). It creates the empty table
+   `app.automation_run_campaigns` (row security forced, `SELECT` and `INSERT` for the runtime role,
+   an update-rejecting trigger, deletion step 688), whose foreign keys take a brief lock on
+   `app.automation_runs` and `app.campaigns` (no rows to check). It replaces
+   `webhook_endpoints_run_triggers` with one taking six triggers, validated at once (at most 10
+   endpoints a company). No index is built on a large table: the reply lookup uses
+   `messages_external_uq` and `campaign_recipients_message_uq`, which exist. No setting is added.
+
+   Order: apply 0324, roll out **workers first**, then web servers (the usual order), and publish
+   automations started by replies to a campaign only once both rollouts end. A worker of the release
+   before skips such automations when a reply arrives (it cannot parse the trigger), so nothing
+   starts from it; but if a new worker started a run and an older worker took its next step, the
+   older runner would send `{{campaign.name}}`, `{{campaign.variant}}` and `{{campaign.button}}`
+   as written, not knowing them. Workers first avoids that during the rollout. Rolling **workers**
+   back once such automations are published is not safe for the same reason: first pause them
+   (Automations → the automation → Pause), listed for each company with the runtime role's own
+   credentials, in its own transaction:
+
+   ```sql
+   BEGIN;
+   SELECT set_config('app.tenant_id', '<company id>', true);
+   SELECT a.id, a.name, a.status FROM app.automations a
+     JOIN app.automation_versions v ON v.tenant_id = a.tenant_id AND v.id = a.active_version_id
+    WHERE a.status = 'active' AND v.trigger ->> 'type' = 'campaign_reply';
+   COMMIT;
+   ```
+
+   and let their running runs end (or stop them from the run pages). Rolling **web servers** back
+   makes such drafts fail to parse in the editor (shown as an invalid trigger), and Settings →
+   Webhooks of the release before shows an endpoint that chose `campaign_reply` with a blank label
+   and refuses to save it until it is unticked. The table, column check and endpoint check can stay
+   after a rollback; older code never writes `campaign_reply`.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

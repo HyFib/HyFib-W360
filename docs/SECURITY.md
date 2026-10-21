@@ -443,6 +443,24 @@ Phase 4 rules (automations, P4-01):
   is not found). Numbers are masked for the roles the company masks (ADR-226), and an erased
   contact appears as "Erased contact" with no name, number or link. A read in a read-only
   transaction, not audited, as reading an enrolment is not. No permission is new.
+- Automations started by replies to a campaign (ADR-414): saving a draft with that trigger,
+  publishing it and testing it need `campaigns.read` besides `automations.write` or
+  `automations.publish` (every role that holds those holds it today, so no member loses anything;
+  the check stands for a narrower role), checked by the service before anything is written; the
+  editor lists campaigns only to members with `campaigns.read` (the 200 most recent and the
+  chosen one, in the company's scope), and a draft naming another company's campaign is refused
+  as an unknown one. Runs act for the company, as for the other message triggers. What a run
+  answers is kept in `app.automation_run_campaigns` (migration 0324): FORCE row security, composite
+  foreign keys to the company's run and campaign, `SELECT` and `INSERT` for the app role only (no
+  `UPDATE`, which a trigger also rejects, and no `DELETE`: rows go with their run, by cascade,
+  under retention and company deletion), w360_definer reading the key columns and deleting the rows
+  of a company being deleted (step 688). The run's page names the campaign only to members with
+  `campaigns.read` (others read "a reply to a campaign" and that seeing which needs that
+  permission) and the tapped button only to members who can see the conversation, as the run's
+  answers; run webhooks name the campaign's id, name and variant to the company's endpoints, never
+  the button. The campaign message is found only through the inbound message's `context.id` on
+  the same number, for the same contact, in the company's scope. No permission is new and the
+  permission matrix does not change; no function is new or widened.
 - Automations start only in unassigned conversations of an active (not suspended) company, never
   after an opt-out keyword, and every bot message re-checks the channel, the 24-hour window and the
   contact's WhatsApp number when queued (a template step checks its template and the contact's

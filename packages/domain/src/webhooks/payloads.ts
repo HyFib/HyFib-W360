@@ -62,6 +62,7 @@ import {
 } from '../api/satisfaction-survey-view';
 import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
 import { VARIANT_LABELS, parseVariantLabel } from '../campaigns/variants';
+import { runCampaignOf } from '../automations/run-campaigns';
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { crmCreatedBy, noteWriter } from '../crm/common';
 import { MAX_DEAL_ITEMS } from '../crm/deal-item-limits';
@@ -453,7 +454,7 @@ const webhookRunSchema = z.object({
   trigger: z
     .enum(WEBHOOK_RUN_TRIGGERS)
     .describe(
-      'What started it: a keyword, a new conversation, any message, a store’s order event, or a call through the API or an enrolment of the contact by a member or an API key (api; apiKeyId or enrollmentId says which).',
+      'What started it: a keyword, a new conversation, any message, a store’s order event, a call through the API or an enrolment of the contact by a member or an API key (api; apiKeyId or enrollmentId says which), or the contact’s reply to a campaign message (campaign_reply; campaign says which).',
     ),
   apiKeyId: z
     .uuid()
@@ -466,6 +467,20 @@ const webhookRunSchema = z.object({
     .nullable()
     .describe(
       'The enrolment that started it, by a member or an API key (trigger api, apiKeyId null); null for every other run. One enrolment starts many runs, one per contact.',
+    ),
+  campaign: z
+    .object({
+      id: z.uuid(),
+      name: z.string().describe('The campaign’s name when the event is delivered.'),
+      variant: z
+        .enum(VARIANT_LABELS)
+        .describe(
+          'The variant the contact was sent, as GET /campaigns/{id}/recipients gives it (A for a campaign without variants).',
+        ),
+    })
+    .nullable()
+    .describe(
+      'The campaign whose message the contact answered, quoting it or tapping one of its quick-reply buttons, for a run started by a reply to a campaign (trigger campaign_reply); null for every other run. The button tapped is not given, as a run’s answers are not.',
     ),
   status: z
     .enum(AUTOMATION_RUN_STATUSES)
@@ -2365,6 +2380,12 @@ export async function buildWebhookPayload(
       const run = await runOf(tx, tenantId, str(event.detail.runId));
       if (!run) throw new WebhookEventGoneError();
       const ended = event.type === 'automation.run_ended';
+      // The campaign a reply to a campaign answers (ADR-414), read only for such runs.
+      const campaign =
+        run.triggerType === 'campaign_reply' ? await runCampaignOf(tx, tenantId, run.id) : null;
+      if (run.triggerType === 'campaign_reply' && !campaign) {
+        throw new Error('A run started by a reply to a campaign has no campaign recorded');
+      }
       return {
         ...base,
         data: {
@@ -2375,6 +2396,13 @@ export async function buildWebhookPayload(
             trigger: run.triggerType,
             apiKeyId: run.apiKeyId,
             enrollmentId: run.enrollmentId ?? null,
+            campaign: campaign
+              ? {
+                  id: campaign.campaignId,
+                  name: campaign.name,
+                  variant: parseVariantLabel(campaign.variant ?? ''),
+                }
+              : null,
             status: event.status,
             endReason: ended ? str(event.detail.endReason) : null,
             startedAt: run.startedAt.toISOString(),

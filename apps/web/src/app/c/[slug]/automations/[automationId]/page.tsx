@@ -94,6 +94,7 @@ export default async function AutomationPage({
           dealFields={detail.options.dealFields}
           flows={detail.options.flows}
           products={detail.options.products}
+          campaigns={detail.options.campaigns}
           fields={detail.options.fields}
           web={{
             allowedDomains: detail.options.allowedDomains,

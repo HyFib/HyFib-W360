@@ -188,6 +188,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     omitted: { request_ciphertext: 'The encrypted request, which can hold secrets.' },
   },
   {
+    table: 'app.automation_run_campaigns',
+    columns: ['id', 'run_id', 'campaign_id', 'variant', 'button_text', 'created_at'],
+  },
+  {
     table: 'app.automation_run_steps',
     columns: [
       'id',

@@ -1091,6 +1091,7 @@ export const WEBHOOK_RUN_TRIGGERS = [
   'any_message',
   'store_event',
   'api',
+  'campaign_reply',
 ] as const satisfies readonly WebhookRunTrigger[];
 
 /** How Settings names what started a run (ADR-183), as the automation pages name triggers. */
@@ -1100,6 +1101,7 @@ export const WEBHOOK_RUN_TRIGGER_LABELS: Record<WebhookRunTrigger, string> = {
   any_message: 'Any message',
   store_event: 'Order messages',
   api: 'API or a member’s enrolment',
+  campaign_reply: 'Reply to a campaign',
 };
 
 /**

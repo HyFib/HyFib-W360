@@ -962,6 +962,30 @@ company whether their server echoes request headers before replacing the secret.
 server transforms otherwise is not recognised. Values are never logged; check the
 response with the company's own tools.
 
+**A reply to a campaign did not start its automation (ADR-414).** Check in order: the automation
+is active and its live version's trigger is "A customer replies to a campaign message" (a draft
+change is not live until published); the conversation was unassigned and no other run was
+handling it (the inbox shows it); the reply came within 72 hours of the recipient being queued
+(the campaign's recipients page shows when it was sent; a later reply starts what any other message
+would); the customer quoted the campaign message or tapped one of its template's quick-reply
+buttons (a message typed without quoting names no campaign message, and a reply to a member's,
+a bot's or an order message's template is not a campaign's); the automation's number is the
+campaign's or every number; a chosen button's text matches the tapped one apart from case and
+spacing (the editor warns when none of the campaign's templates has it); the business-hours filter
+and the cooldown; and whether another automation won: every campaign reply outranks every keyword,
+the chosen campaign and button first, then the chosen campaign, then any campaign with the
+button, then any campaign, ties by name. A reply that arrived before the send worker recorded
+WhatsApp's acceptance of the campaign message (a tap within the same second or so) finds no
+message with that WAMID yet and starts what any other message would. The run's page names the
+campaign, the variant and the button to members who may see them.
+
+**Migration 0324 failed.** It runs in one transaction, so a failure applies nothing. It needs
+brief exclusive locks on `app.automation_runs` (replacing a check, `NOT VALID`) and share row
+locks on `app.campaigns` for the new table's foreign key: a lock timeout means a long transaction
+held one of them; run the migrations again in a quieter moment. A failure on
+`webhook_endpoints_run_triggers` means a stored list breaks the new check, which allows every list
+the old one did; report it as a bug.
+
 **Worker restarts and deploys.** Runs are rows, so a restart delays steps but never loses or repeats
 one: queued `automation.run` jobs continue, and runs whose signal was lost are picked up by the sweep
 within about 90 seconds. A test run stops when the member who started it leaves the company ("test

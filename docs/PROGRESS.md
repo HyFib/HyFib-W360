@@ -1,5 +1,94 @@
 # Progress
 
+## 2026-10-21 — Automations started by replies to a campaign (P4-01, ADR-414)
+
+Status: **Implemented (migration 0324); unit tests run locally, integration and e2e tests in CI
+only; no live Meta traffic.** P4-01's Remaining listed "starting runs from campaigns". A customer
+who quotes a campaign message or taps one of its template's quick-reply buttons now starts the
+automation built for it.
+
+### Completed
+
+- **Trigger** (`automations/graph.ts`): `campaign_reply`, "A customer replies to a campaign
+  message": any campaign or one chosen campaign, any reply or only a tap on one quick-reply
+  button's text (at most 25 characters, compared apart from case and spacing after NFC,
+  `campaignButtonKey`), with business hours and a cooldown like the other message triggers.
+- **Matching** (`automations/dispatch.ts`, `findCampaignReply`): the inbound message's
+  `context.id` (already stored) names an outbound message of the same number
+  (`messages_external_uq`) with a campaign recipient row (`campaign_recipients_message_uq`) of the
+  same contact, queued at most 72 hours before the reply (`CAMPAIGN_REPLY_HOURS`, equal to the
+  attribution window); looked up only when such an automation is active. A tap's text comes from
+  the `button` message (`button.text`, research M-178).
+- **Ranking:** every campaign reply above every keyword (the chosen campaign and button, the
+  chosen campaign, any campaign with the button, any campaign), then ADR-240's order; ties by name;
+  one run per conversation as before.
+- **What the run keeps** (migration 0324): `app.automation_run_campaigns` (campaign, variant sent,
+  button text; insert-only, forced row security, deleted with its run, deletion step 688); the runs'
+  trigger check takes `campaign_reply` (`NOT VALID`); webhook endpoints' run trigger filters take
+  six triggers. `{{campaign.name}}`, `{{campaign.variant}}` and `{{campaign.button}}` in automations
+  started this way (refused elsewhere), read by the runner, the interpreter and the simulator.
+- **Editor:** the trigger with a campaign picker (200 most recent and the chosen one, for members
+  with `campaigns.read`), the chosen campaign's quick replies (every variant's templates) or a text
+  for any campaign, the campaign fields' help, and live checks shared with the server (another
+  company's campaign, another number, a button no template has).
+- **Permissions:** saving, publishing and testing need `campaigns.read` too; another company's
+  campaign is refused as unknown. The run's page names the campaign (linked) only to members with
+  `campaigns.read` and the button only to members who see the conversation. A test run of a draft
+  naming a campaign acts as a reply to it (the trigger's button, no variant).
+- **Webhooks and OpenAPI (additive):** `run.trigger` `campaign_reply` in the three run events and
+  `run.campaign` (id, name, variant; null otherwise) in `automation.run_started` and
+  `automation.run_ended`, never the button; endpoints may choose `campaign_reply` in `runTriggers`.
+  No API route changes (the API exposes only automations started through it).
+- **Docs:** ADR-414, THREAT-MODEL T363, ARCHITECTURE §6E, SECURITY (Phase 4 rules), DEPLOYMENT
+  (0324, order and rollback), RUNBOOKS §10D, BACKLOG P4-01. No Meta field is new, so no research
+  row; no permission is new, so the matrix of permissions is unchanged; no feature matrix status
+  changes.
+
+### Tests
+
+- Unit (`automations/campaign-trigger.test.ts`, 14 new tests): the schema and its refusals,
+  matching by campaign and button, button keys (case, spacing, emoji, NFC), the full ranking against
+  keywords, new conversations and any message, the rank-to-trigger table, the window equal to
+  attribution's, descriptions, the campaign checks (unknown, another number, a missing button),
+  campaign fields refused outside the trigger and rendered in texts, web requests and a step,
+  `findCampaignReply` reading nothing without a context and trimming and clipping the button;
+  `webhooks/webhooks.test.ts`: the payload schema with and without a campaign, the body naming the
+  campaign and variant but not the button, no read for other runs, a missing row failing; existing
+  tests updated for the ranks (interpreter), the sixth run trigger (webhooks, API) and `campaign`.
+- Integration (CI only, `automation-campaign-replies.test.ts`, 9 tests; `webhook-events.test.ts`,
+  1 new): a tap and a quoting reply starting the run with campaign, variant and button recorded and
+  `{{campaign.*}}` sent (the name read when the step runs); the full ranking with five automations;
+  71 hours accepted and 73 not, a member's message, another contact's WAMID and another number's
+  WAMID falling through to "any message"; the cooldown and the automation's number; two automations
+  of one rank, a duplicate tap and a quoting reply arriving together starting exactly one run while
+  the campaign is still sending; permissions to save, publish and test, another company's campaign,
+  another number's campaign refused at publishing, the editor's campaigns hidden without the
+  permission; the run page's campaign and button by permission and a test run's record; the table's
+  row security, grants, update trigger, keys, checks, cascade and deletion step; the lookup's plan
+  using `messages_external_uq` without a sequential scan; run events naming the campaign and an
+  endpoint's `campaign_reply` filter. Existing tests updated for the sixth trigger
+  (`webhooks.test.ts`) and `run.campaign` (`webhook-events.test.ts`).
+- E2E (CI only, `automation-campaign-replies.spec.ts`; `webhook-events.spec.ts` unticks the new
+  trigger to keep "API only"): a marketing template with two quick replies sent by a campaign
+  through the Graph stand-in, an automation for its "Interested" button built in the editor (the
+  campaign and button pickers, the fields' help), simulated, published; the customer's tap answered
+  through the stand-in with the campaign's name; the run's page naming campaign, variant and button.
+- Hand mutation of 27 rules, bounds and checks, one at a time against the unit tests
+  above: 17 caught. The 10 others need the database and each is exercised by a named integration test that did not run here (`automation-campaign-replies.test.ts`): the lookup's 72-hour window, its contact and its number ("take a reply as one to the campaign for 72 hours …": the 73-hour, other-contact and other-number cases), the run's campaign row not written and the runner not reading it ("start on a quick-reply tap or a quoting reply …": the recorded row and the texts sent), saving, publishing and testing without `campaigns.read` and saving another company's campaign ("need the permission to see campaigns …"), the run page's campaign and button shown regardless of permission and a test run's row not written ("name the campaign on a run’s page …").
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                                         | Result                                                                  |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`                                                 | clean                                                                   |
+| `npx prettier --check . --ignore-path .prettierignore --ignore-path .gitignore` | clean                                                                   |
+| `pnpm typecheck`                                                                | clean                                                                   |
+| `pnpm test` (unit)                                                              | 2,156 of 2,156 passed (187 files)                                       |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`                             | clean                                                                   |
+| `pnpm build`                                                                    | passed                                                                  |
+| hand mutation of 27 rules, bounds and checks                                    | 17 caught by unit tests; 10 exercised only by integration tests (above) |
+| `pnpm test:integration`, `pnpm test:e2e`                                        | not run here: no local PostgreSQL or browser; CI runs them              |
+
 ## 2026-10-21 — Call-to-action URL buttons and taking reactions back: researched, not built (P5-08, ADR-412)
 
 Status: **Not built: Meta's OpenAPI description supports neither part (M-203).** Unit tests run

@@ -13,6 +13,7 @@ import {
   initialRunState,
   normalizeTag,
   type AutomationGraph,
+  type CampaignPlaceholderValues,
   type OrderPlaceholderValues,
   type RunEffect,
   type RunEvent,
@@ -120,6 +121,7 @@ function toFacts(
   companyName: string,
   storeEvent: boolean,
   deal: Pick<RunFacts, 'deals' | 'dealFields'>,
+  campaign: CampaignPlaceholderValues | null,
 ): RunFacts {
   const fields: Record<string, string> = {};
   for (const line of sim.fields.split('\n')) {
@@ -135,6 +137,7 @@ function toFacts(
     fields,
     businessOpen: sim.businessOpen,
     order: storeEvent ? sampleOrder(sim.contactName.trim(), companyName) : null,
+    campaign,
   };
 }
 
@@ -150,6 +153,7 @@ export function AutomationSimulator({
   templates,
   storeEvent,
   apiInputs,
+  campaign,
 }: {
   /** Null when the steps have structural errors. */
   graph: AutomationGraph | null;
@@ -170,6 +174,11 @@ export function AutomationSimulator({
   storeEvent: boolean;
   /** Started through the API: the run starts with a sample value for each input. */
   apiInputs: string[] | null;
+  /**
+   * Started by a reply to a campaign (ADR-414): the campaign the simulated reply answers, with a
+   * sample variant and the trigger's button.
+   */
+  campaign: CampaignPlaceholderValues | null;
 }) {
   // The simulated contact's fields stay disabled until hydration (see useHydrated).
   const hydrated = useHydrated();
@@ -408,10 +417,16 @@ export function AutomationSimulator({
         graph,
         state: current,
         event,
-        facts: toFacts(facts, companyName, storeEvent, {
-          deals: simulatedDeals(facts, graph, crmPipelines, dealFields).deals,
-          dealFields: new Map(dealFields.map((f) => [f.key, f])),
-        }),
+        facts: toFacts(
+          facts,
+          companyName,
+          storeEvent,
+          {
+            deals: simulatedDeals(facts, graph, crmPipelines, dealFields).deals,
+            dealFields: new Map(dealFields.map((f) => [f.key, f])),
+          },
+          campaign,
+        ),
         runId: SIMULATION_RUN,
         now: new Date(),
       });
@@ -841,6 +856,15 @@ export function AutomationSimulator({
             <p>
               {apiInputs.map((input) => `${input}: “sample ${input}”`).join(', ')}, as if a call
               gave them.
+            </p>
+          </div>
+        ) : null}
+        {campaign ? (
+          <div className="grid gap-1 text-xs text-muted-foreground">
+            <p className="font-medium text-foreground">Sample campaign reply</p>
+            <p>
+              A reply to “{campaign.name}”, variant {campaign.variant}
+              {campaign.button ? `, tapping “${campaign.button}”` : ', quoting its message'}.
             </p>
           </div>
         ) : null}

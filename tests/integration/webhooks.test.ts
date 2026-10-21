@@ -6888,7 +6888,7 @@ describe('run trigger filters (ADR-183)', () => {
     // Either run event keeps the list.
     await change({ eventTypes: ['automation.run_ended'] });
     expect(await current()).toEqual(['conversation_started']);
-    // The database refuses an empty list, more than five entries, `test`, an unknown trigger or a
+    // The database refuses an empty list, more than six entries (0324), `test`, an unknown trigger or a
     // missing one from an endpoint taking a run event…
     const setInDatabase = (value: string) =>
       fx.query(`UPDATE app.webhook_endpoints SET run_triggers = ${value} WHERE id = $1`, [
@@ -6896,7 +6896,7 @@ describe('run trigger filters (ADR-183)', () => {
       ]);
     for (const bad of [
       `'{}'`,
-      `'{keyword,conversation_started,any_message,store_event,api,api}'`,
+      `'{keyword,conversation_started,any_message,store_event,api,campaign_reply,api}'`,
       `'{api,test}'`,
       `'{api,webhook}'`,
       `ARRAY['api', NULL]::text[]`,

@@ -3136,6 +3136,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'any_message',
       'store_event',
       'api',
+      'campaign_reply',
     ]);
     expect(answered.required).toContain('runTriggers');
     expect(

@@ -17,10 +17,13 @@ import {
 } from '@w360/ui';
 import {
   AUTOMATION_LIMITS,
+  CAMPAIGN_PLACEHOLDERS,
   NODE_TYPES,
   NODE_TYPE_LABELS,
   ORDER_PLACEHOLDERS,
   TRIGGER_LABELS,
+  campaignButtonKey,
+  campaignTriggerIssues,
   checkGraph,
   newNodeId,
   parseGraph,
@@ -30,6 +33,8 @@ import {
   type AutomationGraph,
   type AutomationNode,
   type AutomationTrigger,
+  type CampaignPlaceholderValues,
+  type CampaignReference,
   type GraphIssue,
   type NodeType,
   type TriggerHours,
@@ -64,7 +69,27 @@ interface TriggerForm {
   cooldownMinutes: number;
   /** The inputs of an automation started through the API, separated by commas (ADR-077). */
   inputs: string;
+  /** Started by a reply to a campaign (ADR-414): the chosen campaign ('' for any). */
+  campaignId: string;
+  /** Only a tap on the quick-reply button with this text ('' for any reply). */
+  button: string;
 }
+
+/** A campaign the trigger can choose (ADR-414), with its status. */
+export interface EditorCampaign extends CampaignReference {
+  status: string;
+}
+
+/** How the picker names a campaign's status. */
+const CAMPAIGN_STATUS_NAMES: Record<string, string> = {
+  draft: 'draft',
+  pending_approval: 'waiting for approval',
+  scheduled: 'scheduled',
+  running: 'sending',
+  paused: 'paused',
+  completed: 'completed',
+  canceled: 'cancelled',
+};
 
 function triggerForm(trigger: AutomationTrigger | null): TriggerForm {
   if (!trigger)
@@ -76,6 +101,8 @@ function triggerForm(trigger: AutomationTrigger | null): TriggerForm {
       hours: 'any',
       cooldownMinutes: 60,
       inputs: '',
+      campaignId: '',
+      button: '',
     };
   const fromMessages = trigger.type !== 'store_event' && trigger.type !== 'api';
   return {
@@ -86,6 +113,8 @@ function triggerForm(trigger: AutomationTrigger | null): TriggerForm {
     hours: fromMessages ? trigger.hours : 'any',
     cooldownMinutes: fromMessages ? trigger.cooldownMinutes : 60,
     inputs: trigger.type === 'api' ? trigger.inputs.join(', ') : '',
+    campaignId: trigger.type === 'campaign_reply' ? (trigger.campaignId ?? '') : '',
+    button: trigger.type === 'campaign_reply' ? (trigger.button ?? '') : '',
   };
 }
 
@@ -103,6 +132,15 @@ function triggerInput(form: TriggerForm): unknown {
     };
   }
   const common = { hours: form.hours, cooldownMinutes: form.cooldownMinutes };
+  // Started by a reply to a campaign (ADR-414): any campaign or one, any reply or one button.
+  if (form.type === 'campaign_reply') {
+    return {
+      type: 'campaign_reply',
+      campaignId: form.campaignId || null,
+      button: form.button.trim() ? form.button : null,
+      ...common,
+    };
+  }
   if (form.type !== 'keyword') return { type: form.type, ...common };
   return {
     type: 'keyword',
@@ -390,6 +428,7 @@ export function AutomationEditor({
   dealFields,
   flows,
   products,
+  campaigns,
   fields,
   web,
 }: {
@@ -414,6 +453,11 @@ export function AutomationEditor({
    * send); null for a member who cannot see the catalogs.
    */
   products: EditorProduct[] | null;
+  /**
+   * Campaigns a trigger started by replies to a campaign may choose (ADR-414): the most recent and
+   * the chosen one; null for a member who cannot see campaigns.
+   */
+  campaigns: EditorCampaign[] | null;
   fields: { key: string; label: string; type: string; options?: string[] | null }[];
   /** What web request steps may use: allowed domains and secrets (names and domains only). */
   web: {
@@ -446,6 +490,16 @@ export function AutomationEditor({
 
   const storeEvent = trigger.type === 'store_event';
   const apiStart = trigger.type === 'api';
+  const campaignReply = trigger.type === 'campaign_reply';
+  const chosenCampaign = campaigns?.find((c) => c.id === trigger.campaignId) ?? null;
+  // What the simulator's reply answers: the chosen campaign (or a sample), variant A, the button.
+  const simulatedCampaign: CampaignPlaceholderValues | null = campaignReply
+    ? {
+        name: chosenCampaign?.name ?? 'Sample campaign',
+        variant: 'A',
+        button: trigger.button.trim(),
+      }
+    : null;
   const channelWhatsappAccountId =
     channels.find((c) => c.id === channelAccountId)?.whatsappAccountId ?? null;
   // Templates a step can send: approved utility or marketing ones HyFib supports, of the number's
@@ -518,6 +572,7 @@ export function AutomationEditor({
       templates: new Map(templates.map((t) => [t.id, t])),
       storeEvent,
       apiInputs: apiInputs ? new Set(apiInputs) : undefined,
+      campaignReply,
       channelWhatsappAccountId,
     }),
     [
@@ -532,6 +587,7 @@ export function AutomationEditor({
       templates,
       storeEvent,
       apiInputs,
+      campaignReply,
       channelWhatsappAccountId,
     ],
   );
@@ -540,11 +596,20 @@ export function AutomationEditor({
     const list: GraphIssue[] = [];
     if (!parsedTrigger.ok)
       list.push({ level: 'error', nodeId: null, message: parsedTrigger.message });
-    else list.push(...triggerIssues(parsedTrigger.trigger, channelAccountId));
+    else {
+      list.push(...triggerIssues(parsedTrigger.trigger, channelAccountId));
+      list.push(
+        ...campaignTriggerIssues(
+          parsedTrigger.trigger,
+          channelAccountId,
+          campaigns ? new Map(campaigns.map((c) => [c.id, c])) : undefined,
+        ),
+      );
+    }
     if (parsedGraph.ok) list.push(...checkGraph(parsedGraph.graph, refs));
     else list.push(...parsedGraph.issues.map((i) => ({ level: 'error' as const, ...i })));
     return list;
-  }, [parsedTrigger, parsedGraph, refs, channelAccountId]);
+  }, [parsedTrigger, parsedGraph, refs, channelAccountId, campaigns]);
   const errors = issues.filter((i) => i.level === 'error');
   const structural = !parsedTrigger.ok || !parsedGraph.ok || !name.trim();
 
@@ -636,10 +701,12 @@ export function AutomationEditor({
             <CardTitle>When it starts</CardTitle>
             <CardDescription>
               Automations start only in conversations nobody is assigned to and no other automation
-              is handling. When several match, an exact keyword wins, then a keyword in the message,
-              then a new conversation, then any message. An automation started by order messages
-              runs when a store’s rule chooses it for an order event, and one started by a member or
-              through the API when a member enrols contacts or your systems call it with a key.
+              is handling. When several match, a reply to a campaign wins (to the chosen campaign
+              and button first, then the chosen campaign, then any campaign with the button, then
+              any campaign), then an exact keyword, then a keyword in the message, then a new
+              conversation, then any message. An automation started by order messages runs when a
+              store’s rule chooses it for an order event, and one started by a member or through the
+              API when a member enrols contacts or your systems call it with a key.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4">
@@ -804,6 +871,14 @@ export function AutomationEditor({
                   </p>
                 </Alert>
               </>
+            ) : null}
+            {campaignReply ? (
+              <CampaignTriggerFields
+                trigger={trigger}
+                campaigns={campaigns}
+                chosen={chosenCampaign}
+                onChange={(next) => change(() => setTrigger(next))}
+              />
             ) : null}
             {trigger.type === 'keyword' ? (
               <div className="grid gap-4 sm:grid-cols-[1fr_260px]">
@@ -1109,9 +1184,127 @@ export function AutomationEditor({
             templates={templates}
             storeEvent={storeEvent}
             apiInputs={apiInputs}
+            campaign={simulatedCampaign}
           />
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+/**
+ * The options of a trigger started by replies to a campaign (ADR-414): any campaign or one the
+ * member can see, and any reply or a tap on one quick-reply button (a choice among the chosen
+ * campaign's buttons, or a text for any campaign).
+ */
+function CampaignTriggerFields({
+  trigger,
+  campaigns,
+  chosen,
+  onChange,
+}: {
+  trigger: TriggerForm;
+  campaigns: EditorCampaign[] | null;
+  chosen: EditorCampaign | null;
+  onChange: (next: TriggerForm) => void;
+}) {
+  if (!campaigns) {
+    return (
+      <Alert tone="warning">
+        <p>
+          Choosing a campaign needs the permission to see campaigns. Ask an administrator, or choose
+          another way to start.
+        </p>
+      </Alert>
+    );
+  }
+  const buttons = chosen?.buttons ?? [];
+  // A saved button no template of the chosen campaign has still shows, so the choice is kept.
+  const offered =
+    trigger.button &&
+    !buttons.some((b) => campaignButtonKey(b) === campaignButtonKey(trigger.button))
+      ? [...buttons, trigger.button]
+      : buttons;
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field
+          id="trigger-campaign"
+          label="Campaign"
+          description="Replies to campaigns of the WhatsApp number chosen above."
+        >
+          {(aria) => (
+            <Select
+              {...aria}
+              value={trigger.campaignId}
+              onChange={(e) => onChange({ ...trigger, campaignId: e.target.value, button: '' })}
+            >
+              <option value="">Any campaign</option>
+              {trigger.campaignId && !chosen ? (
+                <option value={trigger.campaignId}>A campaign that is not listed</option>
+              ) : null}
+              {campaigns.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} ({CAMPAIGN_STATUS_NAMES[c.status] ?? c.status})
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+        {chosen && offered.length > 0 ? (
+          <Field id="trigger-button" label="Reply">
+            {(aria) => (
+              <Select
+                {...aria}
+                value={trigger.button}
+                onChange={(e) => onChange({ ...trigger, button: e.target.value })}
+              >
+                <option value="">Any reply</option>
+                {offered.map((b) => (
+                  <option key={b} value={b}>
+                    Tapping “{b}”
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+        ) : (
+          <Field
+            id="trigger-button"
+            label="Quick-reply button (optional)"
+            description="Its text, as on the template. Empty: any reply."
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                value={trigger.button}
+                maxLength={25}
+                autoComplete="off"
+                onChange={(e) => onChange({ ...trigger, button: e.target.value })}
+              />
+            )}
+          </Field>
+        )}
+      </div>
+      <Alert tone="info">
+        <p>
+          Starts when a customer quotes a campaign message in a reply, or taps one of its template’s
+          quick-reply buttons, up to 72 hours after it was sent to them. A later reply starts what
+          any other message would.
+        </p>
+        <details className="mt-2">
+          <summary className="cursor-pointer font-medium">Campaign fields for texts</summary>
+          <ul className="mt-1 grid gap-0.5">
+            {(Object.keys(CAMPAIGN_PLACEHOLDERS) as (keyof typeof CAMPAIGN_PLACEHOLDERS)[]).map(
+              (field) => (
+                <li key={field}>
+                  <code>{`{{campaign.${field}}}`}</code>: {CAMPAIGN_PLACEHOLDERS[field]}
+                </li>
+              ),
+            )}
+          </ul>
+        </details>
+      </Alert>
     </div>
   );
 }
