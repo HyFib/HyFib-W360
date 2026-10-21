@@ -52,6 +52,11 @@ const TEMPLATE = '0192a1b2-0000-7000-8000-000000000070';
 const USER = 'user-1';
 const NOW = new Date('2026-10-16T12:00:00.000Z');
 const clock = { now: () => NOW };
+/** A worker clock `minutesOff` minutes ahead of the database's (behind when negative). */
+const skewed = (minutesOff: number) => ({
+  now: () => new Date(NOW.getTime() + minutesOff * 60_000),
+});
+
 const signer = new JobSigner('k'.repeat(64));
 
 const contactId = (n: number) => `0192a1b2-0000-7000-8000-${String(100000000000 + n)}`;
@@ -424,6 +429,10 @@ interface Scenario {
   resignalCount?: number;
 }
 
+/** The database's now, as the transaction reads it (the workers' clocks may differ from it). */
+const DB_NOW_SQL = 'extract(epoch from now())';
+const databaseNowRows = () => ({ rows: [{ ms: NOW.getTime() }] });
+
 function scenarioAnswers(s: Scenario) {
   const byId = new Map(s.contacts.map((c) => [contactId(c.n), c]));
   const byConversation = new Map(s.contacts.map((c) => [conversationOf(contactId(c.n)), c]));
@@ -434,6 +443,7 @@ function scenarioAnswers(s: Scenario) {
     c.phone === undefined ? `+9198110${String(c.n).padStart(5, '0')}` : c.phone;
   return (step: Step): unknown => {
     if (step.op === 'execute') {
+      if (step.sql?.includes(DB_NOW_SQL)) return databaseNowRows();
       if (step.sql?.includes('tenant_entitlements')) {
         return {
           rows: [
@@ -611,13 +621,13 @@ function scenarioAnswers(s: Scenario) {
 
 const scope = { kind: 'tenant', tenantId: TENANT, userId: USER } as unknown as TenantScope;
 
-async function batchOf(s: Scenario, sendRatePerSecond?: number) {
+async function batchOf(s: Scenario, sendRatePerSecond?: number, workerClock = clock) {
   const recording = recordingDb(scenarioAnswers(s));
   const jobs = new RecordingJobQueue();
   const result = await processEnrollmentBatch(
     {
       db: recording.db,
-      clock,
+      clock: workerClock,
       jobs,
       signer,
       ...(sendRatePerSecond ? { sendRatePerSecond } : {}),
@@ -981,7 +991,7 @@ describe('startEnrollment and stopEnrollment (ADR-401)', () => {
       segmentId: null,
       inputs: { patient: 'Asha' },
       total: 3,
-      nextBatchAt: NOW,
+      nextBatchAt: expect.anything(),
       createdByMembershipId: MEMBER,
       createdByUserId: USER,
     });
@@ -1179,7 +1189,8 @@ describe('pacing, progress and the sweep (ADR-401 review)', () => {
     const contacts = Array.from({ length: 60 }, (_, i) => ({ n: i + 1 }));
     const paced = await batchOf({ contacts, pendingRows: 51 }, 10);
     const next = paced.jobs.find((j) => j.queue === QUEUES.automationEnroll.name);
-    expect(next?.options.startAfter).toEqual(new Date(NOW.getTime() + 5_000));
+    // Seconds after the database's now, which pg-boss adds to it: never a worker's instant.
+    expect(next?.options.startAfter).toBe(5);
     expect(paced.result).toMatchObject({
       outcome: 'batch',
       nextBatchAt: new Date(NOW.getTime() + 5_000),
@@ -1195,7 +1206,7 @@ describe('pacing, progress and the sweep (ADR-401 review)', () => {
     const byDefault = await batchOf({ contacts, pendingRows: 51 });
     expect(
       byDefault.jobs.find((j) => j.queue === QUEUES.automationEnroll.name)?.options.startAfter,
-    ).toEqual(new Date(NOW.getTime() + 2_500));
+    ).toBe(2.5);
     // Refused contacts send nothing: a batch that started none queues the next one at once.
     const refused = await batchOf(
       { contacts: contacts.map((c) => ({ ...c, suppressed: true })), pendingRows: 51 },
@@ -1228,7 +1239,8 @@ describe('pacing, progress and the sweep (ADR-401 review)', () => {
     const inserted = recording.steps.find(
       (st) => st.op === 'insert' && st.table === 'automation_enrollments',
     );
-    expect(inserted?.values?.nextBatchAt).toEqual(NOW);
+    // The database's now, which the first job (queued without a delay) is judged by.
+    expect(dialect.sqlToQuery(inserted?.values?.nextBatchAt as SQL).sql).toBe('now()');
   });
 });
 
@@ -1397,12 +1409,13 @@ describe('pacing per enrolment and the sweep’s cap (ADR-401 second review)', (
   });
 
   it('defers a suspended company’s enrolment: its next batch is due at the deferred time', async () => {
+    // Five minutes after the database's now, and queued with that delay for pg-boss to add to it.
     const at = minutes(5);
     const recording = recordingDb(
       scenarioAnswers({ contacts, cursor: 50, nextBatchAt: minutes(-1) }),
     );
     const jobs = new RecordingJobQueue();
-    expect(await deferEnrollment({ db: recording.db, jobs, signer }, scope, ENROLLMENT, at)).toBe(
+    expect(await deferEnrollment({ db: recording.db, jobs, signer }, scope, ENROLLMENT, 300)).toBe(
       true,
     );
     expect(
@@ -1411,7 +1424,7 @@ describe('pacing per enrolment and the sweep’s cap (ADR-401 second review)', (
     ).toEqual({ nextBatchAt: at });
     expect(
       jobs.jobs.map((j) => [j.envelope.actorUserId, j.options.singletonKey, j.options.startAfter]),
-    ).toEqual([[USER, `${ENROLLMENT}:50:deferred:${at.getTime()}`, at]]);
+    ).toEqual([[USER, `${ENROLLMENT}:50:deferred:${at.getTime()}`, 300]]);
     // The deferred chain and the sweep's: whichever job comes before that time does nothing.
     const early = await batchOf({ contacts, cursor: 50, nextBatchAt: at });
     expect(early.result).toMatchObject({ outcome: 'not_due' });
@@ -1421,7 +1434,7 @@ describe('pacing per enrolment and the sweep’s cap (ADR-401 second review)', (
         { db: ended.db, jobs: new RecordingJobQueue(), signer },
         scope,
         ENROLLMENT,
-        at,
+        300,
       ),
     ).toBe(false);
     expect(writes(ended.steps)).toEqual([]);
@@ -1429,7 +1442,11 @@ describe('pacing per enrolment and the sweep’s cap (ADR-401 second review)', (
 
   it('shows an enrolment as without progress since its last contact, except while the company is suspended', async () => {
     const lastAt = new Date(NOW.getTime() - 30 * 60_000);
-    const view = async (status: 'active' | 'suspended', over: Record<string, unknown>) => {
+    const view = async (
+      status: 'active' | 'suspended',
+      over: Record<string, unknown>,
+      workerClock = clock,
+    ) => {
       const row = {
         id: ENROLLMENT,
         tenantId: TENANT,
@@ -1455,6 +1472,7 @@ describe('pacing per enrolment and the sweep’s cap (ADR-401 second review)', (
         ...over,
       };
       const recording = recordingDb((step) => {
+        if (step.op === 'execute' && step.sql?.includes(DB_NOW_SQL)) return databaseNowRows();
         if (step.table === 'automation_enrollments') {
           return [{ e: row, automationName: 'Follow-up', segmentName: null }];
         }
@@ -1471,7 +1489,7 @@ describe('pacing per enrolment and the sweep’s cap (ADR-401 second review)', (
       return (
         await createAutomationEnrollmentService({
           db: recording.db,
-          clock,
+          clock: workerClock,
           jobs: new RecordingJobQueue(),
           signer,
         }).getEnrollment(ctx, ENROLLMENT)
@@ -1483,5 +1501,71 @@ describe('pacing per enrolment and the sweep’s cap (ADR-401 second review)', (
     expect(await view('active', { nextBatchAt: NOW, resignalCount: 1 })).toEqual(lastAt);
     expect(await view('active', { nextBatchAt: minutes(-5) })).toBeNull();
     expect(await view('active', { status: 'completed', nextBatchAt: null })).toBeNull();
+    // Judged by the database's time, whatever the worker's clock says.
+    expect(await view('active', { nextBatchAt: minutes(-5) }, skewed(60))).toBeNull();
+    expect(await view('active', {}, skewed(-60))).toEqual(lastAt);
+  });
+});
+
+describe('pacing by the database’s clock (ADR-401 third review)', () => {
+  const contacts = Array.from({ length: 60 }, (_, i) => ({ n: i + 1 }));
+
+  it('runs a batch due by the database’s time whatever the worker’s clock says', async () => {
+    for (const minutesOff of [-60, 60]) {
+      // Due now by the database (as the start sets it): runs, even on a worker an hour behind.
+      const due = await batchOf(
+        { contacts, pendingRows: 51, nextBatchAt: NOW },
+        20,
+        skewed(minutesOff),
+      );
+      expect(due.result, `${minutesOff}`).toMatchObject({ outcome: 'batch', started: 50 });
+      // Not due by the database: nothing, even on a worker an hour ahead.
+      const early = await batchOf(
+        { contacts, nextBatchAt: new Date(NOW.getTime() + 5_000) },
+        20,
+        skewed(minutesOff),
+      );
+      expect(early.result, `${minutesOff}`).toMatchObject({ outcome: 'not_due' });
+    }
+  });
+
+  it('sets the next batch from the database’s now and queues its job by a delay, not a worker’s instant', async () => {
+    for (const minutesOff of [-60, 60]) {
+      const paced = await batchOf({ contacts, pendingRows: 51 }, 20, skewed(minutesOff));
+      expect(paced.result).toMatchObject({
+        outcome: 'batch',
+        nextBatchAt: new Date(NOW.getTime() + 2_500),
+      });
+      const next = paced.jobs.find((j) => j.queue === QUEUES.automationEnroll.name);
+      expect(next?.options.startAfter, `${minutesOff}`).toBe(2.5);
+    }
+  });
+
+  it('signals an overdue enrolment by the database’s time, whatever the worker’s clock says', async () => {
+    for (const [minutesOff, overdueMinutes, outcome] of [
+      [-60, 11, 'signalled'],
+      [60, 9, 'skipped'],
+    ] as const) {
+      const recording = recordingDb(
+        scenarioAnswers({
+          contacts,
+          cursor: 50,
+          nextBatchAt: new Date(NOW.getTime() - overdueMinutes * 60_000),
+        }),
+      );
+      const jobs = new RecordingJobQueue();
+      expect(
+        await resignalEnrollment(
+          { db: recording.db, jobs, signer, clock: skewed(minutesOff) },
+          { tenantId: TENANT, enrollmentId: ENROLLMENT, actorUserId: USER, cursorPosition: 50 },
+        ),
+      ).toBe(outcome);
+      if (outcome === 'signalled') {
+        expect(
+          recording.steps.find((st) => st.op === 'update' && st.table === 'automation_enrollments')
+            ?.set,
+        ).toEqual({ resignalCount: 1, nextBatchAt: NOW });
+      }
+    }
   });
 });

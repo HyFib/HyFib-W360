@@ -79,14 +79,14 @@ started only from customer messages, store events, members' tests and the public
   run pages and lists name the enrolment. Pages re-check permissions; logic stays in the services.
 - **Webhooks:** enrolled runs reach `automation.run_started`/`run_ended` as before, with trigger
   `api` and `apiKeyId: null` (descriptions updated).
-- **Tests:** unit (`automations/enrollments.test.ts`, 42 tests after both reviews' fixes: bounds,
+- **Tests:** unit (`automations/enrollments.test.ts`, 45 tests after the reviews' fixes: bounds,
   the schema, the count check, the inputs, refusal codes, job keys, the refusal summary, the batch
   logic (50 in order, refusals, the plan ending it, other errors thrown), and against a recording
   database a batch (runs naming the enrolment, outcomes, next job and position, the cursor, every
   refusal, the plan's runs, marketing consent, each way it ends, ended and missing enrolments, an
   unexpected error), a start (the snapshot, the audit without inputs, the first job, a segment,
   permissions, inputs, counts, the second running enrolment) and a stop; `api-trigger.test.ts`
-  updated); integration (`tests/integration/automation-enrollments.test.ts`, 18 tests (8 added by
+  updated); integration (`tests/integration/automation-enrollments.test.ts`, 19 tests (9 added by
   the reviews' fixes): the snapshot and batches of 50 with the run's records and audit, a segment
   and the webhook event, each refusal with its reason, the plan's runs and a plan without
   automations, a crash mid-batch and two jobs at once without a second run, stop, who may, ends
@@ -158,6 +158,23 @@ started only from customer messages, store events, members' tests and the public
     or not made due, `stalled` not failed, the deferral not moving the next batch, the stall shown
     while suspended, one sweep error stopping the rest, and the start and end payloads'
     `enrollmentId`): 44 caught; the miss is the unobservable one above.
+- **Third review fixes (fifth commit):**
+  - **M1, mixed clocks:** `next_batch_at` was set and compared by the worker's clock while pg-boss
+    starts jobs by the database's, so a worker ahead by more than a second stalled an enrolment
+    until the sweep and one behind skipped its pace. The batch, the start, the deferral, the sweep's
+    signal and the stall notice now read the database's `now()` (the transaction's start, which is
+    pg-boss's `job_now()` for a job queued in the same transaction), and jobs are queued with
+    `startAfter` in seconds; `deferEnrollment` takes a delay. ADR-401 says why `now()` and not
+    `clock_timestamp()`, and that a `not_due` job can now only be an early duplicate. Unit tests
+    with worker clocks an hour ahead and behind (a due batch runs, an early one does not, the next
+    job's delay is relative, the sweep and the stall notice judge by the database); integration
+    tests that the waiting job's `start_after` equals `next_batch_at` (paced, deferred, and on
+    skewed worker clocks).
+  - L1 (informational): `dueAmong` is left as it is. Nit: the runbook's query for 0312 also finds
+    runs naming an enrolment that does not exist.
+  - Mutation checks: 50 deliberate regressions (the 45 above, and the batch's due check, the next
+    job's start as an instant, the sweep's signal, the stall notice and the deferral each by the
+    worker's clock): 49 caught; the miss is the unobservable one above.
 - **Not built:** enrolling through the public API, scheduling an enrolment or a rate of its own,
   pacing shared across enrolments and campaigns of one number, stopping an enrolment's runs at
   once, choosing contacts one by one.

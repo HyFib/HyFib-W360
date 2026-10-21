@@ -1609,8 +1609,19 @@ find it with `SELECT id, trigger_type, api_key_id FROM app.automation_runs WHERE
 **Migration 0311, 0312 or 0314 failed (ADR-401).** 0311 and 0312 each run in one transaction, so a
 failure applies nothing. 0312 validates the run's check `automation_runs_api_key` and foreign key
 `automation_runs_enrollment_fk`; it fails only if a stored run breaks one, which no code writes:
-find it with `SELECT id, trigger_type, api_key_id, enrollment_id FROM app.automation_runs WHERE
-num_nonnulls(api_key_id, enrollment_id) <> CASE WHEN trigger_type = 'api' THEN 1 ELSE 0 END`.
+find it (a run with the wrong starter for its trigger, or naming an enrolment that does not exist)
+with this query before running it again:
+
+```sql
+SELECT r.id, r.trigger_type, r.api_key_id, r.enrollment_id
+  FROM app.automation_runs r
+ WHERE num_nonnulls(r.api_key_id, r.enrollment_id)
+         <> CASE WHEN r.trigger_type = 'api' THEN 1 ELSE 0 END
+    OR (r.enrollment_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM app.automation_enrollments e
+           WHERE e.tenant_id = r.tenant_id AND e.id = r.enrollment_id));
+```
+
 0314 runs outside a transaction (one `CREATE INDEX CONCURRENTLY`): a failure can leave an INVALID
 index; run `DROP INDEX CONCURRENTLY IF EXISTS app.automation_runs_enrollment_idx;` and run the
 migrations again.

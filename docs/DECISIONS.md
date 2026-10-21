@@ -16833,7 +16833,17 @@ Decision:
   job that arrives more than a second before `next_batch_at` does nothing (`not_due`), so a second
   chain of jobs (a deferred one beside the sweep's, a retry after a lost completion) collapses into
   the one queued for that time instead of doubling the pace, and a deferral moves `next_batch_at` to
-  its own time. **The pace is per enrolment only:** two enrolments on one number, or an enrolment
+  its own time. **One clock, the database's:** every read and write of `next_batch_at` (the due
+  check, the next batch's time, the start, the deferral, the sweep's signal and the page's stall
+  notice) uses the database's `now()`, and the next job is queued with `startAfter` as a number of
+  seconds, which pg-boss adds to its `job_now()`, never as an instant by a worker's clock. `now()`
+  rather than `clock_timestamp()`: it is the transaction's start, the same instant pg-boss's
+  `job_now()` returns for a job queued in that transaction, so the job's start equals the stored
+  `next_batch_at`; a batch's own duration (up to 50 starts) would otherwise put `next_batch_at`
+  after the job's start, and waiting for the row lock only makes the real time later, never
+  earlier. With both sides on that clock, a worker whose clock runs ahead or behind can neither
+  stall an enrolment nor skip its pace, and a `not_due` job can only be a genuine early duplicate.
+  **The pace is per enrolment only:** two enrolments on one number, or an enrolment
   beside a campaign or the inbox, each start runs at the full rate, and the number's send bucket is
   what finally spaces their messages. Campaigns' own `rate_per_minute` has no equivalent here (a
   later slice could add one). Meta's messaging limit is not paced: it counts unique customers
@@ -16976,3 +16986,10 @@ signals); that the enrolment sweep could stop the automation sweep before retent
 errors logged per enrolment); and two nits: an explicit `REVOKE ... FROM PUBLIC` and the stall bound
 aligned between SQL and code. The index of the first review, first built inside 0311 (which would
 have scanned the runs under its exclusive lock), is built concurrently by 0314.
+
+Third review (before merge): it found that pacing mixed clocks (`next_batch_at` was set and
+compared by the worker's clock while pg-boss starts jobs by the database's), so a worker ahead of
+the database by more than a second left every queued job `not_due` until the sweep, and one behind
+it skipped the pace; every read and write now uses the database's `now()` and jobs are queued with
+a delay in seconds (above). A nit: the runbook's query for 0312 also finds runs naming an enrolment
+that does not exist.

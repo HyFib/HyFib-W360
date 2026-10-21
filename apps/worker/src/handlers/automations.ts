@@ -88,11 +88,12 @@ export function automationEnrollHandler(rt: WorkerRuntime) {
       // queued for that time, in the company's scope (from the verified envelope), so the sweep does
       // not start a second chain meanwhile.
       const ref = auth.envelope.ref;
+      // A delay from the database's now, not a time by this worker's clock (ADR-401).
       const deferred = await deferEnrollment(
         rt,
         auth.cleanupScope,
         ref,
-        new Date(rt.clock.now().getTime() + ENROLLMENT_DEFER_MINUTES * 60_000),
+        ENROLLMENT_DEFER_MINUTES * 60,
       );
       rt.logger.info(
         { jobId: job.id, enrollmentId: ref, deferred },

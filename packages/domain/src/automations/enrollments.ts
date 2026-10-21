@@ -164,11 +164,35 @@ async function memberPermissions(
   return member ? permissionsForRoles(member.roles) : null;
 }
 
-/** Signals the enrolment job for the batch after `position` (the job only wakes the row). */
+/**
+ * The database's now: the transaction's start (`now()`), which is also the `job_now()` pg-boss adds
+ * a job's delay to when the job is queued in the same transaction. Enrolment pacing reads and writes
+ * `next_batch_at` by this clock only, never a worker's (ADR-401): a worker whose clock runs ahead or
+ * behind the database's neither stalls an enrolment nor skips its pace.
+ */
+async function databaseNow(tx: Tx): Promise<Date> {
+  const res = await tx.execute<{ ms: number | string }>(
+    sql`select (extract(epoch from now()) * 1000)::float8 as ms`,
+  );
+  const ms = Number(res.rows[0]?.ms);
+  if (!Number.isFinite(ms)) throw new Error('The database did not report its time');
+  return new Date(ms);
+}
+
+/**
+ * Signals the enrolment job for the batch after `position` (the job only wakes the row). A delay is
+ * given to pg-boss in seconds, which it adds to the database's own now, never as a worker's instant.
+ */
 export async function signalEnrollment(
   deps: Pick<EnrollmentDeps, 'jobs' | 'signer'>,
   tx: Tx | null,
-  input: { tenantId: string; enrollmentId: string; actorUserId: string; key: string; at?: Date },
+  input: {
+    tenantId: string;
+    enrollmentId: string;
+    actorUserId: string;
+    key: string;
+    delaySeconds?: number;
+  },
 ): Promise<void> {
   await deps.jobs.enqueue(
     tx,
@@ -179,7 +203,10 @@ export async function signalEnrollment(
       actorUserId: input.actorUserId,
       ref: input.enrollmentId,
     }),
-    { singletonKey: input.key, ...(input.at ? { startAfter: input.at } : {}) },
+    {
+      singletonKey: input.key,
+      ...(input.delaySeconds && input.delaySeconds > 0 ? { startAfter: input.delaySeconds } : {}),
+    },
   );
 }
 
@@ -296,7 +323,8 @@ export async function processEnrollmentBatch(
       .for('update');
     if (!enrollment) return { outcome: 'missing' };
     if (enrollment.status !== 'running') return { outcome: 'ended' };
-    const now = deps.clock.now();
+    // The database's time, as `next_batch_at` was set by and as pg-boss starts the queued job by.
+    const now = await databaseNow(tx);
     // Paced per enrolment: a job that arrives before the next batch is due does nothing, so a second
     // chain of jobs collapses into the one queued for that time instead of doubling the pace.
     if (enrollment.nextBatchAt && !enrollmentBatchDue(enrollment.nextBatchAt, now)) {
@@ -396,14 +424,12 @@ export async function processEnrollmentBatch(
     const batch = await recordOutcomes(tx, tenantId, result.outcomes, now);
     const last = result.outcomes.at(-1);
     // Paced: the next batch starts no sooner than the runs this one started take at the number's
-    // send rate (the rate campaigns use when they have none of their own).
-    const nextBatchAt = new Date(
-      now.getTime() +
-        enrollmentBatchDelayMs(
-          batch.started,
-          deps.sendRatePerSecond ?? DEFAULT_SEND_RATE_PER_SECOND,
-        ),
+    // send rate (the rate campaigns use when they have none of their own), from the database's now.
+    const delayMs = enrollmentBatchDelayMs(
+      batch.started,
+      deps.sendRatePerSecond ?? DEFAULT_SEND_RATE_PER_SECOND,
     );
+    const nextBatchAt = new Date(now.getTime() + delayMs);
     await tx
       .update(automationEnrollments)
       .set({
@@ -428,7 +454,8 @@ export async function processEnrollmentBatch(
       enrollmentId: enrollment.id,
       actorUserId: enrollment.createdByUserId,
       key: enrollmentJobKey(enrollment.id, last?.position ?? enrollment.cursorPosition),
-      ...(nextBatchAt > now ? { at: nextBatchAt } : {}),
+      // The same delay, which pg-boss adds to the same now: the job starts when the batch is due.
+      delaySeconds: delayMs / 1000,
     });
     return { outcome: 'batch', ...batch, nextBatchAt };
   });
@@ -689,7 +716,8 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
             segmentId: data.audience.kind === 'segment' ? data.audience.segmentId : null,
             inputs,
             total: ids.length,
-            nextBatchAt: clock.now(),
+            // The database's now: the first batch's job (queued without a delay) finds it due.
+            nextBatchAt: sql`now()`,
             createdByMembershipId: ctx.membership.id,
             createdByUserId: ctx.user.id,
           });
@@ -846,6 +874,12 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
             .groupBy(automationEnrollmentContacts.reason);
           const summary = toSummary(r.e, r.segmentName, nameOf(r.e.createdByMembershipId));
           // When it last handled a contact (its start when it has handled none).
+          // Not while the company is suspended: no run starts then, and that is not a stall. Signalled
+          // again since its last batch, or overdue by the database's time as the due list judges it.
+          const stalled =
+            r.e.status === 'running' &&
+            ctx.tenant.status === 'active' &&
+            (r.e.resignalCount > 0 || enrollmentStalled(r.e.nextBatchAt, await databaseNow(tx)));
           const [lastProgress] = await tx
             .select({ at: sql<Date | null>`max(${automationEnrollmentContacts.processedAt})` })
             .from(automationEnrollmentContacts)
@@ -863,13 +897,7 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
             refusals: summariseRefusals(
               reasons.map((x) => ({ reason: x.reason ?? '', count: x.count })),
             ),
-            // Not while the company is suspended: no run starts then, and that is not a stall.
-            stalledSince:
-              r.e.status === 'running' &&
-              ctx.tenant.status === 'active' &&
-              (r.e.resignalCount > 0 || enrollmentStalled(r.e.nextBatchAt, clock.now()))
-                ? (lastProgress?.at ?? r.e.createdAt)
-                : null,
+            stalledSince: stalled ? (lastProgress?.at ?? r.e.createdAt) : null,
           };
         },
         { accessMode: 'read only' },
@@ -1018,9 +1046,10 @@ export async function resignalEnrollment(
         ),
       )
       .for('update');
-    const now = deps.clock.now();
+    if (enrollment?.status !== 'running') return 'skipped';
+    // By the database's time, as the due list found it overdue.
+    const now = await databaseNow(tx);
     if (
-      enrollment?.status !== 'running' ||
       enrollment.cursorPosition !== due.cursorPosition ||
       !enrollmentStalled(enrollment.nextBatchAt, now)
     ) {
@@ -1082,14 +1111,15 @@ export async function signalDueEnrollments(
 
 /**
  * Defers a running enrolment of a suspended company (the worker's job was deferred): its next batch
- * is due at `at`, when the job queued here looks again, so the sweep does not start a second chain
- * meanwhile. Returns whether it was running.
+ * is due `delaySeconds` after the database's now, when the job queued here (with that delay, which
+ * pg-boss adds to the same now) looks again, so the sweep does not start a second chain meanwhile.
+ * Returns whether it was running.
  */
 export async function deferEnrollment(
   deps: Pick<EnrollmentDeps, 'db' | 'jobs' | 'signer'>,
   scope: TenantScope,
   enrollmentId: string,
-  at: Date,
+  delaySeconds: number,
 ): Promise<boolean> {
   if (!z.uuid().safeParse(enrollmentId).success) return false;
   return deps.db.run(scope, async (tx) => {
@@ -1104,6 +1134,7 @@ export async function deferEnrollment(
       )
       .for('update');
     if (enrollment?.status !== 'running') return false;
+    const at = new Date((await databaseNow(tx)).getTime() + delaySeconds * 1000);
     await tx
       .update(automationEnrollments)
       .set({ nextBatchAt: at })
@@ -1118,7 +1149,7 @@ export async function deferEnrollment(
       enrollmentId: enrollment.id,
       actorUserId: enrollment.createdByUserId,
       key: `${enrollmentJobKey(enrollment.id, enrollment.cursorPosition)}:deferred:${at.getTime()}`,
-      at,
+      delaySeconds,
     });
     return true;
   });

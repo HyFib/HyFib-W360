@@ -1072,6 +1072,18 @@ const batchJobs = async (key: string) =>
     [QUEUES.automationEnroll.name, key],
   );
 
+/** Seconds between a waiting batch job's start and its enrolment's next batch time. */
+const batchGap = async (key: string) => {
+  const [row] = await fx.query<{ gap: number }>(
+    `SELECT abs(extract(epoch FROM j.start_after - e.next_batch_at))::float AS gap
+       FROM pgboss.job j
+       JOIN app.automation_enrollments e ON e.id::text = split_part(j.singleton_key, ':', 1)
+      WHERE j.name = $1 AND j.singleton_key = $2 AND j.state = 'created'`,
+    [QUEUES.automationEnroll.name, key],
+  );
+  return row?.gap;
+};
+
 describe('enrolments after review: the sweep, pacing, consent, the job’s authorisation, merges (ADR-401)', () => {
   it('paces the next batch by the number’s send rate, and a job that comes early does nothing', async () => {
     const c = await fx.company();
@@ -1094,6 +1106,8 @@ describe('enrolments after review: the sweep, pacing, consent, the job’s autho
     );
     expect(row!.seconds).toBeGreaterThan(2);
     expect(row!.seconds).toBeLessThan(3);
+    // Both by the database's clock: the job starts when the batch is due, not before or long after.
+    expect(await batchGap(`${started.id}:50`)).toBeLessThan(0.001);
     // Another job before then (a second chain) starts nothing and changes nothing.
     expect(await processEnrollmentBatch(paced, scope, started.id)).toMatchObject({
       outcome: 'not_due',
@@ -1105,24 +1119,62 @@ describe('enrolments after review: the sweep, pacing, consent, the job’s autho
     });
     // Deferred while the company was suspended: its next batch is due at the deferred time, so the
     // sweep's job and the deferred one cannot both run before it.
-    const later = new Date(Date.now() + 5 * 60_000);
+    // Five minutes after the database's now, and its job queued for the same time.
     expect(
       await deferEnrollment(
         enrollmentDeps(),
         authorizedTenantScope(c.tenant.id, null),
         started.id,
-        later,
+        300,
       ),
     ).toBe(true);
-    const [deferred] = await fx.query<{ at: Date }>(
-      'SELECT next_batch_at AS at FROM app.automation_enrollments WHERE id = $1',
-      [started.id],
+    const [deferred] = await fx.query<{ seconds: number; gap: number }>(
+      `SELECT extract(epoch FROM e.next_batch_at - now())::float AS seconds,
+              abs(extract(epoch FROM j.start_after - e.next_batch_at))::float AS gap
+         FROM app.automation_enrollments e
+         JOIN pgboss.job j ON j.name = $2 AND j.singleton_key LIKE e.id::text || ':50:deferred:%'
+        WHERE e.id = $1`,
+      [started.id, QUEUES.automationEnroll.name],
     );
-    expect(deferred!.at.getTime()).toBe(later.getTime());
+    expect(deferred!.seconds).toBeGreaterThan(290);
+    expect(deferred!.seconds).toBeLessThanOrEqual(300);
+    expect(deferred!.gap).toBeLessThan(0.001);
     expect(await processEnrollmentBatch(paced, scope, started.id)).toMatchObject({
       outcome: 'not_due',
     });
     expect(await dueAmong([c])).toEqual([]);
+  });
+
+  it('paces by the database’s clock on workers whose clocks run an hour ahead or behind', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const automationId = await publish(owner, c, 'Skewed');
+    await contactsOf(c, 105, 'skewed');
+    const started = await enrol(owner, automationId, byTag('skewed'), 105);
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const worker = (minutesOff: number) => ({
+      ...enrollmentDeps(),
+      sendRatePerSecond: 20,
+      clock: { now: () => new Date(Date.now() + minutesOff * 60_000) },
+    });
+    // Due by the database as soon as it starts, on a worker an hour ahead.
+    expect(await processEnrollmentBatch(worker(60), scope, started.id)).toMatchObject({
+      outcome: 'batch',
+      started: 50,
+    });
+    const [row] = await fx.query<{ seconds: number }>(
+      `SELECT extract(epoch FROM next_batch_at - now())::float AS seconds
+         FROM app.automation_enrollments WHERE id = $1`,
+      [started.id],
+    );
+    expect(row!.seconds).toBeGreaterThan(2);
+    expect(row!.seconds).toBeLessThanOrEqual(2.5);
+    expect(await batchGap(`${started.id}:50`)).toBeLessThan(0.001);
+    // Paced on a worker an hour behind too: its job before then starts nothing.
+    expect(await processEnrollmentBatch(worker(-60), scope, started.id)).toMatchObject({
+      outcome: 'not_due',
+    });
+    expect(await runsOf(started.id)).toHaveLength(50);
   });
 
   it('signals an enrolment whose next batch is 10 minutes overdue again, and the signal starts nobody twice', async () => {
