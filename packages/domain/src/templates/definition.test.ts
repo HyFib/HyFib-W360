@@ -222,6 +222,20 @@ describe('template definitions', () => {
   });
 });
 
+describe('placeholders', () => {
+  it('reads a placeholder’s inner text trimmed, and no placeholder in an unclosed one', () => {
+    expect(positionalVariables('{{\t1\n}} and {{ 2 }}')).toEqual({ ok: true, numbers: [1, 2] });
+    expect(positionalVariables('{{ }}')).toEqual({
+      ok: false,
+      message: 'Use numbered variables such as {{1}} and {{2}}.',
+    });
+    // The shape CodeQL reports: an unclosed `{{` before whitespace.
+    expect(positionalVariables(`{{{{${'\t'.repeat(64)}`)).toEqual({ ok: true, numbers: [] });
+    const body = { text: 'Hi {{ 1 }}, see {{ 3 }}', examples: ['Asha'] };
+    expect(renderExample({ ...def, body }).body).toBe('Hi Asha, see {{3}}');
+  });
+});
+
 describe('website buttons whose link ends with a value (ADR-228)', () => {
   const tracked: TemplateDefinition = {
     category: 'UTILITY',

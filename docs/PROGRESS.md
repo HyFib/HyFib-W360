@@ -163,6 +163,15 @@ usage drops ids; DEPLOYMENT's rollback reaches `w360_definer` through `SET ROLE`
 comment and `memberVisibility`'s place. The rate-limit integration test now answers HTTP 429 with
 a pausing header.
 
+### CI's first run (PR #105, 2026-10-21)
+
+CodeQL reported a polynomial regular expression on data from the new exported template functions
+(`js/polynomial-redos`, `templates/definition.ts`): `VARIABLE_RE`, `\s*` around a lazy group,
+backtracked on an unclosed `{{` followed by much whitespace (old: 32 ms for 400 tabs; new: 1 ms
+for 200,000). It is now `\{\{([^{}]*)\}\}` with the inner text trimmed by its two callers: the
+same matches, captures and replacements (33,678 random placeholder matches compared, none
+different), and a unit test for the trimming and the unclosed case.
+
 ### Test commands and results (local, 2026-10-21)
 
 | Command                                        | Result                                                                        |
