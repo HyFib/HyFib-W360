@@ -6727,7 +6727,13 @@ describe('reading campaigns (ADR-125)', () => {
     // Counts only: no recipients, members or costs. The draft's settings and version are answered
     // to keys that edit drafts only, and are null for the others (ADR-186).
     expect(Object.keys(schemas.CampaignWithResults?.properties ?? {}).sort()).toEqual(
-      [...Object.keys(schemas.Campaign?.properties ?? {}), 'results', 'settings', 'version'].sort(),
+      [
+        ...Object.keys(schemas.Campaign?.properties ?? {}),
+        'results',
+        'settings',
+        'variants',
+        'version',
+      ].sort(),
     );
     for (const hidden of ['recipients', 'variables', 'budgetMicros', 'launchedBy', 'segmentId']) {
       expect(Object.keys(schemas.CampaignWithResults?.properties ?? {})).not.toContain(hidden);
@@ -6875,6 +6881,7 @@ describe('listing a campaign’s recipients (ADR-127)', () => {
         'queuedAt',
         'repliedAt',
         'optedOutAt',
+        'variant',
       ].sort(),
     );
     expect(Object.keys(recipient.contact?.properties ?? {}).sort()).toEqual([
@@ -7931,6 +7938,7 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
         { limit: 'TIER_250', checkedAt: new Date('2026-10-16T08:00:00Z') },
         5,
       ),
+      variants: null,
     };
     const answered = toApiCampaignReview({ id, version: 4 }, members);
     expect(answered).toEqual({
@@ -7969,6 +7977,7 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
         checkedAt: '2026-10-16T08:00:00.000Z',
         figure: 250,
       },
+      variants: null,
     });
     expect(apiCampaignReviewSchema.parse(answered)).toEqual(answered);
     // An unknown limit (a value Meta's SDK does not list) gives no figure.
@@ -8017,6 +8026,7 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       approvalRequired: false,
       frequencyCap: null,
       messagingLimit: null,
+      variants: null,
     });
     expect(apiCampaignReviewSchema.parse(incomplete)).toEqual(incomplete);
   });
@@ -8065,6 +8075,7 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       'problems',
       'scheduleAdjustment',
       'scheduledAt',
+      'variants',
       'version',
     ];
     expect(Object.keys(reviewSchema.properties).sort()).toEqual(fields);
@@ -9616,5 +9627,178 @@ describe('merging contacts through the API (ADR-227)', () => {
     expect(schemas.ContactMerge?.additionalProperties).toBe(false);
     expect(schemas.ContactMergeResult?.required).toEqual(['contact', 'mergedContactId', 'moved']);
     expect(API_ROUTES).toEqual(expect.arrayContaining([['post', '/contacts/{id}/merge']]));
+  });
+});
+
+describe('A/B variants through the API (ADR-405)', () => {
+  type Node = {
+    type?: string;
+    enum?: string[];
+    minimum?: number;
+    maximum?: number;
+    multipleOf?: number;
+    description?: string;
+    anyOf?: Node[];
+    items?: Node;
+    properties?: Record<string, Node>;
+    required?: string[];
+  };
+  const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+  const schemas = (doc.components as { schemas: Record<string, Node> }).schemas;
+  const nullable = (node: Node | undefined) => {
+    expect(node?.anyOf).toHaveLength(2);
+    expect(node!.anyOf![1]).toEqual({ type: 'null' });
+    return node!.anyOf![0]!;
+  };
+
+  it("name each recipient's variant, A or B, required", () => {
+    const recipient = schemas.CampaignRecipient!;
+    expect(recipient.required).toContain('variant');
+    expect(recipient.properties?.variant).toMatchObject({ type: 'string', enum: ['A', 'B'] });
+    expect(recipient.properties?.variant?.description).toContain('never changes');
+    const webhook = schemas.WebhookCampaignRecipientSkipped!;
+    const data = webhook.properties!.data!;
+    const recipientNode = data.properties!.recipient!;
+    expect(recipientNode.required).toContain('variant');
+    expect(recipientNode.properties?.variant).toMatchObject({ type: 'string', enum: ['A', 'B'] });
+  });
+
+  it('give each variant’s results side by side, descriptive only, null without B', () => {
+    const detail = schemas.CampaignWithResults!;
+    expect(detail.required).toContain('variants');
+    const list = nullable(detail.properties?.variants);
+    expect(list.type).toBe('array');
+    const item = list.items!;
+    expect([...(item.required ?? [])].sort()).toEqual(
+      ['results', 'sharePercent', 'templateId', 'templateName', 'variant'].sort(),
+    );
+    expect(item.properties?.variant).toMatchObject({ enum: ['A', 'B'] });
+    expect(item.properties?.sharePercent).toMatchObject({
+      type: 'integer',
+      minimum: 10,
+      maximum: 90,
+    });
+    expect(item.properties?.results?.description).toContain('picks no winner');
+    expect(detail.properties?.variants?.description).toContain('Null for a draft');
+    // The settings carry variant B as members' editor holds it.
+    const settings = nullable(detail.properties?.settings);
+    const variantB = nullable(settings.properties?.variantB);
+    expect([...(variantB.required ?? [])].sort()).toEqual(
+      ['sharePercent', 'templateId', 'variables'].sort(),
+    );
+    expect(variantB.properties?.sharePercent).toMatchObject({ minimum: 10, maximum: 90 });
+    expect(variantB.properties?.sharePercent?.description).toContain('in steps of 5');
+    for (const name of ['CreateCampaign', 'UpdateCampaign']) {
+      expect(Object.keys(schemas[name]?.properties ?? {})).toContain('variantB');
+      expect(schemas[name]?.required ?? []).not.toContain('variantB');
+    }
+    const review = schemas.CampaignReview!;
+    expect(review.required).toContain('variants');
+    expect(nullable(review.properties?.variants).type).toBe('array');
+  });
+
+  it('take variant B in a draft, its share in 5% steps from 10% to 90%, and keep it when left out', () => {
+    const variantB = { templateId: null, variables: { header: [], body: [] }, sharePercent: 25 };
+    expect(apiCreateCampaignSchema.safeParse({ name: 'A/B', variantB }).success).toBe(true);
+    expect(apiUpdateCampaignSchema.safeParse({ variantB: null }).success).toBe(true);
+    for (const sharePercent of [5, 12, 95, 100])
+      expect(
+        apiUpdateCampaignSchema.safeParse({ variantB: { ...variantB, sharePercent } }).success,
+        String(sharePercent),
+      ).toBe(false);
+    const base = apiDraftInputFrom(
+      {
+        name: 'x',
+        channelAccountId: null,
+        templateId: null,
+        variables: { header: [], body: [], buttons: [] },
+        audience: { kind: 'none' },
+        schedule: { kind: 'now', timezone: 'Asia/Kolkata' },
+        window: null,
+        ratePerMinute: null,
+        maxMessages: null,
+        budget: null,
+        stopAfterHours: 24,
+      },
+      { name: 'y' },
+    );
+    expect('variantB' in base).toBe(false);
+    expect(apiDraftInputFrom(base, { variantB: null }).variantB).toBeNull();
+  });
+
+  it("answer each variant of a draft's review, adding up to its totals", () => {
+    const answered = toApiCampaignReview(
+      { id: '0192a1b2-0000-7000-8000-000000000001', version: 3 },
+      {
+        problems: ['Variant B: The template is not approved by Meta.'],
+        audience: { total: 10, eligible: 8, skipped: { opted_out: 2 } },
+        estimate: {
+          currency: 'INR',
+          totalMicros: 3_100_000,
+          pricedCount: 8,
+          unpricedCount: 0,
+          byMarket: [{ market: 'India', count: 8, micros: 3_100_000 }],
+        },
+        costCurrency: 'INR',
+        scheduledAt: null,
+        adjustment: null,
+        approvalRequired: false,
+        frequencyCap: null,
+        messagingLimit: null,
+        variants: [
+          {
+            label: 'A',
+            templateId: '0192a1b2-0000-7000-8000-00000000000a',
+            templateName: 'festive_sale',
+            category: 'MARKETING',
+            sharePercent: 70,
+            audience: { total: 7, eligible: 5, skipped: { opted_out: 2 } },
+            estimate: {
+              currency: 'INR',
+              totalMicros: 2_500_000,
+              pricedCount: 5,
+              unpricedCount: 0,
+              byMarket: [],
+            },
+          },
+          {
+            label: 'B',
+            templateId: '0192a1b2-0000-7000-8000-00000000000b',
+            templateName: 'store_news',
+            category: 'UTILITY',
+            sharePercent: 30,
+            audience: { total: 3, eligible: 3, skipped: {} },
+            estimate: {
+              currency: 'INR',
+              totalMicros: 600_000,
+              pricedCount: 3,
+              unpricedCount: 0,
+              byMarket: [],
+            },
+          },
+        ],
+      },
+    );
+    expect(answered.variants).toEqual([
+      {
+        variant: 'A',
+        templateId: '0192a1b2-0000-7000-8000-00000000000a',
+        templateName: 'festive_sale',
+        sharePercent: 70,
+        eligible: 5,
+        total: 7,
+        estimate: { total: '2.5', pricedCount: 5, unpricedCount: 0 },
+      },
+      {
+        variant: 'B',
+        templateId: '0192a1b2-0000-7000-8000-00000000000b',
+        templateName: 'store_news',
+        sharePercent: 30,
+        eligible: 3,
+        total: 3,
+        estimate: { total: '0.6', pricedCount: 3, unpricedCount: 0 },
+      },
+    ]);
+    expect(apiCampaignReviewSchema.parse(answered)).toEqual(answered);
   });
 });

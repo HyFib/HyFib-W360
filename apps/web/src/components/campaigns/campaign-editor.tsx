@@ -41,7 +41,22 @@ export interface EditableCampaign {
   budgetAmount: string;
   budgetCurrency: string | null;
   stopAfterHours: number;
+  /** Variant B (ADR-405): a second template with its own mapping and its share; null for none. */
+  variantB: EditableVariant | null;
 }
+
+type Variables = { header: Source[]; body: Source[]; buttons: Source[] };
+
+export interface EditableVariant {
+  templateId: string | null;
+  variables: Variables;
+  sharePercent: number;
+}
+
+/** B's share of the recipients a member chooses from: 10% to 90% in steps of 5 (the server checks). */
+const VARIANT_SHARES = Array.from({ length: 17 }, (_, i) => 10 + i * 5);
+
+const EMPTY_VARIABLES: Variables = { header: [], body: [], buttons: [] };
 
 function fill(text: string, values: string[]): string {
   return text.replace(/\{\{\s*(\d+)\s*\}\}/g, (m, n: string) => values[Number(n) - 1] || m);
@@ -57,6 +72,47 @@ function describe(source: Source | undefined, fields: BuilderField[]): string {
 
 function resize(list: Source[], length: number): Source[] {
   return Array.from({ length }, (_, i) => list[i] ?? { source: 'static', value: '' });
+}
+
+/** A template's variables sized to it, as the form edits and saves them. */
+function sized(template: SendableTemplate | undefined, variables: Variables): Variables {
+  return {
+    header: resize(variables.header, template?.headerParams ?? 0),
+    body: resize(variables.body, template?.bodyParams ?? 0),
+    buttons: resize(variables.buttons, template?.links.length ?? 0),
+  };
+}
+
+/** The template's preview with each variable described by what fills it. */
+function previewOf(
+  template: SendableTemplate,
+  variables: Variables,
+  fields: BuilderField[],
+): RenderedTemplate {
+  return {
+    ...template.preview,
+    header: template.preview.header
+      ? fill(
+          template.preview.header,
+          variables.header.map((s) => describe(s, fields)),
+        )
+      : null,
+    body: fill(
+      template.preview.body,
+      variables.body.map((s) => describe(s, fields)),
+    ),
+    // Each link that takes a value, ending with what fills it.
+    buttons: template.preview.buttons.map((b, index) => {
+      const i = template.links.findIndex((link) => link.index === index);
+      const link = template.links[i];
+      return link
+        ? {
+            ...b,
+            url: `${link.url.slice(0, -'{{1}}'.length)}${describe(variables.buttons[i], fields)}`,
+          }
+        : b;
+    }),
+  };
 }
 
 /**
@@ -113,37 +169,18 @@ export function CampaignEditor({
     [templates, channel],
   );
   const template = available.find((t) => t.id === c.templateId);
-  const header = resize(c.variables.header, template?.headerParams ?? 0);
-  const body = resize(c.variables.body, template?.bodyParams ?? 0);
-  const buttons = resize(c.variables.buttons, template?.links.length ?? 0);
+  const { header, body, buttons } = sized(template, c.variables);
   const preview: RenderedTemplate | null = template
-    ? {
-        ...template.preview,
-        header: template.preview.header
-          ? fill(
-              template.preview.header,
-              header.map((s) => describe(s, fields)),
-            )
-          : null,
-        body: fill(
-          template.preview.body,
-          body.map((s) => describe(s, fields)),
-        ),
-        // Each link that takes a value, ending with what fills it.
-        buttons: template.preview.buttons.map((b, index) => {
-          const i = template.links.findIndex((link) => link.index === index);
-          const link = template.links[i];
-          return link
-            ? { ...b, url: `${link.url.slice(0, -'{{1}}'.length)}${describe(buttons[i], fields)}` }
-            : b;
-        }),
-      }
+    ? previewOf(template, { header, body, buttons }, fields)
     : null;
   const setVariable = (part: 'header' | 'body' | 'buttons', index: number, source: Source) => {
     const next = { header: [...header], body: [...body], buttons: [...buttons] };
     next[part][index] = source;
     update({ variables: next });
   };
+  // Variant B (ADR-405): a template of the same number's account, sized and previewed as A's.
+  const templateB = c.variantB ? available.find((t) => t.id === c.variantB?.templateId) : undefined;
+  const variablesB = c.variantB ? sized(templateB, c.variantB.variables) : null;
 
   function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -178,6 +215,14 @@ export function CampaignEditor({
               ? { amount: c.budgetAmount, currency: c.budgetCurrency }
               : null,
           stopAfterHours: c.stopAfterHours,
+          variantB:
+            c.variantB && variablesB
+              ? {
+                  templateId: templateB ? templateB.id : null,
+                  variables: variablesB,
+                  sharePercent: c.variantB.sharePercent,
+                }
+              : null,
         });
         startTransition(() => {
           if (!result.ok) setError(result.message);
@@ -219,7 +264,13 @@ export function CampaignEditor({
                 {...aria}
                 value={c.channelAccountId ?? ''}
                 onChange={(e) =>
-                  update({ channelAccountId: e.target.value || null, templateId: null })
+                  update({
+                    channelAccountId: e.target.value || null,
+                    templateId: null,
+                    variantB: c.variantB
+                      ? { ...c.variantB, templateId: null, variables: EMPTY_VARIABLES }
+                      : null,
+                  })
                 }
               >
                 <option value="">Choose a WhatsApp number</option>
@@ -291,6 +342,151 @@ export function CampaignEditor({
               <TemplatePreview rendered={preview} label="Campaign message preview" />
             ) : null}
           </div>
+        ) : null}
+      </fieldset>
+
+      <fieldset className="grid gap-4">
+        <legend className="mb-2 text-base font-semibold">A/B test</legend>
+        <label htmlFor="cmp-variant-b" className="flex items-center gap-2 text-sm">
+          <Checkbox
+            id="cmp-variant-b"
+            checked={Boolean(c.variantB)}
+            onChange={(e) =>
+              update({
+                variantB: e.target.checked
+                  ? { templateId: null, variables: EMPTY_VARIABLES, sharePercent: 50 }
+                  : null,
+              })
+            }
+          />
+          Add variant B: a second approved message for part of the audience
+        </label>
+        {c.variantB && variablesB ? (
+          <>
+            <p className="text-sm text-muted-foreground">
+              Each contact gets one variant, chosen by a fixed rule from the campaign and the
+              contact, so the split is close to the share you choose but rarely exact. The template
+              above is variant A. Both are checked before the campaign can start, and the results
+              show their counts side by side without picking a winner.
+            </p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field
+                id="cmp-template-b"
+                label="Variant B template"
+                description={
+                  channel && available.length === 0
+                    ? 'No approved template for this number’s account yet.'
+                    : undefined
+                }
+              >
+                {(aria) => (
+                  <Select
+                    {...aria}
+                    value={templateB?.id ?? ''}
+                    disabled={!channel}
+                    onChange={(e) =>
+                      update({
+                        variantB: c.variantB
+                          ? {
+                              ...c.variantB,
+                              templateId: e.target.value || null,
+                              variables: EMPTY_VARIABLES,
+                            }
+                          : null,
+                      })
+                    }
+                  >
+                    <option value="">Choose an approved template</option>
+                    {available.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} ({t.language}, {t.category.toLowerCase()})
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+              <Field
+                id="cmp-share-b"
+                label="Share of recipients for variant B"
+                description={`Variant A gets the other ${100 - c.variantB.sharePercent}%.`}
+              >
+                {(aria) => (
+                  <Select
+                    {...aria}
+                    value={String(c.variantB?.sharePercent ?? 50)}
+                    onChange={(e) =>
+                      update({
+                        variantB: c.variantB
+                          ? { ...c.variantB, sharePercent: Number(e.target.value) }
+                          : null,
+                      })
+                    }
+                  >
+                    {VARIANT_SHARES.map((share) => (
+                      <option key={share} value={share}>
+                        {share}%
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+            </div>
+            {templateB ? (
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
+                <div className="grid gap-3">
+                  {[
+                    ...variablesB.header.map((s, i) => ({
+                      part: 'header' as const,
+                      index: i,
+                      source: s,
+                    })),
+                    ...variablesB.body.map((s, i) => ({
+                      part: 'body' as const,
+                      index: i,
+                      source: s,
+                    })),
+                    ...variablesB.buttons.map((s, i) => ({
+                      part: 'buttons' as const,
+                      index: i,
+                      source: s,
+                    })),
+                  ].map(({ part, index, source }) => (
+                    <VariableInput
+                      key={`b-${part}-${index}`}
+                      id={`cmp-var-b-${part}-${index}`}
+                      label={
+                        part === 'buttons'
+                          ? `Variant B: end of the “${templateB.links[index]?.text ?? ''}” link`
+                          : `Variant B: ${part === 'header' ? 'header' : 'body'} variable {{${index + 1}}}`
+                      }
+                      source={source}
+                      fields={fields}
+                      onChange={(next) => {
+                        if (!c.variantB) return;
+                        const vars = {
+                          header: [...variablesB.header],
+                          body: [...variablesB.body],
+                          buttons: [...variablesB.buttons],
+                        };
+                        vars[part][index] = next;
+                        update({ variantB: { ...c.variantB, variables: vars } });
+                      }}
+                    />
+                  ))}
+                  {variablesB.header.length + variablesB.body.length + variablesB.buttons.length ===
+                  0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      Variant B’s template has no variables.
+                    </p>
+                  ) : null}
+                </div>
+                <TemplatePreview
+                  rendered={previewOf(templateB, variablesB, fields)}
+                  label="Variant B message preview"
+                />
+              </div>
+            ) : null}
+          </>
         ) : null}
       </fieldset>
 

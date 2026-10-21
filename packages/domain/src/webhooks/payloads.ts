@@ -725,6 +725,11 @@ export const campaignRecipientSkippedPayloadSchema = envelope(
         .describe(
           'Why the campaign did not send it its message, as the campaign’s page explains it: contact_erased, no_phone (no WhatsApp number), suppressed (on the suppression list), opted_out, no_marketing_opt_in, missing_variable (no value for a variable without a fallback), frequency_capped (the marketing frequency cap), cost_unknown (no price for the number’s market under a spending cap) or expired (the sending period ended first).',
         ),
+      variant: z
+        .enum(['A', 'B'])
+        .describe(
+          'The variant the recipient was given when the audience was taken, as GET /campaigns/{id}/recipients gives it: A, the campaign’s own template, or B, its second template. A for every recipient of a campaign without variant B. The reason was checked against its variant’s template (a marketing variant needs marketing consent).',
+        ),
     }),
     campaign: z.object({
       id: z.uuid(),
@@ -2178,6 +2183,7 @@ async function campaignRecipientOf(tx: Tx, tenantId: string, recipientId: string
       id: campaignRecipients.id,
       campaignId: campaignRecipients.campaignId,
       contactId: campaignRecipients.contactId,
+      variant: campaignRecipients.variant,
     })
     .from(campaignRecipients)
     .where(and(eq(campaignRecipients.tenantId, tenantId), eq(campaignRecipients.id, recipientId)));
@@ -2796,7 +2802,12 @@ export async function buildWebhookPayload(
       return {
         ...base,
         data: {
-          recipient: { id: recipient.id, skipReason },
+          // The variant recorded with the snapshot (ADR-405): it never changes.
+          recipient: {
+            id: recipient.id,
+            skipReason,
+            variant: recipient.variant === 'B' ? ('B' as const) : ('A' as const),
+          },
           campaign: {
             id: campaign.id,
             name: campaign.name,

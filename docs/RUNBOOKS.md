@@ -470,6 +470,34 @@ of what Meta does with messages over the limit, and HyFib names no code for it. 
 that looks out of date is the one Meta gave at the number's last health read (see "Messaging limit
 on Channels" above for when a number is read).
 
+**A/B variants (ADR-405).** A draft can add variant B under "A/B test": a second approved template
+of the same number's account, with its own variables, for 10% to 90% of the recipients in steps of
+5 (A, the campaign's own template, gets the rest). What a member sees and what to tell them:
+
+- The split is close to the share but rarely exact (with 1,000 contacts, a 30% share commonly gives
+  between about 27% and 33%): each contact's variant comes from a fixed rule on the campaign and the
+  contact, given once when the campaign is submitted and never changed, also after a pause, a
+  resume or a worker restart. Taking a submission back and submitting it again gives each contact
+  the same variant.
+- A problem that names a variant ("Variant B: The template is not approved by Meta.") blocks
+  submitting until that variant is fixed; so does "Variant B: no contact in its share of the
+  audience can receive the campaign now" (often a marketing B whose contacts have no marketing
+  opt-in: use a utility template, or more opted-in contacts).
+- Each variant is checked by its own template: a marketing variant needs marketing consent (and
+  the opt-in when the company requires it) and keeps to the frequency cap; a utility one does not.
+  So the two variants can skip different contacts; the Variants table shows each one's counts.
+- The cost estimate prices each variant's contacts at its own category's rate, once; the spending
+  cap counts both. Meta bills the company directly: no wallet funds are reserved for campaigns.
+- Approvers see both templates and the split on the campaign's page and in the approval email;
+  approving approves both. If either template stops being approved, the whole campaign pauses
+  ("its template can no longer be sent") and resumes once both are approved again.
+- The Variants table on the page gives each variant's counts and rates with the same denominators
+  as the results. It picks no winner and computes no significance: tell members that a difference
+  between small groups can be chance, and to compare counts, not only percentages.
+- Test sends can use either variant ("Variant to test"). The recipients page and its CSV export
+  name each recipient's variant; the API gives `variant` on each recipient, `variants` on
+  `GET /campaigns/{id}`, and `campaign.recipient_skipped` gives `recipient.variant`.
+
 **Stop a campaign now (wrong audience or content).** Cancel it from the detail page (members with
 `campaigns.send`): pending recipients and queued sends that no worker has claimed are cancelled in
 one transaction; sends already handed to Meta cannot be recalled. Pausing instead keeps the

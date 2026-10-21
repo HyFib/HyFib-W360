@@ -86,6 +86,7 @@ export * from './templates/library';
 export * from './templates/service';
 export * from './campaigns/schedule';
 export * from './campaigns/variables';
+export * from './campaigns/variants';
 export * from './campaigns/costs';
 export * from './campaigns/segments';
 export * from './campaigns/audience';

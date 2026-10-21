@@ -95,8 +95,18 @@ export function SubmitCampaign({
   );
 }
 
-export function SendTest({ slug, campaignId }: { slug: string; campaignId: string }) {
+export function SendTest({
+  slug,
+  campaignId,
+  withVariantB = false,
+}: {
+  slug: string;
+  campaignId: string;
+  /** Whether the campaign has a variant B to test (ADR-405). */
+  withVariantB?: boolean;
+}) {
   const [phones, setPhones] = useState('');
+  const [variant, setVariant] = useState<'A' | 'B'>('A');
   const [results, setResults] = useState<{ phone: string; ok: boolean; message: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -112,7 +122,10 @@ export function SendTest({ slug, campaignId }: { slug: string; campaignId: strin
           .split(/[\n,;]+/)
           .map((p) => p.trim())
           .filter(Boolean);
-        void sendCampaignTestAction(slug, campaignId, { phones: list }).then((r) => {
+        void sendCampaignTestAction(slug, campaignId, {
+          phones: list,
+          variant: withVariantB ? variant : 'A',
+        }).then((r) => {
           setBusy(false);
           if (!r.ok) setError(r.message);
           else setResults(r.data);
@@ -129,6 +142,20 @@ export function SendTest({ slug, campaignId }: { slug: string; campaignId: strin
           <Textarea {...aria} rows={2} value={phones} onChange={(e) => setPhones(e.target.value)} />
         )}
       </Field>
+      {withVariantB ? (
+        <Field id="test-variant" label="Variant to test">
+          {(aria) => (
+            <Select
+              {...aria}
+              value={variant}
+              onChange={(e) => setVariant(e.target.value === 'B' ? 'B' : 'A')}
+            >
+              <option value="A">Variant A (the campaign’s template)</option>
+              <option value="B">Variant B</option>
+            </Select>
+          )}
+        </Field>
+      ) : null}
       {results.length > 0 ? (
         <ul className="grid gap-1 text-sm" aria-live="polite">
           {results.map((r) => (

@@ -17272,3 +17272,96 @@ scopes are checked before conditions (403 before 422), `segmentId` is given only
 `campaigns.read`, key names are quoted alike on all three pages, two stale comments, and the
 FK's brief lock on `app.api_keys` noted in DEPLOYMENT. Overwriting the stopper follows 0311's
 pattern and stays.
+
+## ADR-405 A/B template variants for campaigns (P3-04, P5-08, P5-09) (2026-10-21)
+
+Context: P3-04 listed "A/B variants" as remaining. A campaign sent one template to its whole
+frozen audience (ADR-021), so a company that wanted to compare two messages ran two campaigns over
+hand-split audiences, with two approvals, two frequency-cap passes and results it compared by eye.
+
+Decision:
+
+- **Two variants, a model open to more.** A draft may add variant B: a second template, with its
+  own variable mapping, sent from the campaign's number. The campaign's own template and mapping
+  are variant A. B's share of the recipients is chosen from 10% to 90% in steps of 5
+  (`variantShareSchema`); A gets the rest. Variant B lives in `app.campaign_variants` (migration
+  0317), one row per variant after A, labelled B to Z (a check), unique per campaign and label, so
+  a third variant would need code but no new table; HyFib builds two. A campaign without a variant
+  row behaves exactly as before: no query result, wording, estimate or send changes (its
+  recipients are all A, the column's default).
+- **Assignment by a stable hash, recorded once.** When the audience is taken (`submitLockedDraft`,
+  where it is snapshotted), each contact falls into one variant by its bucket: the first 32 bits of
+  the MD5 of "campaign id:contact id" (uuids in lowercase, as PostgreSQL writes them) modulo 100;
+  buckets below B's share are B (`variantBucket` in TypeScript, `variantBucketSql` in SQL, the same
+  function; an integration test compares every recorded variant with the TypeScript one). MD5 is
+  used for its spread only. `insertSnapshot` takes one `AudienceArm` per variant (its rules and its
+  bucket condition) and writes its label in `campaign_recipients.variant`. The runtime role holds no
+  `UPDATE` on that column, so a recorded variant never changes: the runner reads it on every tick,
+  so a retry, a restart, a pause or a resume sends each recipient the same variant, and a contact
+  merge moves the row with its variant. A submission taken back to a draft and submitted again
+  gives each contact the same variant (same hash). Shares are nested: a contact in B at 20% is in B
+  at 50%. For the 10,000 deterministic ids of the unit test the observed share of B differs from the
+  chosen one by at most 0.89 percentage points (B at 50.89% for 50%; two other campaign ids give
+  at most 1.28 and 0.74 points), within three binomial standard deviations (at most 0.5 points at
+  that size); the test bounds it at 1.5.
+- **Every check per variant.** `evaluateReadiness` checks each variant's template with
+  `variantTemplateProblems`: chosen, approved by Meta, of the number's WhatsApp account, sendable,
+  its mapping complete with the company's fields. With B, each problem names its variant
+  ("Variant B: The template is not approved by Meta."), and so does "Variant B: no contact in its
+  share of the audience can receive the campaign now", which the review lists and submitting
+  refuses; without B the wording is unchanged. Each variant's contacts are classified by its own
+  template's category: consent purpose, the marketing opt-in when the company requires it, and the
+  fields its own mapping needs without a fallback; the frequency cap applies to marketing variants
+  (the review shows it when any variant is marketing, and the runner skips only a marketing
+  variant's recipients over it). The review's audience is the sum of the variants' disjoint parts.
+- **Costs per variant, never twice.** The review prices each variant's contacts who can receive it
+  at its own template's category (`estimateFromTable`, one rate table, integer micros) and adds them
+  (`combineEstimates`), so each recipient is priced once; it shows each variant's estimate beside
+  the total. The runner prices each queued recipient once, at its variant's category, so the
+  spending cap and the spent estimate add both variants. There is no wallet reservation to split:
+  Meta bills companies directly and no wallet funds are reserved for campaign sends (ADR-011,
+  ADR-023), and nothing here changes that; a re-check or a released send is priced again only when
+  it is queued again, as before.
+- **Four-eyes approval sees both.** The page of a campaign waiting for approval shows a Variants
+  card (both templates and the split) before the approver acts, and approving approves both:
+  `approveCampaign` and resuming refuse when B's template is no longer approved, as for A's. The
+  approval email adds one line naming both templates, their shares and pending recipients, and
+  that approving approves both and no winner is picked (split into lines a notice takes, template
+  names being long at most). The messaging-limit notice (ADR-400) counts every variant's
+  recipients, as the number sends them all.
+- **Sending.** A tick loads both variants' templates and pauses the campaign
+  (`template_not_approved`, the event naming the variant) when either can no longer be sent with
+  its mapping (`variantSendable`); otherwise it sends each recipient its recorded variant's
+  template with that variant's variables, checked against its variant's consent purpose. Pausing,
+  resuming, cancelling, retries, the send worker's checks and the exactly-once guards are
+  unchanged: they act on recipients and messages, whichever template they carry. Test sends take a
+  variant (A by default).
+- **Results, descriptive only.** `campaignVariantAnalytics` counts each variant as
+  `campaignAnalytics` counts the campaign, over its recipients only, so the variants add up to the
+  campaign's results. The page's Variants card gives recipients, skipped, handed to WhatsApp, and
+  sent, delivered, read, replied, opted out and failed with the same denominators as the results,
+  and clicks and conversions as not measured, as the campaign reports them. It claims no winner
+  and computes no significance, and says a difference between small groups can be chance. The
+  recipients page and the CSV export (a `variant` column added last) name each recipient's variant.
+- **API and webhooks (P5-08, P5-09), additive.** Keys create and edit drafts with `variantB`
+  (`{ templateId, variables, sharePercent }`, null removes it, left out keeps it); the detail's
+  `settings.variantB` gives it to keys with `campaigns.write`; `GET /campaigns/{id}/review` gives
+  `variants` (each variant's share, total, eligible and estimate); `GET /campaigns/{id}` gives
+  `variants` (each variant's template, share and results, null for a draft or without B);
+  `GET /campaigns/{id}/recipients` gives each recipient's `variant` ("A" or "B"), as does
+  `campaign.recipient_skipped` in `recipient.variant`. All described in the OpenAPI document with
+  schema tests. `campaign.status_changed` keeps the campaign's results without a per-variant
+  breakdown (the detail gives it).
+- **Tenant rules.** `app.campaign_variants`: `tenant_id NOT NULL`, `UNIQUE (tenant_id, id)`,
+  composite foreign keys to the company's campaign and template (another company's template id
+  matches no row; the service, reading under the company's scope, answers 404 first), forced row
+  security, grants of `SELECT`, `INSERT`, `DELETE` and `UPDATE` of the template, mapping and share
+  only, exported (export spec), deleted with the company at step 705 (after messages, before
+  campaigns and templates). The recipients' check is added `NOT VALID` and validated by 0318.
+
+Known limits: the split is close to the share, not exact (a small audience can split far from it,
+and a variant nobody in its share can receive blocks submitting); the hash is fixed per campaign and
+contact, so a contact's variant cannot be rerolled; both variants send from the campaign's number.
+Not built: more than two variants, a per-variant schedule or audience, a winner or significance,
+per-variant results in `campaign.status_changed`, and any verification against Meta (the Graph
+stand-in only).

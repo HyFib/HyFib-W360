@@ -154,9 +154,15 @@ verification, app review, Embedded Signup configuration).
   Meta last reported it (ADR-398), against the contacts the campaign may reach, an upper bound; a
   warning only above a tier's figure from research M-058, "limit unknown" for `TIER_50`, `UNTIERED`,
   an unlisted value, none reported or a number never read; a notice that never blocks; the API's
-  draft review gives it as `messagingLimit`). **Remaining:** the 10k run in staging with real
-  dispatch, per-recipient time zones, A/B variants, media-header templates (only the API sends
-  them, ADR-201).
+  draft review gives it as `messagingLimit`). **[A/B template variants built; their database and
+  browser tests run only in CI]** (ADR-405, migrations 0317 and 0318: a draft may add variant B, a
+  second template of the same number's account with its own variables, for 10% to 90% of the
+  recipients in steps of 5; each recipient's variant comes from a stable hash of the campaign and
+  the contact, recorded once with the snapshot; every check, estimate and the approval runs per
+  variant; results per variant side by side, descriptive only; the API creates, reviews and reads
+  variants and names each recipient's, as does `campaign.recipient_skipped`). **Remaining:** the
+  10k run in staging with real dispatch, per-recipient time zones, more than two variants (the
+  table takes them), media-header templates (only the API sends them, ADR-201).
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and

@@ -7,6 +7,7 @@ import {
   type SkipReason,
   type Tx,
 } from '@w360/db';
+import type { VariantLabel } from './variants';
 
 /**
  * Audience evaluation for campaigns. The same classification is used for the review screen (counts
@@ -100,23 +101,57 @@ export async function eligiblePhones(tx: Tx, rules: AudienceRules, where: SQL): 
   return res.rows.map((r) => r.phone);
 }
 
-/** Freezes the audience: one recipient row per matching contact, pending or skipped. */
+/**
+ * One variant's share of an audience (ADR-405): its label, its rules (consent purpose, required
+ * fields) and the condition that a contact falls into it (null: the whole audience, for a campaign
+ * without variants, whose recipients are all A).
+ */
+export interface AudienceArm {
+  label: VariantLabel;
+  rules: AudienceRules;
+  filter: SQL | null;
+}
+
+/** The audience's condition narrowed to one variant's contacts. */
+export function armWhere(arm: Pick<AudienceArm, 'filter'>, where: SQL): SQL {
+  return arm.filter ? sql`(${where}) and ${arm.filter}` : where;
+}
+
+export interface SnapshotCounts {
+  total: number;
+  pending: number;
+  skipped: number;
+}
+
+/**
+ * Freezes the audience: one recipient row per matching contact, pending or skipped, each with its
+ * variant, classified by its variant's rules (ADR-405). Each contact falls into exactly one arm, so
+ * the recipients are the audience's contacts once each.
+ */
 export async function insertSnapshot(
   tx: Tx,
   campaignId: string,
-  rules: AudienceRules,
+  arms: readonly AudienceArm[],
   where: SQL,
-): Promise<{ total: number; pending: number; skipped: number }> {
-  const res = await tx.execute<{ total: number; pending: number }>(sql`
-    with inserted as (
-      insert into app.campaign_recipients (id, tenant_id, campaign_id, contact_id, state, skip_reason)
-      select gen_random_uuid(), ${contacts.tenantId}, ${campaignId}::uuid, ${contacts.id},
-             case when x.reason is null then 'pending' else 'skipped' end, x.reason
-        from ${classifiedContacts(rules, where)}
-      returning state)
-    select count(*)::int as total, (count(*) filter (where state = 'pending'))::int as pending
-      from inserted`);
-  const total = res.rows[0]?.total ?? 0;
-  const pending = res.rows[0]?.pending ?? 0;
-  return { total, pending, skipped: total - pending };
+): Promise<SnapshotCounts & { byVariant: Partial<Record<VariantLabel, SnapshotCounts>> }> {
+  const byVariant: Partial<Record<VariantLabel, SnapshotCounts>> = {};
+  let total = 0;
+  let pending = 0;
+  for (const arm of arms) {
+    const res = await tx.execute<{ total: number; pending: number }>(sql`
+      with inserted as (
+        insert into app.campaign_recipients (id, tenant_id, campaign_id, contact_id, state, skip_reason, variant)
+        select gen_random_uuid(), ${contacts.tenantId}, ${campaignId}::uuid, ${contacts.id},
+               case when x.reason is null then 'pending' else 'skipped' end, x.reason, ${arm.label}
+          from ${classifiedContacts(arm.rules, armWhere(arm, where))}
+        returning state)
+      select count(*)::int as total, (count(*) filter (where state = 'pending'))::int as pending
+        from inserted`);
+    const armTotal = res.rows[0]?.total ?? 0;
+    const armPending = res.rows[0]?.pending ?? 0;
+    byVariant[arm.label] = { total: armTotal, pending: armPending, skipped: armTotal - armPending };
+    total += armTotal;
+    pending += armPending;
+  }
+  return { total, pending, skipped: total - pending, byVariant };
 }

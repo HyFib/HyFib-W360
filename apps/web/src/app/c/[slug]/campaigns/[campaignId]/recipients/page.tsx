@@ -99,6 +99,7 @@ export default async function RecipientsPage({
               <THead>
                 <TR>
                   <TH>Contact</TH>
+                  {page.withVariants ? <TH>Variant</TH> : null}
                   <TH>Outcome</TH>
                   <TH>Queued</TH>
                   <TH>Replied</TH>
@@ -115,6 +116,7 @@ export default async function RecipientsPage({
                         {r.displayName ?? r.phoneE164 ?? 'Erased contact'}
                       </Link>
                     </TD>
+                    {page.withVariants ? <TD className="text-sm">{r.variant}</TD> : null}
                     <TD className="text-sm">
                       {r.state === 'skipped'
                         ? `Not sent: ${SKIP_REASONS[r.skipReason ?? ''] ?? r.skipReason}`

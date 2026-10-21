@@ -1,5 +1,65 @@
 # Progress
 
+## 2026-10-21 — A/B template variants for campaigns (P3-04, ADR-405)
+
+Status: **Implemented (migrations 0317 and 0318); unit tests run locally, integration and e2e tests
+in CI only; no live Meta traffic.** A campaign sent one template to its whole audience; comparing
+two messages took two campaigns over hand-split audiences. This closes P3-04's "A/B variants".
+
+### Completed
+
+- **Data model:** `app.campaign_variants` (variant B: template, mapping, share of 10% to 90% in
+  steps of 5; labels B to Z so more variants need no new table) and
+  `app.campaign_recipients.variant` (`NOT NULL DEFAULT 'A'`, never updated: no grant); 0318
+  validates its check. Every tenant-table rule, the export spec and deletion step 705.
+- **Assignment:** each recipient's variant from the MD5 of "campaign:contact" modulo 100, in SQL
+  when the audience is taken and in TypeScript for tests; recorded once, so retries, restarts,
+  pauses, resumes and resubmissions keep it. For 10,000 deterministic contacts the observed share
+  differs from the chosen one by at most 0.89 percentage points.
+- **Checks per variant:** template, approval, account, mapping, consent and opt-in by category,
+  frequency cap for marketing variants, a variant nobody can receive; problems name their variant
+  ("Variant B: …"); without B the wording is unchanged. Costs per variant at its category's rate,
+  summed once (no wallet reservation exists for campaigns, ADR-023). Approval and resuming check
+  both templates; the approval email names both and the split; the messaging-limit notice counts
+  all recipients.
+- **Runner:** sends each recipient its recorded variant's template and variables; pauses when either
+  template can no longer be sent. Test sends take a variant.
+- **Results:** a Variants card side by side with the results' denominators, descriptive only (no
+  winner, no significance); the recipients page and CSV name each recipient's variant.
+- **API and webhooks (additive):** `variantB` on draft create/edit and in settings, `variants` on
+  `GET /campaigns/{id}` and the draft review, `variant` on each recipient and in
+  `campaign.recipient_skipped`; OpenAPI with schema tests.
+- **Docs:** ADR-405, ARCHITECTURE §6B, SECURITY, DATA-RETENTION, DEPLOYMENT (0317, 0318), RUNBOOKS
+  §10A, BACKLOG P3-04, feature matrix W-052. No threat-model row: another company's template is the
+  existing tenant-isolation threat, closed by the composite foreign key and the scoped read.
+
+### Tests
+
+- Unit (`campaigns/variants.test.ts`, `api/api.test.ts`, `webhooks/webhooks.test.ts`): the split
+  (deterministic, nested shares, within 1.5 points at 10,000), checks per variant, costs per
+  variant, the approval email, the review's sums, the API's schemas and mapping, the webhook's
+  variant. Hand mutation of 16 key branches: 15 caught by unit tests; the 16th (the API recipient's
+  variant) is caught only by the integration test, which did not run here.
+- Integration (CI only, `campaigns.test.ts`, `api-campaigns.test.ts`): a two-variant campaign
+  assigns (SQL equal to TypeScript), prices, sends and reports per variant; a campaign without B is
+  unchanged; another company's template is refused as B; a marketing B without opt-in skips only
+  its own recipients; assignments survive a resubmission, pause, resume and ticks, and the runtime
+  role cannot update them; the API creates, edits, reviews and reads variants.
+- E2E (CI only, `campaigns.spec.ts`): an A/B campaign drafted in the editor, reviewed with its
+  Variants table, submitted by a key, approved by the owner from the approval email, sent per
+  variant and reported per variant.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                            | Result                                                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                |
+| `pnpm test` (unit)                                 | 1,976 of 1,976 passed (180 files)                                                    |
+| `pnpm build`                                       | passed                                                                               |
+| migration parse check (pglast, 0317 onward)        | 0317 and 0318 parse                                                                  |
+| hand mutation of 16 key branches                   | 15 caught by unit tests; the API recipient's variant is left to the integration test |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: no local PostgreSQL or browser; CI runs them                           |
+
 ## 2026-10-21 — Review fixes in API enrolments (P4-01, ADR-403)
 
 Status: **Fixed; unit tests run locally, integration and e2e tests in CI only.** The independent

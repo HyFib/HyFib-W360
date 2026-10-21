@@ -307,7 +307,21 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'queued_at',
       'replied_at',
       'opted_out_at',
+      'variant',
       'created_at',
+    ],
+  },
+  {
+    table: 'app.campaign_variants',
+    columns: [
+      'id',
+      'campaign_id',
+      'label',
+      'template_id',
+      'variables',
+      'share_percent',
+      'created_at',
+      'updated_at',
     ],
   },
   {

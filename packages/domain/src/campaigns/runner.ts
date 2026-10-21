@@ -4,6 +4,7 @@ import { QUEUES } from '@w360/contracts';
 import {
   and,
   campaignRecipients,
+  campaignVariants,
   campaigns,
   contactConsents,
   contactIdentities,
@@ -17,7 +18,9 @@ import {
   suppressions,
   systemScope,
   type CampaignPauseReason,
+  type ConsentPurpose,
   type Database,
+  type RateCategory,
   type SkipReason,
   type TenantScope,
 } from '@w360/db';
@@ -45,7 +48,23 @@ import {
   type AutomaticPauseReason,
   type CampaignNoticeDeps,
 } from './service';
-import { readCampaignVariables, resolveVariables } from './variables';
+import { readCampaignVariables, resolveVariables, type CampaignVariables } from './variables';
+import { variantSendable, type VariantLabel } from './variants';
+
+/** One variant as a tick sends it (ADR-405): its template, mapping, consent purpose and rates. */
+interface RunnerArm {
+  template: {
+    id: string;
+    name: string;
+    language: string;
+    category: 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
+  };
+  spec: Extract<ReturnType<typeof sendSpecFor>, { supported: true }>;
+  variables: CampaignVariables;
+  links: ReturnType<typeof linkButtons>;
+  purpose: ConsentPurpose;
+  rateCategory: RateCategory;
+}
 
 /**
  * The campaign runner (worker). Each tick, under the campaign's row lock and a per-company
@@ -229,38 +248,71 @@ export async function runCampaignTick(
           .then((r) => r.rows)
       : [];
     if (!channel || channel.status !== 'active') return pause('channel_inactive');
-    const [template] = c.templateId
-      ? await tx
-          .execute<{
-            id: string;
-            name: string;
-            language: string;
-            category: 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
-            status: string;
-            components: unknown[];
-            whatsapp_account_id: string;
-          }>(
-            sql`
+    const loadTemplate = async (templateId: string | null) => {
+      const [row] = templateId
+        ? await tx
+            .execute<{
+              id: string;
+              name: string;
+              language: string;
+              category: 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
+              status: string;
+              components: unknown[];
+              whatsapp_account_id: string;
+            }>(
+              sql`
           select id, name, language, category, status, components, whatsapp_account_id
-            from app.message_templates where tenant_id = ${tenantId} and id = ${c.templateId}`,
-          )
-          .then((r) => r.rows)
-      : [];
-    const spec = template ? sendSpecFor(template.category, template.components) : null;
-    const variables = readCampaignVariables(c.variables);
-    if (
-      !template ||
-      !spec?.supported ||
-      template.status !== 'approved' ||
-      template.whatsapp_account_id !== channel.whatsapp_account_id ||
-      spec.headerParams !== variables.header.length ||
-      spec.bodyParams !== variables.body.length ||
-      spec.buttonParams !== variables.buttons.length
-    ) {
-      return pause('template_not_approved');
+            from app.message_templates where tenant_id = ${tenantId} and id = ${templateId}`,
+            )
+            .then((r) => r.rows)
+        : [];
+      return row ?? null;
+    };
+    // Each variant's template and mapping (ADR-405): A is the campaign's own; B, when the campaign
+    // has one, its second. Either one no longer sendable pauses the whole campaign.
+    const [variantRow] = await tx
+      .select({ templateId: campaignVariants.templateId, variables: campaignVariants.variables })
+      .from(campaignVariants)
+      .where(
+        and(
+          eq(campaignVariants.tenantId, tenantId),
+          eq(campaignVariants.campaignId, campaignId),
+          eq(campaignVariants.label, 'B'),
+        ),
+      );
+    const variantSources: { label: VariantLabel; templateId: string | null; variables: unknown }[] =
+      [{ label: 'A', templateId: c.templateId, variables: c.variables }];
+    if (variantRow)
+      variantSources.push({
+        label: 'B',
+        templateId: variantRow.templateId,
+        variables: variantRow.variables,
+      });
+    const arms = new Map<VariantLabel, RunnerArm>();
+    for (const source of variantSources) {
+      const template = await loadTemplate(source.templateId);
+      const spec = template ? sendSpecFor(template.category, template.components) : null;
+      const variables = readCampaignVariables(source.variables);
+      if (
+        !template ||
+        !spec?.supported ||
+        !variantSendable(
+          { status: template.status, whatsappAccountId: template.whatsapp_account_id, spec },
+          { whatsappAccountId: channel.whatsapp_account_id },
+          variables,
+        )
+      ) {
+        return pause('template_not_approved', variantRow ? { variant: source.label } : {});
+      }
+      arms.set(source.label, {
+        template,
+        spec,
+        variables,
+        links: linkButtons(spec.definition),
+        purpose: consentPurposeFor(template.category),
+        rateCategory: rateCategoryFor(template.category),
+      });
     }
-    const sendSpec = spec;
-    const links = linkButtons(spec.definition);
 
     if (c.windowStart && c.windowEnd) {
       const start = parseTimeOfDay(c.windowStart);
@@ -326,7 +378,11 @@ export async function runCampaignTick(
     }
 
     const batch = await tx
-      .select({ id: campaignRecipients.id, contactId: campaignRecipients.contactId })
+      .select({
+        id: campaignRecipients.id,
+        contactId: campaignRecipients.contactId,
+        variant: campaignRecipients.variant,
+      })
       .from(campaignRecipients)
       .where(
         and(
@@ -406,24 +462,30 @@ export async function runCampaignTick(
           ).map((s) => s.phone)
         : [],
     );
-    const purpose = consentPurposeFor(template.category);
+    // Consent for each variant's purpose: a recipient is checked against its own variant's.
+    const purposes = [...new Set([...arms.values()].map((a) => a.purpose))];
     const consent = new Map(
       (
         await tx
-          .select({ contactId: contactConsents.contactId, status: contactConsents.status })
+          .select({
+            contactId: contactConsents.contactId,
+            purpose: contactConsents.purpose,
+            status: contactConsents.status,
+          })
           .from(contactConsents)
           .where(
             and(
               eq(contactConsents.tenantId, tenantId),
-              eq(contactConsents.purpose, purpose),
+              inArray(contactConsents.purpose, purposes),
               inArray(contactConsents.contactId, contactIds),
             ),
           )
-      ).map((r) => [r.contactId, r.status]),
+      ).map((r) => [`${r.contactId}|${r.purpose}`, r.status]),
     );
     const messaging = await loadMessagingSettings(tx, tenantId);
     const capped = new Map<string, number>();
-    if (template.category === 'MARKETING' && settings.capCount && settings.capDays) {
+    const anyMarketing = [...arms.values()].some((a) => a.template.category === 'MARKETING');
+    if (anyMarketing && settings.capCount && settings.capDays) {
       const res = await tx.execute<{ contact_id: string; n: number }>(sql`
         select cv.contact_id, count(*)::int as n
           from app.messages m
@@ -436,11 +498,10 @@ export async function runCampaignTick(
          group by cv.contact_id`);
       for (const row of res.rows) capped.set(row.contact_id, row.n);
     }
-    const rateCategory = rateCategoryFor(template.category);
-
     interface Planned {
       recipientId: string;
       contactId: string;
+      arm: RunnerArm;
       phone: string;
       params: { header: string[]; body: string[] };
       market: string | null;
@@ -453,6 +514,9 @@ export async function runCampaignTick(
     for (const b of batch) {
       const person = people.find((p) => p.id === b.contactId);
       const skip = (reason: SkipReason) => skips.push({ recipientId: b.id, reason });
+      // The variant recorded when the audience was taken (ADR-405); it never changes.
+      const arm = arms.get(b.variant as VariantLabel);
+      if (!arm) throw new Error(`Campaign recipient ${b.id} has a variant the campaign does not`);
       if (!person || person.erasedAt) {
         skip('contact_erased');
         continue;
@@ -466,26 +530,32 @@ export async function runCampaignTick(
         skip('suppressed');
         continue;
       }
-      const state = consent.get(person.id);
+      const state = consent.get(`${person.id}|${arm.purpose}`);
       if (state === 'opted_out') {
         skip('opted_out');
         continue;
       }
-      if (purpose === 'marketing' && messaging.requireMarketingOptIn && state !== 'opted_in') {
+      if (arm.purpose === 'marketing' && messaging.requireMarketingOptIn && state !== 'opted_in') {
         skip('no_marketing_opt_in');
         continue;
       }
-      const resolved = resolveVariables(variables, person, links);
+      const resolved = resolveVariables(arm.variables, person, arm.links);
       if (!resolved.ok) {
         skip('missing_variable');
         continue;
       }
-      if (settings.capCount && (capped.get(person.id) ?? 0) >= settings.capCount) {
+      // The marketing frequency cap counts for marketing templates only, whatever the variant.
+      if (
+        arm.template.category === 'MARKETING' &&
+        settings.capCount &&
+        (capped.get(person.id) ?? 0) >= settings.capCount
+      ) {
         skip('frequency_capped');
         continue;
       }
+      // Each recipient is priced once, at its own variant's template's category.
       const market = table ? marketFor(table, phone) : null;
-      const price = table ? priceFor(table, market, rateCategory) : null;
+      const price = table ? priceFor(table, market, arm.rateCategory) : null;
       if (c.budgetMicros !== null) {
         if (price === null) {
           skip('cost_unknown');
@@ -504,6 +574,7 @@ export async function runCampaignTick(
       planned.push({
         recipientId: b.id,
         contactId: person.id,
+        arm,
         phone,
         params: resolved.params,
         market,
@@ -538,7 +609,7 @@ export async function runCampaignTick(
         ).map((t) => [t.contactId, t.id]),
       );
       const rows = planned.map((p) => {
-        const built = buildTemplateSend(template, sendSpec, p.params);
+        const built = buildTemplateSend(p.arm.template, p.arm.spec, p.params);
         const conversationId = threads.get(p.contactId);
         if (!conversationId) throw new Error('Campaign conversation upsert failed');
         return {
@@ -559,10 +630,10 @@ export async function runCampaignTick(
           type: 'template' as const,
           content: {
             template: {
-              id: template.id,
-              name: template.name,
-              language: template.language,
-              category: template.category,
+              id: r.arm.template.id,
+              name: r.arm.template.name,
+              language: r.arm.template.language,
+              category: r.arm.template.category,
             },
             rendered: r.built.rendered,
             campaign: { id: campaignId, name: c.name },
@@ -570,7 +641,7 @@ export async function runCampaignTick(
           status: 'queued' as const,
           statusRank: STATUS_RANK.queued,
           senderType: 'campaign' as const,
-          templateId: template.id,
+          templateId: r.arm.template.id,
           campaignId,
         })),
       );

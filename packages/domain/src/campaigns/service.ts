@@ -7,6 +7,7 @@ import {
   asc,
   campaignEvents,
   campaignRecipients,
+  campaignVariants,
   campaigns,
   channelAccounts,
   contacts,
@@ -54,14 +55,21 @@ import { linkButtons, sendSpecFor, type SendSpec } from '../templates/definition
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import {
   MAX_AUDIENCE,
+  armWhere,
   classifyAudience,
   countAudience,
   eligiblePhones,
   insertSnapshot,
+  type AudienceArm,
   type AudienceBreakdown,
-  type AudienceRules,
 } from './audience';
-import { loadRateTable, marketFor, parseAmountToMicros, priceFor, rateCategoryFor } from './costs';
+import {
+  combineEstimates,
+  estimateFromTable,
+  loadRateTable,
+  parseAmountToMicros,
+  type CostEstimate,
+} from './costs';
 import { recountedCounters } from './counters';
 import {
   SUBMITTED_NOTICE_STATUSES,
@@ -70,7 +78,12 @@ import {
   submittedCampaignRecipients,
   type CampaignMessagingLimitNotice,
 } from './messaging-limit-notice';
-import { campaignAnalytics, type CampaignAnalytics } from './results';
+import {
+  campaignAnalytics,
+  campaignVariantAnalytics,
+  type CampaignAnalytics,
+  type CampaignVariantAnalytics,
+} from './results';
 import {
   formatTimeOfDay,
   isValidTimeZone,
@@ -93,7 +106,14 @@ import {
   fieldsWithoutFallback,
   readCampaignVariables,
   resolveVariables,
+  type CampaignVariables,
 } from './variables';
+import {
+  variantConditionSql,
+  variantInputSchema,
+  variantTemplateProblems,
+  type VariantLabel,
+} from './variants';
 
 /**
  * Campaigns: a template sent to a frozen audience through the Phase 2 send pipeline.
@@ -196,6 +216,11 @@ export const updateCampaignSchema = z.object({
     .object({ amount: z.string().max(20), currency: z.string().regex(/^[A-Z]{3}$/) })
     .nullable(),
   stopAfterHours: z.number().int().min(1).max(168),
+  /**
+   * Variant B (ADR-405): a second template with its own mapping and its share of the recipients;
+   * null removes it, and left out (keys' edits that do not name it) it stays as it is.
+   */
+  variantB: variantInputSchema.nullable().optional(),
 });
 
 export const reviewNoteSchema = z.object({
@@ -219,6 +244,8 @@ export const testSendSchema = z.object({
     .array(z.string().trim().max(40))
     .min(1, 'Enter a phone number')
     .max(MAX_TEST_RECIPIENTS, `Send a test to at most ${MAX_TEST_RECIPIENTS} numbers`),
+  /** Which variant's template and mapping to test (ADR-405); A without variants. */
+  variant: z.enum(['A', 'B']).default('A'),
 });
 
 export const recipientFilterSchema = z.object({
@@ -373,6 +400,12 @@ export async function resumeLockedCampaign(
   const template = await loadTemplate(tx, c.tenantId, c.templateId);
   if (!template || template.status !== 'approved')
     throw new AppError('precondition_failed', 'The template is not approved by Meta.');
+  await assertVariantBApproved(
+    tx,
+    c.tenantId,
+    c.id,
+    'Variant B’s template is not approved by Meta.',
+  );
   const channel = await loadChannel(tx, c.tenantId, c.channelAccountId);
   if (!channel || channel.status !== 'active')
     throw new AppError('precondition_failed', 'The WhatsApp number is not active.');
@@ -570,6 +603,20 @@ export async function requeueReleased(
     );
 }
 
+/** Refuses with `message` when the campaign has a variant B whose template is not approved. */
+async function assertVariantBApproved(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  message: string,
+): Promise<void> {
+  const b = await loadCampaignVariant(tx, tenantId, campaignId);
+  if (!b) return;
+  const template = await loadTemplate(tx, tenantId, b.templateId);
+  if (!template || template.status !== 'approved')
+    throw new AppError('precondition_failed', message);
+}
+
 interface TemplateInfo {
   id: string;
   name: string;
@@ -677,12 +724,95 @@ export interface CampaignCompany {
   timezone: string;
 }
 
+/** A campaign's variant B as stored (ADR-405); A is the campaign's own template and mapping. */
+export interface StoredCampaignVariant {
+  label: 'B';
+  templateId: string | null;
+  variables: CampaignVariables;
+  sharePercent: number;
+}
+
+/** The campaign's variant B, or null for a campaign without variants. */
+export async function loadCampaignVariant(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+): Promise<StoredCampaignVariant | null> {
+  const [row] = await tx
+    .select({
+      templateId: campaignVariants.templateId,
+      variables: campaignVariants.variables,
+      sharePercent: campaignVariants.sharePercent,
+    })
+    .from(campaignVariants)
+    .where(
+      and(
+        eq(campaignVariants.tenantId, tenantId),
+        eq(campaignVariants.campaignId, campaignId),
+        eq(campaignVariants.label, 'B'),
+      ),
+    );
+  return row
+    ? {
+        label: 'B',
+        templateId: row.templateId,
+        variables: readCampaignVariables(row.variables),
+        sharePercent: row.sharePercent,
+      }
+    : null;
+}
+
+/** One variant of a campaign: its template, its mapping and its share of the recipients. */
+export interface CampaignVariantPlan {
+  label: VariantLabel;
+  template: TemplateInfo | null;
+  variables: CampaignVariables;
+  /** Its share of the recipients, in percent (100 for A without B). */
+  sharePercent: number;
+}
+
+/**
+ * The campaign's variants: A alone (the campaign's template and mapping, every recipient), or A and
+ * B with B's share and A the rest (ADR-405).
+ */
+async function campaignVariantPlans(
+  tx: Tx,
+  tenantId: string,
+  c: Pick<CampaignRow, 'id' | 'templateId' | 'variables'>,
+): Promise<CampaignVariantPlan[]> {
+  const a = {
+    label: 'A' as const,
+    template: await loadTemplate(tx, tenantId, c.templateId),
+    variables: readCampaignVariables(c.variables),
+  };
+  const b = await loadCampaignVariant(tx, tenantId, c.id);
+  if (!b) return [{ ...a, sharePercent: 100 }];
+  return [
+    { ...a, sharePercent: 100 - b.sharePercent },
+    {
+      label: 'B',
+      template: await loadTemplate(tx, tenantId, b.templateId),
+      variables: b.variables,
+      sharePercent: b.sharePercent,
+    },
+  ];
+}
+
+/** A variant ready to be counted and frozen: its template is known and its audience rules set. */
+interface ReadyVariant extends AudienceArm {
+  template: TemplateInfo;
+  sharePercent: number;
+}
+
 interface Readiness {
   problems: string[];
+  variants: CampaignVariantPlan[];
+  /** A's template (the campaign's own). */
   template: TemplateInfo | null;
   channel: Awaited<ReturnType<typeof loadChannel>>;
   definition: SegmentDefinition | null;
-  rules: AudienceRules | null;
+  /** Each variant's rules and share; null until the number, every template and the audience are. */
+  arms: ReadyVariant[] | null;
   where: SQL | null;
   schedule: { at: Date; adjustment: ScheduleAdjustment | null } | null;
 }
@@ -698,22 +828,20 @@ async function evaluateReadiness(
   if (!channel) problems.push('Choose the WhatsApp number to send from.');
   else if (channel.status !== 'active')
     problems.push('The chosen WhatsApp number is not active. Reconnect it in Settings → Channels.');
-  const template = await loadTemplate(tx, company.id, c.templateId);
-  if (!template) problems.push('Choose an approved template.');
-  else {
-    if (template.status !== 'approved') problems.push('The template is not approved by Meta.');
-    if (channel && template.whatsappAccountId !== channel.whatsappAccountId)
-      problems.push('The template belongs to another WhatsApp account than the chosen number.');
-    if (!template.spec.supported) problems.push(template.spec.reason);
-    else {
-      const fields = await loadFieldTypes(tx, company.id);
-      const problem = checkVariables(
-        readCampaignVariables(c.variables),
-        variableSpec(template.spec),
-        new Set(fields.keys()),
-      );
-      if (problem) problems.push(problem);
-    }
+  const variants = await campaignVariantPlans(tx, company.id, c);
+  const fieldTypes = await loadFieldTypes(tx, company.id);
+  const fieldKeys = new Set(fieldTypes.keys());
+  // Each variant is checked on its own; with B, each problem names its variant (ADR-405).
+  for (const v of variants) {
+    problems.push(
+      ...variantTemplateProblems(
+        variants.length > 1 ? v.label : null,
+        v.template,
+        channel,
+        v.variables,
+        fieldKeys,
+      ),
+    );
   }
   const def = await currentDefinition(tx, company.id, c);
   if (!def.ok) problems.push(def.problem);
@@ -731,78 +859,59 @@ async function evaluateReadiness(
       );
     }
   }
-  let rules: AudienceRules | null = null;
+  let arms: ReadyVariant[] | null = null;
   let where: SQL | null = null;
-  if (def.ok && channel && template) {
+  const shareB = variants.find((v) => v.label === 'B')?.sharePercent ?? null;
+  if (def.ok && channel && variants.every((v) => v.template)) {
     const settings = await loadMessagingSettings(tx, company.id);
-    rules = {
-      tenantId: company.id,
-      whatsappAccountId: channel.whatsappAccountId,
-      purpose: consentPurposeFor(template.category),
-      requireMarketingOptIn: settings.requireMarketingOptIn,
-      requiredFields: fieldsWithoutFallback(readCampaignVariables(c.variables)),
-    };
-    where = segmentWhere(
-      company.id,
-      def.definition,
-      company.timezone,
-      await loadFieldTypes(tx, company.id),
-    );
+    arms = variants.map((v) => {
+      const template = v.template as TemplateInfo;
+      return {
+        label: v.label,
+        template,
+        sharePercent: v.sharePercent,
+        rules: {
+          tenantId: company.id,
+          whatsappAccountId: channel.whatsappAccountId,
+          purpose: consentPurposeFor(template.category),
+          requireMarketingOptIn: settings.requireMarketingOptIn,
+          requiredFields: fieldsWithoutFallback(v.variables),
+        },
+        // Without B every contact is A; with B each falls into one variant by its hash.
+        filter:
+          shareB === null ? null : variantConditionSql(c.id, sql`${contacts.id}`, v.label, shareB),
+      };
+    });
+    where = segmentWhere(company.id, def.definition, company.timezone, fieldTypes);
   }
   return {
     problems,
-    template,
+    variants,
+    template: variants[0]?.template ?? null,
     channel,
     definition: def.ok ? def.definition : null,
-    rules,
+    arms,
     where,
     schedule: schedule.ok ? { at: schedule.at, adjustment: schedule.adjustment } : null,
   };
 }
 
-export interface CostEstimate {
-  currency: string;
-  totalMicros: number;
-  pricedCount: number;
-  unpricedCount: number;
-  byMarket: { market: string; count: number; micros: number }[];
-}
+/** The refusal of a variant none of whose contacts can receive the campaign (ADR-405). */
+export const emptyVariantProblem = (label: VariantLabel) =>
+  `Variant ${label}: no contact in its share of the audience can receive the campaign now.`;
 
-async function estimateCost(
-  tx: Tx,
-  currency: string,
-  at: Date,
-  category: TemplateInfo['category'],
-  phones: string[],
-): Promise<CostEstimate | null> {
-  const table = await loadRateTable(tx, currency, at);
-  if (!table) return null;
-  const rateCategory = rateCategoryFor(category);
-  const markets = new Map<string, { count: number; micros: number }>();
-  let unpriced = 0;
-  let total = 0;
-  for (const phone of phones) {
-    const market = marketFor(table, phone);
-    const price = priceFor(table, market, rateCategory);
-    if (market === null || price === null) {
-      unpriced += 1;
-      continue;
-    }
-    total += price;
-    const entry = markets.get(market) ?? { count: 0, micros: 0 };
-    entry.count += 1;
-    entry.micros += price;
-    markets.set(market, entry);
-  }
-  return {
-    currency,
-    totalMicros: total,
-    pricedCount: phones.length - unpriced,
-    unpricedCount: unpriced,
-    byMarket: [...markets.entries()]
-      .map(([market, v]) => ({ market, ...v }))
-      .sort((a, b) => b.micros - a.micros),
-  };
+/** One variant in a draft's review (ADR-405): its template, its share, who and what it would cost. */
+export interface CampaignVariantReview {
+  label: VariantLabel;
+  templateId: string | null;
+  templateName: string | null;
+  category: TemplateInfo['category'] | null;
+  /** Its share of the recipients, in percent. */
+  sharePercent: number;
+  /** Its contacts by skip reason; null while the review's audience is. */
+  audience: AudienceBreakdown | null;
+  /** Its contacts who can receive it now at its template's category's rates; null without one. */
+  estimate: CostEstimate | null;
 }
 
 /** What submitting a draft would do now (ADR-193), as members' review and the API show it. */
@@ -823,12 +932,34 @@ export interface CampaignDraftReview {
    * until it has a number of the company and an audience counted. A notice: it never blocks.
    */
   messagingLimit: CampaignMessagingLimitNotice | null;
+  /**
+   * Its variants A and B side by side (ADR-405), whose audiences and estimates add up to the
+   * review's; null for a campaign without variant B.
+   */
+  variants: CampaignVariantReview[] | null;
+}
+
+/** Breakdowns of disjoint parts of an audience added up. */
+export function sumBreakdowns(parts: readonly AudienceBreakdown[]): AudienceBreakdown {
+  const out: AudienceBreakdown = { total: 0, eligible: 0, skipped: {} };
+  for (const part of parts) {
+    out.total += part.total;
+    out.eligible += part.eligible;
+    for (const [reason, n] of Object.entries(part.skipped) as [
+      keyof AudienceBreakdown['skipped'],
+      number,
+    ][])
+      out.skipped[reason] = (out.skipped[reason] ?? 0) + n;
+  }
+  return out;
 }
 
 /**
  * What submitting a draft would do now: problems that block it, the audience broken down by skip
  * reason, and the estimated cost (an upper bound; see costs.ts). Members' review and keys' through
- * the API (ADR-193) both read it here, so they never differ; it changes nothing.
+ * the API (ADR-193) both read it here, so they never differ; it changes nothing. With variant B
+ * (ADR-405) each variant's contacts are classified by its own template's rules and priced at its
+ * category's rates, and the totals are their sums: each recipient is counted and priced once.
  */
 export async function reviewCampaignDraft(
   tx: Tx,
@@ -838,37 +969,65 @@ export async function reviewCampaignDraft(
 ): Promise<CampaignDraftReview> {
   const r = await evaluateReadiness(tx, company, c, now);
   const settings = await loadCampaignSettings(tx, company.id);
+  const withB = r.variants.length > 1;
   let audience: AudienceBreakdown | null = null;
   let estimate: CostEstimate | null = null;
+  const perVariant = new Map<
+    VariantLabel,
+    { audience: AudienceBreakdown; estimate: CostEstimate | null }
+  >();
   const problems = [...r.problems];
-  if (r.rules && r.where) {
-    const total = await countAudience(tx, r.where);
+  if (r.arms && r.where) {
+    const where = r.where;
+    const total = await countAudience(tx, where);
     if (total > MAX_AUDIENCE) {
       problems.push(
         `This audience has ${total} contacts; campaigns are limited to ${MAX_AUDIENCE}. Narrow the conditions.`,
       );
     } else {
-      audience = await classifyAudience(tx, r.rules, r.where);
+      for (const arm of r.arms) {
+        perVariant.set(arm.label, {
+          audience: await classifyAudience(tx, arm.rules, armWhere(arm, where)),
+          estimate: null,
+        });
+      }
+      audience = sumBreakdowns([...perVariant.values()].map((v) => v.audience));
       if (audience.eligible === 0)
         problems.push('No contact in this audience can receive the campaign now.');
+      else if (withB) {
+        for (const arm of r.arms) {
+          if (perVariant.get(arm.label)?.audience.eligible === 0)
+            problems.push(emptyVariantProblem(arm.label));
+        }
+      }
       const currency = c.budgetCurrency ?? settings.costCurrency;
-      if (currency && r.template && audience.eligible > 0) {
-        estimate = await estimateCost(
-          tx,
-          currency,
-          r.schedule?.at ?? now,
-          r.template.category,
-          await eligiblePhones(tx, r.rules, r.where),
-        );
+      if (currency && audience.eligible > 0) {
+        const table = await loadRateTable(tx, currency, r.schedule?.at ?? now);
+        if (table) {
+          for (const arm of r.arms) {
+            const entry = perVariant.get(arm.label);
+            if (!entry) continue;
+            entry.estimate = estimateFromTable(
+              table,
+              arm.template.category,
+              await eligiblePhones(tx, arm.rules, armWhere(arm, where)),
+            );
+          }
+          estimate = combineEstimates(
+            [...perVariant.values()].flatMap((v) => (v.estimate ? [v.estimate] : [])),
+          );
+        }
       }
     }
   }
-  // The audience's own count, in this transaction under the company's scope (ADR-400).
+  // The audience's own count, in this transaction under the company's scope (ADR-400): every
+  // variant's recipients, as the number sends them all.
   let messagingLimit: CampaignMessagingLimitNotice | null = null;
   if (r.channel && audience) {
     const number = await loadNumberMessagingLimit(tx, company.id, r.channel.id);
     if (number) messagingLimit = campaignMessagingLimitNotice(number, audience.eligible);
   }
+  const marketing = r.variants.some((v) => v.template?.category === 'MARKETING');
   return {
     problems,
     audience,
@@ -878,15 +1037,26 @@ export async function reviewCampaignDraft(
     adjustment: r.schedule?.adjustment ?? null,
     approvalRequired: settings.approvalRequired,
     frequencyCap:
-      settings.capCount && settings.capDays && r.template?.category === 'MARKETING'
+      settings.capCount && settings.capDays && marketing
         ? { count: settings.capCount, days: settings.capDays }
         : null,
     messagingLimit,
+    variants: withB
+      ? r.variants.map((v) => ({
+          label: v.label,
+          templateId: v.template?.id ?? null,
+          templateName: v.template?.name ?? null,
+          category: v.template?.category ?? null,
+          sharePercent: v.sharePercent,
+          audience: perVariant.get(v.label)?.audience ?? null,
+          estimate: perVariant.get(v.label)?.estimate ?? null,
+        }))
+      : null,
   };
 }
 
 // Counted in one statement in ./results (ADR-150); exported here as before.
-export { campaignAnalytics, type CampaignAnalytics };
+export { campaignAnalytics, type CampaignAnalytics, type CampaignVariantAnalytics };
 
 function toScheduledLocal(local: string | undefined): string | null {
   if (!local) return null;
@@ -933,7 +1103,33 @@ export function prepareCampaignDraft(data: CampaignDraftInput) {
     data.schedule.kind === 'later' ? toScheduledLocal(data.schedule.local) : null;
   if (data.schedule.kind === 'later' && !scheduledLocal)
     throw new AppError('validation_failed', 'Enter the date and time to send.');
-  return { data, window, variables: variables.data, scheduledLocal, budget: toBudget(data.budget) };
+  // Variant B (ADR-405): left out keeps it, null removes it, else its mapping is checked as A's.
+  let variantB:
+    | { templateId: string | null; variables: CampaignVariables; sharePercent: number }
+    | null
+    | undefined;
+  if (data.variantB === undefined || data.variantB === null) variantB = data.variantB;
+  else {
+    const b = campaignVariablesSchema.safeParse(data.variantB.variables ?? {});
+    if (!b.success)
+      throw new AppError(
+        'validation_failed',
+        'Variant B: Choose a value for every template variable.',
+      );
+    variantB = {
+      templateId: data.variantB.templateId,
+      variables: b.data,
+      sharePercent: data.variantB.sharePercent,
+    };
+  }
+  return {
+    data,
+    window,
+    variables: variables.data,
+    scheduledLocal,
+    budget: toBudget(data.budget),
+    variantB,
+  };
 }
 export type PreparedCampaignDraft = ReturnType<typeof prepareCampaignDraft>;
 
@@ -1001,6 +1197,51 @@ export async function writeLockedCampaignDraft(
       version: sql`${campaigns.version} + 1`,
     })
     .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+  await writeLockedCampaignVariant(tx, tenantId, campaignId, draft.variantB);
+}
+
+/**
+ * Writes a draft's variant B (ADR-405) in the transaction that writes the draft: left out
+ * (undefined) it stays as it is, null removes it, and otherwise it is set, its template the
+ * company's own (another company's template id is not found, as for A).
+ */
+async function writeLockedCampaignVariant(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  variant: PreparedCampaignDraft['variantB'],
+): Promise<void> {
+  if (variant === undefined) return;
+  if (variant === null) {
+    await tx
+      .delete(campaignVariants)
+      .where(
+        and(eq(campaignVariants.tenantId, tenantId), eq(campaignVariants.campaignId, campaignId)),
+      );
+    return;
+  }
+  if (variant.templateId && !(await loadTemplate(tx, tenantId, variant.templateId)))
+    throw notFound('Template');
+  await tx
+    .insert(campaignVariants)
+    .values({
+      id: uuidv7(),
+      tenantId,
+      campaignId,
+      label: 'B',
+      templateId: variant.templateId,
+      variables: variant.variables,
+      sharePercent: variant.sharePercent,
+    })
+    .onConflictDoUpdate({
+      target: [campaignVariants.tenantId, campaignVariants.campaignId, campaignVariants.label],
+      set: {
+        templateId: variant.templateId,
+        variables: variant.variables,
+        sharePercent: variant.sharePercent,
+        updatedAt: sql`now()`,
+      },
+    });
 }
 
 /** An amount in micros as members type it: major units, without trailing zeros (ADR-186). */
@@ -1054,7 +1295,10 @@ export type CampaignSubmitter = { userId: string } | { apiKeyId: string };
 export interface CampaignSubmission {
   snapshot: { total: number; pending: number; skipped: number };
   schedule: { at: Date; adjustment: ScheduleAdjustment | null };
+  /** Variant A's (the campaign's own template's) category. */
   category: 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
+  /** Variant B's share of the recipients in percent (ADR-405); null without variant B. */
+  variantShare: number | null;
   /** The columns a submission sets, whatever follows it. */
   submitted: Partial<typeof campaigns.$inferInsert>;
 }
@@ -1075,7 +1319,7 @@ export async function submitLockedDraft(
   const r = await evaluateReadiness(tx, company, c, now);
   const first = r.problems[0];
   if (first) throw new AppError('precondition_failed', first);
-  if (!r.rules || !r.where || !r.schedule || !r.definition || !r.template)
+  if (!r.arms || !r.where || !r.schedule || !r.definition || !r.template)
     throw new Error('Readiness without an audience');
   const total = await countAudience(tx, r.where);
   if (total > MAX_AUDIENCE)
@@ -1083,12 +1327,21 @@ export async function submitLockedDraft(
       'precondition_failed',
       `This audience has ${total} contacts; campaigns are limited to ${MAX_AUDIENCE}.`,
     );
-  const snapshot = await insertSnapshot(tx, c.id, r.rules, r.where);
+  // Each recipient is given its variant here, once, from the hash of the campaign and the contact
+  // (ADR-405), and classified by its variant's template's rules.
+  const snapshot = await insertSnapshot(tx, c.id, r.arms, r.where);
   if (snapshot.pending === 0)
     throw new AppError(
       'precondition_failed',
       'No contact in this audience can receive the campaign now.',
     );
+  const withB = r.arms.length > 1;
+  if (withB) {
+    for (const arm of r.arms) {
+      if ((snapshot.byVariant[arm.label]?.pending ?? 0) === 0)
+        throw new AppError('precondition_failed', emptyVariantProblem(arm.label));
+    }
+  }
   const member = 'userId' in by ? by.userId : null;
   const key = 'apiKeyId' in by ? by.apiKeyId : null;
   await recordCampaignEvent(tx, company.id, c.id, 'submitted', member, {
@@ -1096,11 +1349,26 @@ export async function submitLockedDraft(
     audience: snapshot.total,
     pending: snapshot.pending,
     skipped: snapshot.skipped,
+    ...(withB
+      ? {
+          variants: Object.fromEntries(
+            r.arms.map((arm) => [
+              arm.label,
+              {
+                share: arm.sharePercent,
+                pending: snapshot.byVariant[arm.label]?.pending ?? 0,
+                skipped: snapshot.byVariant[arm.label]?.skipped ?? 0,
+              },
+            ]),
+          ),
+        }
+      : {}),
   });
   return {
     snapshot,
     schedule: r.schedule,
     category: r.template.category,
+    variantShare: withB ? (r.arms.find((a) => a.label === 'B')?.sharePercent ?? null) : null,
     submitted: {
       audienceUsed: r.definition,
       audienceCount: snapshot.total,
@@ -1157,8 +1425,16 @@ export function campaignApprovalNotice(input: {
   approveBy: Date | null;
   /** The campaign's time zone, the one its page shows its schedule in. */
   timeZone: string;
+  /** Its variants with their templates, shares and pending recipients (ADR-405); none without B. */
+  variants?: readonly {
+    label: VariantLabel;
+    templateName: string;
+    sharePercent: number;
+    pending: number;
+  }[];
 }): { subject: string; lines: string[] } {
   const count = (n: number) => n.toLocaleString('en-IN');
+  const variants = input.variants ?? [];
   const by =
     input.submitter.kind === 'key' ? `The API key “${input.submitter.name}”` : input.submitter.name;
   return {
@@ -1166,6 +1442,20 @@ export function campaignApprovalNotice(input: {
     lines: [
       `${by} submitted the campaign “${input.campaignName}”, and it waits for a member's approval.`,
       `It would be sent to ${count(input.pending)} of the ${count(input.total)} ${input.total === 1 ? 'contact' : 'contacts'} in its audience.`,
+      // Template names can be long: the line is split as long notes are.
+      ...(variants.length > 1
+        ? splitEmailText(
+            `It tests ${variants.length} templates side by side: ${variants
+              .map(
+                (v) =>
+                  `${v.label} “${v.templateName}” (${v.sharePercent}% of the audience) to ${count(v.pending)} ${v.pending === 1 ? 'contact' : 'contacts'}`,
+              )
+              .join(
+                '; ',
+              )}. Approving it approves both; its page shows each variant's template and counts, and picks no winner.`,
+            NOTICE_LINE_MAX.tenant,
+          )
+        : []),
       input.startsAt
         ? `Once approved, it starts at ${formatCompanyTime(input.startsAt, input.timeZone)}, or at once if that time has passed.`
         : 'Once approved, it starts at once.',
@@ -1179,6 +1469,51 @@ export function campaignApprovalNotice(input: {
         : 'Approve it, or send it back with a note, on its page.',
     ],
   };
+}
+
+/**
+ * A submitted campaign's variants as the approval email names them (ADR-405): each template, share
+ * and pending recipients from the frozen audience; empty for a campaign without variant B.
+ */
+async function approvalVariants(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+): Promise<{ label: VariantLabel; templateName: string; sharePercent: number; pending: number }[]> {
+  const [c] = await tx
+    .select({ id: campaigns.id, templateId: campaigns.templateId, variables: campaigns.variables })
+    .from(campaigns)
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+  if (!c) return [];
+  const plans = await campaignVariantPlans(tx, tenantId, c);
+  if (plans.length < 2) return [];
+  const counts = await pendingByVariant(tx, tenantId, campaignId);
+  return plans.map((p) => ({
+    label: p.label,
+    templateName: p.template?.name ?? 'a template no longer available',
+    sharePercent: p.sharePercent,
+    pending: counts.get(p.label) ?? 0,
+  }));
+}
+
+/** A campaign's pending recipients by variant. */
+async function pendingByVariant(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+): Promise<Map<string, number>> {
+  const rows = await tx
+    .select({ variant: campaignRecipients.variant, n: sql<number>`count(*)::int` })
+    .from(campaignRecipients)
+    .where(
+      and(
+        eq(campaignRecipients.tenantId, tenantId),
+        eq(campaignRecipients.campaignId, campaignId),
+        eq(campaignRecipients.state, 'pending'),
+      ),
+    )
+    .groupBy(campaignRecipients.variant);
+  return new Map(rows.map((r) => [r.variant, Number(r.n)]));
 }
 
 /**
@@ -1256,6 +1591,7 @@ export async function emailCampaignApprovers(
     startsAt: c.scheduleKind === 'now' ? null : c.scheduledAt,
     approveBy: c.scheduledAt ? campaignApprovalDeadline(c.scheduledAt, c.stopAfterHours) : null,
     timeZone: c.timezone,
+    variants: await approvalVariants(tx, tenantId, campaignId),
   });
   const url = new URL(`/c/${c.slug}/campaigns/${campaignId}`, notices.appBaseUrl).toString();
   for (const approver of approvers) {
@@ -1864,7 +2200,33 @@ export function createCampaignsService(deps: CampaignDeps) {
             SUBMITTED_NOTICE_STATUSES.includes(c.status) && c.channelAccountId
               ? await loadNumberMessagingLimit(tx, ctx.tenant.id, c.channelAccountId)
               : null;
+          // Variant B and, once submitted, each variant's results side by side (ADR-405).
+          const variantB = await loadCampaignVariant(tx, ctx.tenant.id, campaignId);
+          const templateB = variantB
+            ? await loadTemplate(tx, ctx.tenant.id, variantB.templateId)
+            : null;
+          const variantResults =
+            variantB && c.status !== 'draft'
+              ? await campaignVariantAnalytics(tx, ctx.tenant.id, campaignId)
+              : null;
           return {
+            variantB: variantB
+              ? {
+                  templateId: variantB.templateId,
+                  variables: variantB.variables,
+                  sharePercent: variantB.sharePercent,
+                  template: templateB
+                    ? {
+                        id: templateB.id,
+                        name: templateB.name,
+                        language: templateB.language,
+                        category: templateB.category,
+                        status: templateB.status,
+                      }
+                    : null,
+                }
+              : null,
+            variantResults,
             campaign: c,
             variables: readCampaignVariables(c.variables),
             template: template
@@ -2079,6 +2441,13 @@ export function createCampaignsService(deps: CampaignDeps) {
         const template = await loadTemplate(tx, ctx.tenant.id, c.templateId);
         if (!template || template.status !== 'approved')
           throw new AppError('precondition_failed', 'The template is no longer approved by Meta.');
+        // Both variants are approved together (ADR-405).
+        await assertVariantBApproved(
+          tx,
+          ctx.tenant.id,
+          campaignId,
+          'Variant B’s template is no longer approved by Meta.',
+        );
         const scheduled = c.scheduledAt ?? now;
         if (campaignApprovalDeadline(scheduled, c.stopAfterHours).getTime() <= now.getTime()) {
           throw new AppError(
@@ -2324,7 +2693,7 @@ export function createCampaignsService(deps: CampaignDeps) {
     async sendTest(ctx: TenantContext, campaignId: string, input: unknown, meta: RequestMeta) {
       assertCan(ctx, 'campaigns.send');
       if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
-      const { phones } = parseInput(testSendSchema, input);
+      const { phones, variant } = parseInput(testSendSchema, input);
       const numbers = phones.filter(Boolean).map((raw) => ({
         raw,
         parsed: normalizePhone(raw, { kind: 'explicit' }),
@@ -2340,10 +2709,16 @@ export function createCampaignsService(deps: CampaignDeps) {
           if (!c) throw notFound('Campaign');
           if (!c.channelAccountId || !c.templateId)
             throw new AppError('precondition_failed', 'Choose the number and template first.');
-          const template = await loadTemplate(tx, ctx.tenant.id, c.templateId);
+          // A test of variant B sends B's template with B's mapping (ADR-405).
+          const variantB =
+            variant === 'B' ? await loadCampaignVariant(tx, ctx.tenant.id, campaignId) : null;
+          if (variant === 'B' && !variantB?.templateId)
+            throw new AppError('precondition_failed', 'Choose variant B’s template first.');
+          const templateId = variantB?.templateId ?? c.templateId;
+          const template = await loadTemplate(tx, ctx.tenant.id, templateId);
           if (!template?.spec.supported)
             throw new AppError('precondition_failed', 'Choose an approved template first.');
-          const variables = readCampaignVariables(c.variables);
+          const variables = variantB ? variantB.variables : readCampaignVariables(c.variables);
           const spec = variableSpec(template.spec);
           const problem = checkVariables(
             variables,
@@ -2365,7 +2740,7 @@ export function createCampaignsService(deps: CampaignDeps) {
                     and(eq(contacts.tenantId, ctx.tenant.id), inArray(contacts.phoneE164, valid)),
                   )
               : [];
-          return { c, variables, links: spec.links, people };
+          return { c, templateId, variables, links: spec.links, people };
         },
         { accessMode: 'read only' },
       );
@@ -2394,7 +2769,7 @@ export function createCampaignsService(deps: CampaignDeps) {
           await queueTemplateMessage(deps, ctx, {
             contactId: person.id,
             channelAccountId: prepared.c.channelAccountId,
-            templateId: prepared.c.templateId,
+            templateId: prepared.templateId,
             params: resolved.params,
             clientKey: `cmptest-${uuidv7()}`,
           });
@@ -2408,6 +2783,7 @@ export function createCampaignsService(deps: CampaignDeps) {
         await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'test_sent', ctx.user.id, {
           queued: results.filter((r) => r.ok).length,
           refused: results.filter((r) => !r.ok).length,
+          ...(variant === 'B' ? { variant } : {}),
         });
         await recordAudit(
           tx,
@@ -2441,10 +2817,12 @@ export function createCampaignsService(deps: CampaignDeps) {
         replied: sql`r.replied_at is not null`,
         failed: sql`r.state = 'queued' and m.status in ('failed', 'unknown_outcome')`,
       };
-      const res = await db.run(
+      const { res, withVariants } = await db.run(
         ctx.scope,
-        (tx) =>
-          tx.execute<{
+        async (tx) => ({
+          // Whether the campaign has variant B (ADR-405), so the page names each recipient's.
+          withVariants: (await loadCampaignVariant(tx, ctx.tenant.id, campaignId)) !== null,
+          res: await tx.execute<{
             id: string;
             contact_id: string;
             display_name: string | null;
@@ -2456,9 +2834,11 @@ export function createCampaignsService(deps: CampaignDeps) {
             queued_at: string | null;
             replied_at: string | null;
             opted_out_at: string | null;
+            variant: string;
           }>(sql`
             select r.id, r.contact_id, c.display_name, c.phone_e164, r.state, r.skip_reason,
-                   m.status as message_status, m.error_code, r.queued_at, r.replied_at, r.opted_out_at
+                   m.status as message_status, m.error_code, r.queued_at, r.replied_at, r.opted_out_at,
+                   r.variant
               from app.campaign_recipients r
               join app.contacts c on c.tenant_id = r.tenant_id and c.id = r.contact_id
               left join app.messages m on m.tenant_id = r.tenant_id and m.id = r.message_id
@@ -2467,10 +2847,12 @@ export function createCampaignsService(deps: CampaignDeps) {
                ${after ? sql`and r.id > ${after}::uuid` : sql``}
              order by r.id
              limit 51`),
+        }),
         { accessMode: 'read only' },
       );
       const items = res.rows.slice(0, 50);
       return {
+        withVariants,
         items: items.map((r) => ({
           id: r.id,
           contactId: r.contact_id,
@@ -2483,6 +2865,7 @@ export function createCampaignsService(deps: CampaignDeps) {
           queuedAt: r.queued_at ? new Date(r.queued_at) : null,
           repliedAt: r.replied_at ? new Date(r.replied_at) : null,
           optedOutAt: r.opted_out_at ? new Date(r.opted_out_at) : null,
+          variant: r.variant,
         })),
         nextCursor: res.rows.length > 50 ? (items[items.length - 1]?.id ?? null) : null,
       };
@@ -2523,6 +2906,8 @@ export function createCampaignsService(deps: CampaignDeps) {
           'opted_out_at',
           'market',
           'estimated_cost_micros',
+          // Added last (ADR-405), so columns read by position keep their place.
+          'variant',
         ]);
       let after: string | null = null;
       for (;;) {
@@ -2532,7 +2917,7 @@ export function createCampaignsService(deps: CampaignDeps) {
             tx.execute<Record<string, string | number | null>>(sql`
               select r.id, c.phone_e164, c.display_name, r.state, r.skip_reason, m.status,
                      m.error_code, r.queued_at, r.replied_at, r.opted_out_at, r.market,
-                     r.estimated_cost_micros
+                     r.estimated_cost_micros, r.variant
                 from app.campaign_recipients r
                 join app.contacts c on c.tenant_id = r.tenant_id and c.id = r.contact_id
                 left join app.messages m on m.tenant_id = r.tenant_id and m.id = r.message_id
@@ -2559,6 +2944,7 @@ export function createCampaignsService(deps: CampaignDeps) {
             iso(r.opted_out_at),
             r.market as string | null,
             r.estimated_cost_micros as number | null,
+            r.variant as string,
           ]);
         }
         yield chunk;

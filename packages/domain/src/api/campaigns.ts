@@ -28,8 +28,11 @@ import { ATTRIBUTION_WINDOW_HOURS } from '../campaigns/attribution';
 import { RECIPIENT_OUTCOMES, RECIPIENT_OUTCOME_SQL } from '../campaigns/outcomes';
 import {
   campaignResultsSchema,
+  campaignVariantAnalytics,
+  campaignVariantResultsSchema,
   toCampaignResults,
   type CampaignResults,
+  type CampaignVariantResults,
 } from '../campaigns/results';
 import { SEGMENT_LIMITS } from '../campaigns/segments';
 import {
@@ -38,6 +41,7 @@ import {
   campaignDraftInputOf,
   campaignLauncherStanding,
   cancelLockedCampaign,
+  loadCampaignVariant,
   lockCampaign,
   microsToAmount,
   pauseLockedCampaign,
@@ -53,7 +57,9 @@ import {
   type CampaignNoticeDeps,
   type CampaignDraftInput,
   type CampaignDraftReview,
+  type StoredCampaignVariant,
 } from '../campaigns/service';
+import { VARIANT_LABELS, VARIANT_SHARE, variantShareSchema } from '../campaigns/variants';
 import { campaignVariablesSchema, readCampaignVariables } from '../campaigns/variables';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
@@ -190,6 +196,28 @@ const apiWindowSchema = z
   .nullable()
   .describe("A daily sending window in the campaign's time zone; null sends at any time.");
 
+/** A draft's variant B (ADR-405), as members' editor holds it. */
+const apiVariantBSchema = z
+  .object({
+    templateId: z
+      .uuid()
+      .nullable()
+      .describe(
+        "Variant B's template, as GET /templates lists it; null for none yet. A member submits the draft only with an approved template of the number's WhatsApp account for each variant.",
+      ),
+    variables: apiVariablesSchema.describe(
+      "How each of variant B's template's variables is filled, as `variables` fills the campaign's own template's.",
+    ),
+    sharePercent: variantShareSchema.describe(
+      `Variant B's share of the recipients, in percent: ${VARIANT_SHARE.min} to ${VARIANT_SHARE.max} in steps of ${VARIANT_SHARE.step}. Variant A, the campaign's own template, gets the rest. Each recipient's variant comes from a stable hash of the campaign and the contact when a member submits it, so the counts are close to the share but rarely equal.`,
+    ),
+  })
+  .strict()
+  .nullable()
+  .describe(
+    'Variant B: a second template, sent from the same number to a share of the recipients, with its own variables; null for a campaign that sends its one template to everyone. Each variant is checked on its own before a member can submit it, and its results are counted side by side; HyFib picks no winner.',
+  );
+
 const apiBudgetSchema = z
   .object({
     amount: z.string().max(20).describe('In major units, like 2500 or 2500.50.'),
@@ -202,6 +230,7 @@ const apiBudgetSchema = z
 /** A campaign's settings as members' editor holds them (ADR-186). */
 export const apiCampaignSettingsSchema = z.object({
   variables: apiVariablesSchema,
+  variantB: apiVariantBSchema,
   audience: apiAudienceSchema,
   schedule: z
     .object({
@@ -245,15 +274,31 @@ export const apiCampaignDetailSchema = apiCampaignWithResultsSchema.extend({
     .describe(
       'Its settings, as members edit them while it is a draft and as they were when it was submitted. Null unless the key holds campaigns.write.',
     ),
+  variants: z
+    .array(campaignVariantResultsSchema)
+    .nullable()
+    .describe(
+      'Its variants A and B side by side, each with its template, share and results counted over the recipients given it, so their counts add up to `results`. Descriptive counts: HyFib picks no winner and computes no significance. Null for a draft and for a campaign without variant B.',
+    ),
 });
 export type ApiCampaignDetail = z.infer<typeof apiCampaignDetailSchema>;
 
 type StoredCampaign = Awaited<ReturnType<typeof lockCampaign>>;
 
-function toApiSettings(c: StoredCampaign): ApiCampaignSettings {
+function toApiSettings(
+  c: StoredCampaign,
+  variantB: StoredCampaignVariant | null,
+): ApiCampaignSettings {
   const d = campaignDraftInputOf(c);
   return {
     variables: readCampaignVariables(c.variables),
+    variantB: variantB
+      ? {
+          templateId: variantB.templateId,
+          variables: variantB.variables,
+          sharePercent: variantB.sharePercent,
+        }
+      : null,
     audience:
       d.audience.kind === 'segment'
         ? { segmentId: d.audience.segmentId }
@@ -418,12 +463,46 @@ async function readApiCampaignDetail(
     row.status === 'draft'
       ? null
       : toCampaignResults(await campaignAnalytics(tx, tenantId, campaignId));
+  const variantB = await loadCampaignVariant(tx, tenantId, campaignId);
   return {
     ...toApiCampaign(row),
     results,
     version: withSettings ? stored.version : null,
-    settings: withSettings ? toApiSettings(stored) : null,
+    settings: withSettings ? toApiSettings(stored, variantB) : null,
+    variants:
+      variantB && row.status !== 'draft'
+        ? await apiVariantResults(tx, tenantId, campaignId, row, variantB)
+        : null,
   };
+}
+
+/** Each variant's results in the API's words (ADR-405), A the campaign's own template. */
+async function apiVariantResults(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  row: CampaignRow,
+  variantB: StoredCampaignVariant,
+): Promise<CampaignVariantResults[]> {
+  const [templateB] = variantB.templateId
+    ? await tx
+        .select({ name: messageTemplates.name })
+        .from(messageTemplates)
+        .where(
+          and(
+            eq(messageTemplates.tenantId, tenantId),
+            eq(messageTemplates.id, variantB.templateId),
+          ),
+        )
+    : [];
+  const counted = await campaignVariantAnalytics(tx, tenantId, campaignId);
+  return counted.map(({ variant, analytics }) => ({
+    variant,
+    templateId: variant === 'A' ? row.templateId : variantB.templateId,
+    templateName: variant === 'A' ? (row.templateName ?? null) : (templateB?.name ?? null),
+    sharePercent: variant === 'A' ? 100 - variantB.sharePercent : variantB.sharePercent,
+    results: toCampaignResults(analytics),
+  }));
 }
 
 export const apiCampaignRecipientQuerySchema = z
@@ -478,6 +557,11 @@ export const apiCampaignRecipientSchema = z.object({
     .nullable()
     .describe(attributed('a reply', ' from the number the reply came to')),
   optedOutAt: z.iso.datetime().nullable().describe(attributed('an opt-out from marketing', '')),
+  variant: z
+    .enum(VARIANT_LABELS)
+    .describe(
+      'The variant the recipient was given when the audience was taken, which never changes: A, the campaign’s own template, or B, its second template (settings.variantB). A for every recipient of a campaign without variant B.',
+    ),
 });
 export type ApiCampaignRecipient = z.infer<typeof apiCampaignRecipientSchema>;
 
@@ -496,6 +580,7 @@ type RecipientRow = {
   queued_at: string | Date | null;
   replied_at: string | Date | null;
   opted_out_at: string | Date | null;
+  variant: string;
 };
 
 const iso = (value: string | Date | null) => (value ? new Date(value).toISOString() : null);
@@ -520,6 +605,7 @@ function toApiRecipient(r: RecipientRow): ApiCampaignRecipient {
     queuedAt: iso(r.queued_at),
     repliedAt: iso(r.replied_at),
     optedOutAt: iso(r.opted_out_at),
+    variant: r.variant === 'B' ? 'B' : 'A',
   };
 }
 
@@ -550,7 +636,7 @@ export async function apiListCampaignRecipients(
       const res = await tx.execute<RecipientRow>(sql`
         select r.id, r.contact_id, c.display_name, c.phone_e164, r.state, r.skip_reason,
                r.message_id, m.status as message_status, m.status_at as message_status_at,
-               m.error_code, m.error_title, r.queued_at, r.replied_at, r.opted_out_at
+               m.error_code, m.error_title, r.queued_at, r.replied_at, r.opted_out_at, r.variant
           from app.campaign_recipients r
           join app.contacts c on c.tenant_id = r.tenant_id and c.id = r.contact_id
           left join app.messages m on m.tenant_id = r.tenant_id and m.id = r.message_id
@@ -802,6 +888,7 @@ const draftFields = {
     .min(1)
     .max(168)
     .describe('Sending stops this many hours after it starts; the rest is recorded as expired.'),
+  variantB: apiVariantBSchema,
 };
 
 export const apiCreateCampaignSchema = z
@@ -817,6 +904,7 @@ export const apiCreateCampaignSchema = z
     maxMessages: draftFields.maxMessages.optional(),
     budget: draftFields.budget.optional(),
     stopAfterHours: draftFields.stopAfterHours.optional(),
+    variantB: draftFields.variantB.optional(),
   })
   .strict();
 
@@ -841,6 +929,7 @@ export const apiUpdateCampaignSchema = z
     maxMessages: draftFields.maxMessages.optional(),
     budget: draftFields.budget.optional(),
     stopAfterHours: draftFields.stopAfterHours.optional(),
+    variantB: draftFields.variantB.optional(),
   })
   .strict()
   .refine(
@@ -896,6 +985,8 @@ export function apiDraftInputFrom(
     maxMessages: given.maxMessages === undefined ? base.maxMessages : given.maxMessages,
     budget: given.budget === undefined ? base.budget : given.budget,
     stopAfterHours: given.stopAfterHours ?? base.stopAfterHours,
+    // Variant B left out stays as the draft has it (ADR-405); null removes it.
+    ...(given.variantB !== undefined ? { variantB: given.variantB } : {}),
   };
 }
 
@@ -1122,6 +1213,38 @@ export const apiCampaignReviewSchema = z.object({
     .describe(
       "The chosen number's messaging limit set against audience.eligible, an upper bound of what counts toward it (contacts whose customer service window is open when their message is sent do not count). A notice that never blocks a submission: Meta, not HyFib, enforces the limit, which is shared by every number of the business portfolio, whose use HyFib cannot see. null while audience is null.",
     ),
+  variants: z
+    .array(
+      z.object({
+        variant: z.enum(VARIANT_LABELS),
+        templateId: z.uuid().nullable(),
+        templateName: z.string().nullable(),
+        sharePercent: z
+          .number()
+          .int()
+          .min(VARIANT_SHARE.min)
+          .max(VARIANT_SHARE.max)
+          .describe('Its share of the recipients, in percent.'),
+        eligible: reviewCount(
+          'Contacts in its share who can receive it now, checked by its own template’s category (marketing consent and opt-in).',
+        ).nullable(),
+        total: reviewCount('Contacts in its share of the audience.').nullable(),
+        estimate: z
+          .object({
+            total: z.string().describe('In major units, as estimate.total gives it.'),
+            pricedCount: reviewCount('The messages the total counts.'),
+            unpricedCount: reviewCount('Recipients in markets without a price, left out.'),
+          })
+          .nullable()
+          .describe(
+            "Its contacts who can receive it now at its own template's category's rates, in estimate's currency; the variants' estimates add up to estimate. null when estimate is.",
+          ),
+      }),
+    )
+    .nullable()
+    .describe(
+      'Variants A and B side by side: each contact falls into one by a stable hash of the campaign and the contact, so the counts add up to audience and the amounts to estimate, every recipient counted and priced once. A problem names the variant it is about (Variant B: …). null for a draft without variant B.',
+    ),
 });
 
 export type ApiCampaignReview = z.infer<typeof apiCampaignReviewSchema>;
@@ -1177,6 +1300,23 @@ export function toApiCampaignReview(
           checkedAt: review.messagingLimit.checkedAt?.toISOString() ?? null,
           figure: review.messagingLimit.figure,
         }
+      : null,
+    variants: review.variants
+      ? review.variants.map((v) => ({
+          variant: v.label,
+          templateId: v.templateId,
+          templateName: v.templateName,
+          sharePercent: v.sharePercent,
+          eligible: v.audience?.eligible ?? null,
+          total: v.audience?.total ?? null,
+          estimate: v.estimate
+            ? {
+                total: microsToAmount(v.estimate.totalMicros),
+                pricedCount: v.estimate.pricedCount,
+                unpricedCount: v.estimate.unpricedCount,
+              }
+            : null,
+        }))
       : null,
   };
 }
