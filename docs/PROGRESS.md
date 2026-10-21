@@ -289,6 +289,8 @@ started only from customer messages, store events, members' tests and the public
   The next run failed one more step on Chromium and mobile Chromium: the test typed the
   automation's name before the Automations page had replaced the contact page, whose own "Name"
   field took it, so "Create draft" stayed disabled; it now waits for the Automations page first.
+  The run after that failed on mobile Chromium only: a loose `getByText('Enrolment')` found hidden
+  text first (the trigger list's options); it now matches the runs list's "Enrolment · v1".
 
 ### Test commands and results (local, 2026-10-16)
 

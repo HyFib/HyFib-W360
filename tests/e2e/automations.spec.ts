@@ -517,7 +517,9 @@ test('a member enrols the contacts the Contacts page’s filters match in an aut
   // The automation's page lists the enrolment and marks its runs.
   await page.getByRole('link', { name: 'Open the automation' }).click();
   await expect(page.getByText('2 of 2 started')).toBeVisible();
-  await expect(page.getByText('Enrolment', { exact: false }).first()).toBeVisible();
+  // The runs list marks each run its enrolment started ("Enrolment · v1"); a looser match also
+  // finds hidden text, such as the trigger list's options, first on some viewports.
+  await expect(page.getByText('Enrolment · v1', { exact: true }).first()).toBeVisible();
   await page.goto(`/c/${slug}/automations/runs`);
   await page.getByRole('table').getByRole('link').first().click();
   await expect(page.getByText(/by an enrolment by Esha Enrol/)).toBeVisible();
