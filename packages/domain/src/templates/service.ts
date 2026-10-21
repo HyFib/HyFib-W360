@@ -45,7 +45,23 @@ import {
   validateDefinition,
   type TemplateDefinition,
 } from './definition';
-import { databaseNow, reconcileTemplateEdit, templateUsage, writeEditTemplate } from './edit';
+import {
+  databaseNow,
+  maskUsage,
+  reconcileTemplateEdit,
+  templateUsage,
+  writeEditTemplate,
+  type UsageVisibility,
+} from './edit';
+
+/** The usage names a member may read: those their read permissions cover (ADR-404). */
+export function memberVisibility(ctx: TenantContext): UsageVisibility {
+  return {
+    campaigns: can(ctx, 'campaigns.read'),
+    automations: can(ctx, 'automations.read'),
+    stores: can(ctx, 'commerce.read'),
+  };
+}
 import { templateEditBlocker } from './edit-model';
 import {
   enqueueTemplateJob,
@@ -619,23 +635,12 @@ export function createTemplatesService(deps: TemplateDeps) {
               ),
             );
           if (!row) throw notFound('Template');
-          const usage = await templateUsage(tx, ctx.tenant.id, templateId);
           // Every role that submits templates reads these (a unit test pins it); a company's own
           // permission choices could differ, so names are shown only to members who may read them.
-          return {
-            campaigns: usage.campaigns.map((c) => ({
-              ...c,
-              name: can(ctx, 'campaigns.read') ? c.name : null,
-            })),
-            automations: usage.automations.map((a) => ({
-              ...a,
-              name: can(ctx, 'automations.read') ? a.name : null,
-            })),
-            storeRules: usage.storeRules.map((r) => ({
-              ...r,
-              storeName: can(ctx, 'commerce.read') ? r.storeName : null,
-            })),
-          };
+          return maskUsage(
+            await templateUsage(tx, ctx.tenant.id, templateId),
+            memberVisibility(ctx),
+          );
         },
         { accessMode: 'read only' },
       );
@@ -663,6 +668,7 @@ export function createTemplatesService(deps: TemplateDeps) {
           data.definition,
           ctx.user.id,
           clock.now(),
+          memberVisibility(ctx),
           ctx.tenant.timezone,
         );
         await recordAudit(

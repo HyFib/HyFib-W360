@@ -10,6 +10,8 @@ import {
   eq,
   inArray,
   messageTemplates,
+  automationRuns,
+  ACTIVE_RUN_STATUSES,
   sql,
   type CampaignStatus,
   type Database,
@@ -21,11 +23,11 @@ import { recordSystemAudit } from '../audit';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { requestAccessCheck } from '../messaging/access';
-import type { GraphClient, RemoteTemplate } from '../messaging/graph';
+import { isRateLimited, type GraphClient, type RemoteTemplate } from '../messaging/graph';
 import {
   activeManagementPause,
   assertManagementOpen,
-  managementResumeAt,
+  deferralDelaySeconds,
   noteManagementUsage,
   refusedForPause,
   type ManagementPaused,
@@ -73,6 +75,11 @@ export interface TemplateUsage {
   campaigns: { id: string; name: string | null; status: CampaignStatus }[];
   /** Published automations (active or paused) whose live version has a step sending it. */
   automations: { id: string; name: string | null; status: string }[];
+  /**
+   * Automations with runs in progress (running or waiting) on a version that sends it, whatever
+   * version is live now: each run keeps its own version, so they rely on the template too.
+   */
+  automationRuns: { id: string; name: string | null; runs: number }[];
   /** Order message and cart reminder rules of the company's stores that send it. */
   storeRules: { id: string; storeName: string | null; event: string; enabled: boolean }[];
 }
@@ -114,6 +121,37 @@ export async function templateUsage(
     )
     .orderBy(asc(automations.name), asc(automations.id))
     .limit(USAGE_LIMIT);
+  const runRows = await tx
+    .select({
+      id: automations.id,
+      name: automations.name,
+      runs: sql<number>`count(*)::int`,
+    })
+    .from(automationRuns)
+    .innerJoin(
+      automationVersions,
+      and(
+        eq(automationVersions.tenantId, automationRuns.tenantId),
+        eq(automationVersions.id, automationRuns.versionId),
+      ),
+    )
+    .innerJoin(
+      automations,
+      and(
+        eq(automations.tenantId, automationRuns.tenantId),
+        eq(automations.id, automationRuns.automationId),
+      ),
+    )
+    .where(
+      and(
+        eq(automationRuns.tenantId, tenantId),
+        inArray(automationRuns.status, [...ACTIVE_RUN_STATUSES]),
+        sql`jsonb_path_exists(${automationVersions.graph}, '$.nodes[*] ? (@.templateId == $id)', jsonb_build_object('id', ${templateId}::text))`,
+      ),
+    )
+    .groupBy(automations.id, automations.name)
+    .orderBy(asc(automations.name), asc(automations.id))
+    .limit(USAGE_LIMIT);
   const ruleRows = await tx
     .select({
       id: commerceStoreMessageRules.id,
@@ -138,7 +176,12 @@ export async function templateUsage(
     )
     .orderBy(asc(commerceStoreMessageRules.event), asc(commerceStoreMessageRules.id))
     .limit(USAGE_LIMIT);
-  return { campaigns: campaignRows, automations: automationRows, storeRules: ruleRows };
+  return {
+    campaigns: campaignRows,
+    automations: automationRows,
+    automationRuns: runRows.map((r) => ({ ...r, runs: Number(r.runs) })),
+    storeRules: ruleRows,
+  };
 }
 
 const STORE_EVENT_NAMES: Record<string, string> = {
@@ -151,11 +194,47 @@ const STORE_EVENT_NAMES: Record<string, string> = {
   cart_second_reminder: 'second cart reminder',
 };
 
+/** Which names a caller may read in a usage list: a member's read permissions, a key's scopes. */
+export interface UsageVisibility {
+  campaigns: boolean;
+  automations: boolean;
+  stores: boolean;
+}
+
+/**
+ * A usage list with the names the caller may not read left out: "a campaign", "an automation",
+ * "a store" then stand for them (ADR-404). The Templates page and a refusal both show it so.
+ */
+export function maskUsage(usage: TemplateUsage, visible: UsageVisibility): TemplateUsage {
+  return {
+    campaigns: usage.campaigns.map((c) => ({ ...c, name: visible.campaigns ? c.name : null })),
+    automations: usage.automations.map((a) => ({
+      ...a,
+      name: visible.automations ? a.name : null,
+    })),
+    automationRuns: usage.automationRuns.map((a) => ({
+      ...a,
+      name: visible.automations ? a.name : null,
+    })),
+    storeRules: usage.storeRules.map((r) => ({
+      ...r,
+      storeName: visible.stores ? r.storeName : null,
+    })),
+  };
+}
+
 /** What uses the template, as a refusal names it ("campaign “Diwali”", …). */
 export function usageLabels(usage: TemplateUsage): string[] {
+  const published = new Set(usage.automations.map((a) => a.id));
   return [
     ...usage.campaigns.map((c) => (c.name ? `campaign “${c.name}”` : 'a campaign')),
     ...usage.automations.map((a) => (a.name ? `automation “${a.name}”` : 'an automation')),
+    ...usage.automationRuns
+      .filter((a) => !published.has(a.id))
+      .map(
+        (a) =>
+          `${a.name ? `automation “${a.name}”` : 'an automation'} (${a.runs} ${a.runs === 1 ? 'run' : 'runs'} in progress)`,
+      ),
     ...usage.storeRules.map(
       (r) =>
         `${r.storeName ? `the ${r.storeName} ` : 'a store’s '}${STORE_EVENT_NAMES[r.event] ?? r.event} message`,
@@ -209,6 +288,8 @@ export async function writeEditTemplate(
   definition: TemplateDefinition,
   actorUserId: string | null,
   at: Date,
+  /** The names the caller may read, for a refusal that names what uses the template. */
+  visible: UsageVisibility,
   /** The company's time zone, for the time a pause ends (the API, which has none, gives UTC). */
   timeZone = 'UTC',
 ): Promise<void> {
@@ -218,7 +299,7 @@ export async function writeEditTemplate(
   }
   const refusal = await templateEditRefusal(row, definition, {
     sendingCampaigns: (await sendingCampaigns(tx, tenantId, row.id)).length,
-    users: async () => usageLabels(await templateUsage(tx, tenantId, row.id)),
+    users: async () => usageLabels(maskUsage(await templateUsage(tx, tenantId, row.id), visible)),
   });
   if (refusal) throw refusal;
   const waba = await templateAccount(tx, tenantId, row.whatsappAccountId);
@@ -470,8 +551,10 @@ const UNSENT_IN_TIME =
  * the edit as not sent. Meta's `success: true` makes the edit, and Meta's template is then read
  * again by id (`GET /{template-id}`) and stored as Meta reports it; when that read cannot be made,
  * a sync is requested instead and nothing is assumed. A refusal is recorded with Meta's code and
- * message. A connection that failed before sending, or a refusal for now that paused the account,
- * clears the attempt (Meta has nothing) before the retry or deferral.
+ * message. Only an answer that proves Meta did nothing clears the attempt before a retry or a
+ * deferral: a connection that failed before sending, and a rate limit (HTTP 429 or a rate-limit
+ * code). Any other retryable answer (5xx, codes 1, 2, 131000) may have done the work: the attempt
+ * stays, and the sync settles it, after the pause when that answer paused the account.
  */
 export async function processTemplateEdit(
   deps: TemplateEditWorkerDeps,
@@ -543,11 +626,20 @@ export async function processTemplateEdit(
     deps.db.run(scope, (tx) =>
       tx.update(messageTemplates).set({ editAttemptedAt: null }).where(thisEdit),
     );
-  const defer = async (pausedUntil: Date): Promise<ManagementPaused> => {
+  /**
+   * Defers the job for Meta's pause. The deferral is stored on the database's clock (the window is
+   * judged on it): the database's now plus the wait this worker's clock sees. `clear`: Meta has
+   * nothing of the attempt, so it is cleared for the run after the pause.
+   */
+  const defer = async (pausedUntil: Date, clear: boolean): Promise<ManagementPaused> => {
+    const wait = deferralDelaySeconds(pausedUntil, deps.clock.now());
     await deps.db.run(scope, (tx) =>
       tx
         .update(messageTemplates)
-        .set({ managementDeferredUntil: managementResumeAt(pausedUntil), editAttemptedAt: null })
+        .set({
+          managementDeferredUntil: sql`now() + make_interval(secs => ${wait})`,
+          ...(clear ? { editAttemptedAt: null } : {}),
+        })
         .where(thisEdit),
     );
     return { paused: pausedUntil };
@@ -575,7 +667,7 @@ export async function processTemplateEdit(
     return 'done';
   }
   const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
-  if (paused) return defer(paused);
+  if (paused) return defer(paused, false);
 
   // The one attempt, committed before the request, while the window has a minute left.
   const attempt = await deps.db.run(scope, async (tx) => {
@@ -613,8 +705,25 @@ export async function processTemplateEdit(
     components: row.editComponents as Record<string, unknown>[],
   });
   const pausedBy = await noteManagementUsage(deps, scope, credential, result);
-  // Meta refused it for now and paused the account: sent again after the pause, no retry spent.
-  if (refusedForPause(result, pausedBy)) return defer(pausedBy);
+  // Rate limited: Meta did nothing, so it is sent again after the pause (no retry spent) or, when
+  // the answer paused nothing, retried.
+  if (!result.ok && isRateLimited(result)) {
+    if (pausedBy) return defer(pausedBy, true);
+    await clearAttempt();
+    return 'retry';
+  }
+  if (refusedForPause(result, pausedBy)) {
+    // Another retryable answer that paused the account: Meta may have made the edit. The attempt
+    // stays; the sync after the pause settles it from Meta's components.
+    await deps.db.run(scope, async (tx) => {
+      await tx
+        .update(messageTemplates)
+        .set({ editError: 'Waiting for Meta to confirm the edit.' })
+        .where(thisEdit);
+      await requestSyncTx(tx, scope.tenantId, row.whatsappAccountId, deps.clock.now());
+    });
+    return defer(pausedBy, false);
+  }
   if (result.ok) {
     // Read Meta's template again, unless the answer paused the account: no further call is made
     // then, and the sync the sweep signals after the pause reads it (ADR-399).

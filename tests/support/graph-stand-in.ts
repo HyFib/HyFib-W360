@@ -54,7 +54,8 @@ export type TemplateCreateBehaviour =
  */
 export type TemplateEditBehaviour =
   | { kind: 'accept'; status?: string }
-  | { kind: 'error'; status: number; code: number; message: string }
+  /** `apply`: the edit is applied before the error is answered, as a 5xx after the work may be. */
+  | { kind: 'error'; status: number; code: number; message: string; apply?: boolean }
   /** Applies the edit, then drops the connection before answering (lost response). */
   | { kind: 'apply_then_drop'; status?: string }
   /** Drops the connection without applying anything. */
@@ -1220,11 +1221,14 @@ export async function startGraphStandIn(options: {
           req.socket.destroy();
           return;
         }
-        if (behaviour.kind === 'error') {
+        if (behaviour.kind === 'error' && !behaviour.apply) {
           return graphError(res, behaviour.status, behaviour.code, behaviour.message);
         }
         byId.components = b.components;
         byId.category = b.category;
+        if (behaviour.kind === 'error') {
+          return graphError(res, behaviour.status, behaviour.code, behaviour.message);
+        }
         if (behaviour.status) byId.status = behaviour.status;
         if (behaviour.kind === 'apply_then_drop') {
           req.socket.destroy();

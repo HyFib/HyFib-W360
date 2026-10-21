@@ -43,8 +43,8 @@ ALTER TABLE app.message_templates
 GRANT UPDATE (edit_id, edit_state, edit_components, edit_error, edit_requested_at,
               edit_requested_by_user_id, edit_attempted_at)
   ON app.message_templates TO w360_app;
--- The sweep's due list below reads whether an edit is sending, and nothing else of it.
-GRANT SELECT (edit_state) ON app.message_templates TO w360_definer;
+-- The sweep's due list below reads an edit's state and request time, and nothing else of it.
+GRANT SELECT (edit_state, edit_requested_at) ON app.message_templates TO w360_definer;
 
 -- Status history records the edit (asked, refused, made) under its own source. The check is
 -- replaced and validated at once: the table is append-only and holds a few rows per template, and
@@ -54,7 +54,9 @@ ALTER TABLE app.template_status_events ADD CONSTRAINT template_status_events_sou
   CHECK (source IN ('submit', 'sync', 'send', 'delete', 'edit'));
 
 -- Template syncs: the due list of 0310, which also syncs every 5 minutes an account with an edit
--- still sending, so a lost answer is settled within its window. The owner drops the function and
+-- still sending, so a lost answer is settled within its window, and for an hour after its request
+-- one whose edit failed, so an edit Meta applies late is confirmed within minutes, not at the
+-- 6-hourly sync. The owner drops the function and
 -- the migration role creates it again, granting before handing it back (see 0011).
 SET ROLE w360_definer;
 DROP FUNCTION ops.template_sync_due(integer);
@@ -82,7 +84,9 @@ CREATE FUNCTION ops.template_sync_due(p_limit integer)
                   AND EXISTS (SELECT 1 FROM app.message_templates m
                                WHERE m.tenant_id = w.tenant_id AND m.whatsapp_account_id = w.id
                                  AND (m.status IN ('submitting', 'pending', 'in_appeal')
-                                      OR m.edit_state = 'sending'))))
+                                      OR m.edit_state = 'sending'
+                                      OR (m.edit_state = 'failed'
+                                          AND m.edit_requested_at > now() - interval '1 hour')))))
     ) d
    ORDER BY d.requested DESC,
             CASE WHEN d.requested THEN d.templates_sync_requested_at END,

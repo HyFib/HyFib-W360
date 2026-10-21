@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ROLE_PERMISSIONS } from '../authz/permissions';
-import { GraphClient } from '../messaging/graph';
+import { GraphClient, isRateLimited } from '../messaging/graph';
+import type { ApiContext } from '../api/context';
+import { apiUsageVisibility } from '../api/message-template-drafts';
 import { toMetaComponents, type TemplateDefinition } from './definition';
 import {
   editReconciliation,
@@ -15,7 +17,7 @@ import {
   templateEditRefusal,
   type EditableTemplate,
 } from './edit-model';
-import { parseTemplateEditRef, templateEditRef, usageLabels } from './edit';
+import { maskUsage, parseTemplateEditRef, templateEditRef, usageLabels } from './edit';
 
 /** Editing a template Meta has (ADR-404): the request, the refusals and the sync's settling. */
 
@@ -419,6 +421,11 @@ describe('who sees where a template is used', () => {
           { id: 'c2', name: null, status: 'paused' },
         ],
         automations: [{ id: 'a1', name: 'Follow-up', status: 'active' }],
+        automationRuns: [
+          { id: 'a1', name: 'Follow-up', runs: 2 },
+          { id: 'a2', name: 'Old flow', runs: 1 },
+          { id: 'a3', name: null, runs: 300 },
+        ],
         storeRules: [
           { id: 'r1', storeName: 'Asha Stores', event: 'order_shipped', enabled: true },
           { id: 'r2', storeName: null, event: 'cart_reminder', enabled: false },
@@ -428,6 +435,8 @@ describe('who sees where a template is used', () => {
       'campaign “Diwali”',
       'a campaign',
       'automation “Follow-up”',
+      'automation “Old flow” (1 run in progress)',
+      'an automation (300 runs in progress)',
       'the Asha Stores order shipped message',
       'a store’s cart reminder message',
     ]);
@@ -445,5 +454,76 @@ describe('the edit job’s reference', () => {
     for (const ref of [template, `${template}:`, `${template}:${edit}:x`, `${template}:nope`, '']) {
       expect(parseTemplateEditRef(ref)).toBeNull();
     }
+  });
+});
+
+describe('names a caller may not read', () => {
+  const usage = {
+    campaigns: [{ id: 'c1', name: 'Diwali', status: 'draft' as const }],
+    automations: [{ id: 'a1', name: 'Follow-up', status: 'active' }],
+    automationRuns: [{ id: 'a2', name: 'Old flow', runs: 3 }],
+    storeRules: [{ id: 'r1', storeName: 'Asha Stores', event: 'order_shipped', enabled: true }],
+  };
+
+  it('are left out of the usage list and of a refusal’s labels, each kind by its own permission', () => {
+    expect(
+      usageLabels(maskUsage(usage, { campaigns: true, automations: true, stores: true })),
+    ).toEqual([
+      'campaign “Diwali”',
+      'automation “Follow-up”',
+      'automation “Old flow” (3 runs in progress)',
+      'the Asha Stores order shipped message',
+    ]);
+    expect(
+      usageLabels(maskUsage(usage, { campaigns: false, automations: true, stores: true })),
+    ).toEqual([
+      'a campaign',
+      'automation “Follow-up”',
+      'automation “Old flow” (3 runs in progress)',
+      'the Asha Stores order shipped message',
+    ]);
+    expect(
+      usageLabels(maskUsage(usage, { campaigns: true, automations: false, stores: true })),
+    ).toEqual([
+      'campaign “Diwali”',
+      'an automation',
+      'an automation (3 runs in progress)',
+      'the Asha Stores order shipped message',
+    ]);
+    expect(
+      usageLabels(maskUsage(usage, { campaigns: true, automations: true, stores: false }))[3],
+    ).toBe('a store’s order shipped message');
+  });
+
+  it('for a key: campaigns with campaigns.read, never automations or stores', () => {
+    const key = (scopes: string[]) =>
+      ({
+        tenant: { id: 't', status: 'active' },
+        key: { id: 'k', scopes: new Set(scopes) },
+        planScopes: null,
+      }) as unknown as ApiContext;
+    expect(apiUsageVisibility(key(['templates.submit']))).toEqual({
+      campaigns: false,
+      automations: false,
+      stores: false,
+    });
+    expect(apiUsageVisibility(key(['templates.submit', 'campaigns.read', 'orders.read']))).toEqual({
+      campaigns: true,
+      automations: false,
+      stores: false,
+    });
+  });
+});
+
+describe('which refusals prove Meta did nothing', () => {
+  it('a 429 or a rate-limit code; not a 5xx or a transient code', () => {
+    expect(isRateLimited({ httpStatus: 429 })).toBe(true);
+    for (const code of [4, 17, 32, 613, 80007, 130429, 131056]) {
+      expect(isRateLimited({ httpStatus: 400, code })).toBe(true);
+    }
+    expect(isRateLimited({ httpStatus: 500, code: 1 })).toBe(false);
+    expect(isRateLimited({ httpStatus: 500, code: 2 })).toBe(false);
+    expect(isRateLimited({ httpStatus: 503, code: 131000 })).toBe(false);
+    expect(isRateLimited({})).toBe(false);
   });
 });

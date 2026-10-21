@@ -447,8 +447,10 @@ Meta approves it is not confirmed (research M-201): if it does not, a lost answe
 "could not confirm", and a later sync still confirms the edit once Meta lists the content. HyFib
 also sends an edit without the template's name and language, which Meta's only example includes;
 if Meta refuses edits for that, its message says so and the refusal is shown as usual. An edit is
-sent at most once: a job run again after its attempt only asks for a sync. Check the `template.edit` and `template.sync`
-queues on Operations → Queues.
+sent at most once: a job run again after its attempt, or after a 5xx that paused the account, only
+asks for a sync. A failed edit keeps its account synced every 5 minutes for an hour after the
+request, so an edit Meta applies late is confirmed then (later, at the 6-hourly sync). Check the
+`template.edit` and `template.sync` queues on Operations → Queues.
 
 **Meta refused a template edit.** The page and the API (`edit.error`) give Meta's code and message
 as Meta sent them, and the history an "Edit failed" row with the same. HyFib does not limit which
@@ -461,8 +463,15 @@ campaign using the template is scheduled or sending: wait, or pause or cancel it
 that changes the template's variables or buttons (how many values the header, body or a link take,
 or the quick-reply buttons and their titles) is refused while an unfinished campaign, a published
 automation or a store message uses the template, because each stores values for the old shape and
-would stop: change those to another template first, or add a new template. Wording-only edits stay
-allowed.
+would stop: change those to another template first, or add a new template. Automations count
+while they have runs in progress on any version that sends the template, not only the live one.
+Wording-only edits stay allowed. The shape check is broader than each sender needs (a renamed
+quick reply is refused even when only a campaign, which checks counts only, uses the template).
+These checks hold when the edit is requested: a campaign launched or resumed, an automation
+published or a store rule saved while a shape-changing edit is still sending is not refused, and
+stops if Meta takes the edit (a campaign pauses as "template not approved", an automation step ends
+"template changed"). Tell the member to point it at the edited template's values, or another
+template, and resume it.
 
 **A template send failed with 132015 / 132016.** Meta paused or disabled the template; HyFib marks it
 and requests a sync. Improve the template (quality) or use another one; do not resend blindly.

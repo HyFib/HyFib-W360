@@ -325,7 +325,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   template is used (`templateUsage`: unfinished campaigns, published automations, store rules);
   name, language and category stay; an edit is refused while a campaign using it is `scheduled` or
   `running` (read under a share lock), and one that changes its shape (`templateShape`) while
-  anything uses it. The job carries the edit's id and commits one attempt before posting.
+  anything uses it (automations count while runs are in progress on any version that sends it;
+  names are masked by the caller's read permissions or scopes). The job carries the edit's id and
+  commits one attempt before posting; only a rate limit clears it.
   Written ahead on the template (`edit_state = 'sending'`, `edit_components`, who and when, an
   `edit_requested` status change, migration 0316) and sent by the `template.edit` queue (paced by
   ADR-399, deferred like a submission): `POST /{template-id}` with the unchanged category and the

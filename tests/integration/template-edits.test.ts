@@ -1,7 +1,10 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { authorizedTenantScope, type TenantScope } from '@w360/db';
 import {
+  apiEditMessageTemplate,
+  authenticateApiToken,
+  createApiKeysService,
   createTemplatesService,
   processTemplateEdit,
   processTemplateSubmit,
@@ -11,6 +14,7 @@ import {
   type TemplateDefinition,
   type TemplatesService,
 } from '@w360/domain';
+import { usageHeaderValue } from '../support/graph-stand-in';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
@@ -311,7 +315,20 @@ describe('editing a template Meta has', () => {
           )
         ).rows.map((r) => r.whatsapp_account_id);
       expect(await due()).toEqual([c.whatsappAccountId]);
-      // Without an edit sending, nothing makes it due.
+      // A failed edit keeps it due for an hour after its request (a late-applied edit is confirmed).
+      await client.query(
+        `UPDATE app.message_templates SET edit_state = 'failed'
+          WHERE whatsapp_account_id = $1 AND edit_state = 'sending'`,
+        [c.whatsappAccountId],
+      );
+      expect(await due()).toEqual([c.whatsappAccountId]);
+      await client.query(
+        `UPDATE app.message_templates SET edit_requested_at = now() - interval '61 minutes'
+          WHERE whatsapp_account_id = $1 AND edit_state = 'failed'`,
+        [c.whatsappAccountId],
+      );
+      expect(await due()).toEqual([]);
+      // Without an open edit, nothing makes it due.
       await client.query(
         `UPDATE app.message_templates SET edit_state = NULL, edit_components = NULL
           WHERE whatsapp_account_id = $1`,
@@ -452,7 +469,7 @@ describe('editing a template Meta has', () => {
     await expectAppError(
       templates.editTemplate(owner, id, { definition: delayed }),
       'precondition_failed',
-      /campaign using this template is sending/,
+      /campaign using this template is scheduled or sending/,
     );
     expect((await templateRow(id)).edit_state).toBeNull();
     // A campaign about to start is waited for in the same way.
@@ -475,6 +492,28 @@ describe('editing a template Meta has', () => {
       templates.editTemplate(owner, id, { definition: extraVariable }),
       'precondition_failed',
       /variables or buttons, which campaign “Diwali draft”, campaign “Diwali now”, automation “Order follow-up” rely on/,
+    );
+    // A key holding only templates.submit reads no campaign or automation names: none in the refusal.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      {
+        name: 'Edits',
+        scopes: ['templates.submit'],
+        expiresInDays: 0,
+      },
+    );
+    const keyCtx = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    expect(keyCtx).toBeTruthy();
+    await expectAppError(
+      apiEditMessageTemplate(
+        { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock },
+        keyCtx!,
+        id,
+        { definition: extraVariable },
+        null,
+      ),
+      'precondition_failed',
+      /which a campaign, a campaign, an automation rely on/,
     );
     // Wording alone is allowed.
     await templates.editTemplate(owner, id, { definition: delayed });
@@ -628,7 +667,7 @@ describe('an edit’s one attempt and its window (ADR-404 review)', () => {
     });
   });
 
-  it('gives the runtime role alone the edit columns, and the definer only edit_state to read (migration 0316)', async () => {
+  it('gives the runtime role alone the edit columns, and the definer only the state and request time to read (migration 0316)', async () => {
     const rows = await fx.query<{
       c: string;
       app_update: boolean;
@@ -659,10 +698,203 @@ describe('an edit’s one attempt and its window (ADR-404 review)', () => {
       ].map((c) => ({
         c,
         app_update: true,
-        definer_select: c === 'edit_state',
+        definer_select: c === 'edit_state' || c === 'edit_requested_at',
         definer_update: false,
         public_update: false,
       })),
     );
+  });
+});
+
+describe('runs pinned to an older automation version (ADR-404 second review)', () => {
+  it('refuses a shape change while a run in progress on a version that sends the template', async () => {
+    const c = await fx.company();
+    const { id } = await approvedTemplate(c, 'edit_pinned_runs');
+    const owner = await fx.ctx(c, c.owner);
+    const [membership] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.memberships WHERE tenant_id = $1 AND user_id = $2',
+      [c.tenant.id, c.owner.id],
+    );
+    // A customer's conversation, for the run.
+    await fx.deliver(fx.messagesBody(c, { messages: [{ text: 'Hello' }] }));
+    const [conversation] = await fx.query<{ id: string; contact_id: string }>(
+      'SELECT id, contact_id FROM app.conversations WHERE tenant_id = $1 LIMIT 1',
+      [c.tenant.id],
+    );
+    const automation = uuidv7();
+    const v1 = uuidv7();
+    const v2 = uuidv7();
+    const sends = { start: 'n1', nodes: [{ id: 'n1', type: 'send_template', templateId: id }] };
+    const without = { start: 'n1', nodes: [{ id: 'n1', type: 'handoff' }] };
+    await fx.query(
+      `INSERT INTO app.automations (id, tenant_id, name, draft_trigger, draft_graph,
+              draft_updated_by_membership_id, created_by_membership_id)
+       VALUES ($1, $2, 'Pinned flow', '{}', $3, $4, $4)`,
+      [automation, c.tenant.id, JSON.stringify(without), membership!.id],
+    );
+    for (const [version, number, graph] of [
+      [v1, 1, sends],
+      [v2, 2, without],
+    ] as const) {
+      await fx.query(
+        `INSERT INTO app.automation_versions (id, tenant_id, automation_id, kind, number, trigger,
+                graph, definition_sha256, created_by_membership_id)
+         VALUES ($1, $2, $3, 'published', $4, '{}', $5, $6, $7)`,
+        [
+          version,
+          c.tenant.id,
+          automation,
+          number,
+          JSON.stringify(graph),
+          String(number).repeat(64),
+          membership!.id,
+        ],
+      );
+    }
+    // Version 2, live now, no longer sends the template; a run on version 1 is still in progress.
+    await fx.query(
+      `UPDATE app.automations SET status = 'active', active_version_id = $1 WHERE id = $2`,
+      [v2, automation],
+    );
+    const run = uuidv7();
+    await fx.query(
+      `INSERT INTO app.automation_runs (id, tenant_id, automation_id, version_id, conversation_id,
+              contact_id, channel_account_id, trigger_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'keyword')`,
+      [
+        run,
+        c.tenant.id,
+        automation,
+        v1,
+        conversation!.id,
+        conversation!.contact_id,
+        c.channelAccountId,
+      ],
+    );
+
+    const usage = await templates.templateUsage(owner, id);
+    expect(usage.automations).toEqual([]);
+    expect(usage.automationRuns).toEqual([{ id: automation, name: 'Pinned flow', runs: 1 }]);
+    const extraVariable: TemplateDefinition = {
+      ...delayed,
+      body: {
+        text: 'Hi {{1}}, your order {{2}} arrives {{3}}.',
+        examples: ['Asha', 'A-1001', 'today'],
+      },
+    };
+    await expectAppError(
+      templates.editTemplate(owner, id, { definition: extraVariable }),
+      'precondition_failed',
+      /which automation “Pinned flow” \(1 run in progress\) rely on/,
+    );
+    // Once the run has ended, the same change is allowed.
+    await fx.query(
+      `UPDATE app.automation_runs
+          SET status = 'stopped', ended_at = now(), end_reason = 'automation_archived'
+        WHERE id = $1`,
+      [run],
+    );
+    await templates.editTemplate(owner, id, { definition: extraVariable });
+    expect((await templateRow(id)).edit_state).toBe('sending');
+  });
+});
+
+describe('answers that pause the account (ADR-404 second review)', () => {
+  afterEach(() => {
+    fx.standIn.state.usageHeader = null;
+    fx.standIn.state.templateEditQueue = [];
+  });
+
+  async function unpause(c: Company) {
+    fx.standIn.state.usageHeader = null;
+    await fx.query(
+      'UPDATE app.whatsapp_accounts SET management_paused_until = NULL WHERE id = $1',
+      [c.whatsappAccountId],
+    );
+  }
+
+  const attempted = async (id: string) =>
+    (
+      await fx.query<{ attempted: boolean }>(
+        'SELECT edit_attempted_at IS NOT NULL AS attempted FROM app.message_templates WHERE id = $1',
+        [id],
+      )
+    )[0]?.attempted;
+
+  it('keeps the attempt after a 5xx that paused the account, and never posts it again', async () => {
+    const c = await fx.company();
+    const { id, hsmId } = await approvedTemplate(c, 'edit_server_error');
+    const owner = await fx.ctx(c, c.owner);
+    await templates.editTemplate(owner, id, { definition: delayed });
+    const ref = await editRef(id);
+    // Meta applies the edit, then answers 500 (code 1) with a header that pauses the account.
+    fx.standIn.state.templateEditQueue = [
+      { kind: 'error', status: 500, code: 1, message: 'An unknown error occurred', apply: true },
+    ];
+    fx.standIn.state.usageHeader = usageHeaderValue({ [c.wabaId]: { regainMinutes: 5 } });
+    const outcome = await processTemplateEdit(workerDeps(), scopeOf(c), ref);
+    expect(outcome).toMatchObject({ paused: expect.any(Date) });
+    expect(await attempted(id)).toBe(true);
+    expect(await templateRow(id)).toMatchObject({
+      edit_state: 'sending',
+      edit_error: 'Waiting for Meta to confirm the edit.',
+    });
+    // After the pause the deferred job runs again: it posts nothing, and the sync confirms.
+    await unpause(c);
+    fx.standIn.state.templateEditQueue = [
+      { kind: 'error', status: 400, code: 2388299, message: 'Edit limit reached' },
+    ];
+    expect(await processTemplateEdit(workerDeps(), scopeOf(c), ref)).toBe('done');
+    expect(editsTo(hsmId).length).toBe(1);
+    expect(await syncTemplates(workerDeps(), scopeOf(c), c.whatsappAccountId)).toBe('done');
+    expect(await templateRow(id)).toMatchObject({
+      components: toMetaComponents(delayed),
+      edit_state: null,
+    });
+  });
+
+  it('clears the attempt after a rate limit, which did nothing, and sends it after the pause', async () => {
+    const c = await fx.company();
+    const { id, hsmId } = await approvedTemplate(c, 'edit_rate_limited');
+    const owner = await fx.ctx(c, c.owner);
+    await templates.editTemplate(owner, id, { definition: delayed });
+    const ref = await editRef(id);
+    fx.standIn.state.templateEditQueue = [
+      { kind: 'error', status: 400, code: 80007, message: 'Rate limit hit' },
+    ];
+    fx.standIn.state.usageHeader = usageHeaderValue({ [c.wabaId]: { regainMinutes: 5 } });
+    expect(await processTemplateEdit(workerDeps(), scopeOf(c), ref)).toMatchObject({
+      paused: expect.any(Date),
+    });
+    expect(await attempted(id)).toBe(false);
+    // The deferral is stored on the database's clock, about five minutes ahead.
+    const [deferral] = await fx.query<{ ahead: boolean }>(
+      `SELECT management_deferred_until BETWEEN now() + interval '4 minutes'
+                                            AND now() + interval '7 minutes' AS ahead
+         FROM app.message_templates WHERE id = $1`,
+      [id],
+    );
+    expect(deferral?.ahead).toBe(true);
+    await unpause(c);
+    fx.standIn.state.templateEditQueue = [{ kind: 'accept' }];
+    expect(await processTemplateEdit(workerDeps(), scopeOf(c), ref)).toBe('done');
+    expect(editsTo(hsmId).length).toBe(2);
+    expect(await templateRow(id)).toMatchObject({
+      components: toMetaComponents(delayed),
+      edit_state: null,
+    });
+  });
+
+  it('retries a rate limit that paused nothing, with the attempt cleared', async () => {
+    const c = await fx.company();
+    const { id } = await approvedTemplate(c, 'edit_rate_retry');
+    const owner = await fx.ctx(c, c.owner);
+    await templates.editTemplate(owner, id, { definition: delayed });
+    fx.standIn.state.templateEditQueue = [
+      { kind: 'error', status: 429, code: 4, message: 'Application request limit reached' },
+    ];
+    expect(await runEdit(c, id)).toBe('retry');
+    expect(await attempted(id)).toBe(false);
+    expect((await templateRow(id)).edit_state).toBe('sending');
   });
 });

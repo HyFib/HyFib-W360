@@ -5,7 +5,7 @@ import { recordSystemAudit } from '../audit';
 import { canonicalJson } from '../automations/graph';
 import type { OutboundDeps } from '../messaging/outbound';
 import { templateDefinitionSchema, toMetaComponents } from '../templates/definition';
-import { writeEditTemplate } from '../templates/edit';
+import { writeEditTemplate, type UsageVisibility } from '../templates/edit';
 import {
   assertValidDefinition,
   isEditableDraft,
@@ -21,7 +21,7 @@ import {
   writeUpdateTemplateDraft,
 } from '../templates/service';
 import { parseInput } from '../validation';
-import { apiActor, assertScope, type ApiContext } from './context';
+import { apiActor, assertScope, hasScope, type ApiContext } from './context';
 import {
   claimIdempotencyKey,
   storeIdempotentResponse,
@@ -70,6 +70,14 @@ export const apiEditMessageTemplateSchema = z
     ),
   })
   .strict();
+
+/**
+ * The usage names a key may read in a refusal (ADR-404): campaigns with `campaigns.read`; never
+ * automations or stores, which no scope reads.
+ */
+export function apiUsageVisibility(ctx: ApiContext): UsageVisibility {
+  return { campaigns: hasScope(ctx, 'campaigns.read'), automations: false, stores: false };
+}
 
 const isUuid = (id: string) => z.uuid().safeParse(id).success;
 
@@ -316,7 +324,16 @@ export async function apiEditMessageTemplate(
       .where(and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, id)))
       .for('update');
     if (!row) throw notFound('Template');
-    await writeEditTemplate(tx, deps, ctx.tenant.id, row, data.definition, null, now);
+    await writeEditTemplate(
+      tx,
+      deps,
+      ctx.tenant.id,
+      row,
+      data.definition,
+      null,
+      now,
+      apiUsageVisibility(ctx),
+    );
     await recordSystemAudit(
       tx,
       ctx.tenant.id,

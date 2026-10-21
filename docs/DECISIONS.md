@@ -17334,8 +17334,8 @@ Decision:
   `category` and `components` stay what Meta reports. Another edit, and a deletion, wait for Meta's
   answer (412). The job re-reads the row under the company's scope; while Meta throttles the
   account it defers as submissions do (ADR-399, `management_deferred_until`, queue
-  `template.edit` in `PAUSE_DEFERRAL_QUEUES`), and a refusal for now whose own response paused the
-  account defers too.
+  `template.edit` in `PAUSE_DEFERRAL_QUEUES`), and a rate limit whose own response paused the
+  account defers too (see the second review below for other retryable answers).
 - **Meta's answer:** `success: true` makes the edit; the job then reads the template by id
   (`GET /{template-id}`, default fields) unless that answer paused the account, and stores the
   status, category and components Meta reports, with `edited` (naming the member who asked) and,
@@ -17394,9 +17394,9 @@ lifecycle, all fixed in migration 0316 (not applied anywhere before the fix) and
   edit has an id (`edit_id`) that its job's reference carries (`<template id>:<edit id>`), and a job
   whose edit is no longer the template's open one does nothing. Before the request the job commits
   `edit_attempted_at` (the database's time) in its own transaction; a run that finds it set sends
-  nothing and requests a sync, which settles the edit from Meta's components. A connection that
-  failed before sending, and a refusal for now that paused the account, clear it (Meta has
-  nothing). So a refusal only ever answers the edit's single attempt.
+  nothing and requests a sync, which settles the edit from Meta's components. Only answers that
+  prove Meta did nothing clear it (amended by the second review below). So a refusal only ever
+  answers the edit's single attempt.
 - **A late-applied edit is reconciled (M2):** the sync now also confirms a `failed` edit whose
   content Meta's template shows (`edited`, source `sync`), so an edit Meta applied after the window,
   or after an answer HyFib read as a failure, no longer stays failed with a false message (or
@@ -17441,6 +17441,45 @@ lifecycle, all fixed in migration 0316 (not applied anywhere before the fix) and
   role matrix); a member whose company took one of those permissions away sees "a campaign", "an
   automation" or "a store" instead of its name. The refusal of a shape change names them by name
   (no role that may submit templates lacks those permissions today).
+
+Second review (before merge): no High issue; four Mediums and the rest fixed:
+
+- **Retryable answers that pause the account:** a 5xx or a transient code (1, 2, 131000) does not
+  prove Meta left the edit alone, so only a rate limit (HTTP 429 or a rate-limit code,
+  `isRateLimited`) clears the attempt: deferred after the pause when it paused the account, retried
+  when it did not. Any other retryable answer that paused the account keeps the attempt, says
+  "Waiting for Meta to confirm the edit.", requests a sync and defers the job, whose next run only
+  asks for a sync. The deferral is stored on the database's clock (its now plus the wait the
+  worker sees), as the window is judged.
+- **Names in a refusal:** a shape-change refusal now masks names as the usage list does: a member
+  sees a campaign's, automation's or store's name only with `campaigns.read`, `automations.read` or
+  `commerce.read`; a key sees campaign names only with the `campaigns.read` scope, and never
+  automation or store names, which no scope reads ("a campaign", "an automation", "a store").
+- **Runs on older versions:** each automation run keeps its version, so the usage now also counts
+  automations with runs in progress (running or waiting, any mode) on a version that sends the
+  template, whatever version is live ("automation … (N runs in progress)"), and a shape change is
+  refused while any exist.
+- **After the request (documented, not refused):** the checks hold when the edit is requested.
+  While a shape-changing edit is `sending` (up to Meta's answer, or 10 minutes for a lost one), a
+  member can still launch or resume a campaign, publish an automation or save a store rule that
+  uses the template; if Meta takes the edit, those stop on the changed shape (a campaign pauses as
+  `template_not_approved`, an automation step ends `template_changed`) and must be pointed at the
+  edited template's values or another template. Refusing those actions would add a check to four
+  other features for a window of minutes; RUNBOOKS says what to do.
+- **Failed edits stay due for an hour:** `ops.template_sync_due` also syncs every 5 minutes an
+  account with an edit that failed within the last hour, so an edit Meta applies late is confirmed
+  within minutes rather than at the 6-hourly sync; later than an hour, the routine sync confirms
+  it. The definer also reads `edit_requested_at` for this.
+- **The shape is broader than each sender needs (accepted):** quick-reply titles and positions
+  matter only to automation asking steps and store cash-on-delivery rules, and link positions to
+  link values; campaigns and other steps compare counts only. HyFib refuses any shape change while
+  anything uses the template rather than compute each user's reliance, so some harmless edits (a
+  quick reply renamed while only a campaign uses the template) are refused too; the member changes
+  the users first or adds a new template.
+- **Credit for a late confirmation:** a failed edit the sync later confirms is credited to the
+  member who asked for it (`edited`, their name), even if the content reached Meta through
+  WhatsApp Manager instead; HyFib cannot tell the two apart.
+- **Rollback note:** DEPLOYMENT now gives a statement that works under forced row security.
 
 ## ADR-405 A/B template variants for campaigns (P3-04, P5-08, P5-09) (2026-10-21)
 

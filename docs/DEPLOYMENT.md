@@ -1913,13 +1913,14 @@ IS NOT NULL`); the columns and checks can stay.
    `SHARE ROW EXCLUSIVE` on `app.api_keys`, which holds key authentication's `last_used_at` update
    (and so API requests) until the migration commits; it reads only the small enrolments table.
 
-   Migration 0316 (ADR-404) adds five nullable columns for an edit of a template Meta has to
-   `app.message_templates` (`edit_state`, `edit_components`, `edit_error`, `edit_requested_at`,
-   `edit_requested_by_user_id`) with their checks, `UPDATE` on them for the runtime role and `SELECT`
-   on `edit_state` for the definer; replaces `template_status_events`' source check to also take
+   Migration 0316 (ADR-404) adds seven nullable columns for an edit of a template Meta has to
+   `app.message_templates` (`edit_id`, `edit_state`, `edit_components`, `edit_error`,
+   `edit_requested_at`, `edit_requested_by_user_id`, `edit_attempted_at`) with their checks,
+   `UPDATE` on them for the runtime role and `SELECT` on `edit_state` and `edit_requested_at` for
+   the definer; replaces `template_status_events`' source check to also take
    `edit` (validated in the migration, a short scan of an append-only table under the lock the
    replacement takes); and recreates `ops.template_sync_due` so an account with an edit sending is
-   synced every 5 minutes. Expand only and backward compatible: nothing is rewritten, and the release
+   synced every 5 minutes (and one whose edit failed, for an hour after its request). Expand only and backward compatible: nothing is rewritten, and the release
    before never names the columns. The migration runner declares the new `template.edit` queue. Roll
    out workers before web as usual: a web server of this release queues `template.edit` jobs, which
    only a worker of this release consumes (a job queued before then waits for it, and an edit whose
@@ -1927,9 +1928,22 @@ IS NOT NULL`); the columns and checks can stay.
    back leaves the columns unused; an edit left `sending` stays so until a worker of this release
    returns, and meanwhile keeps its account due for a template sync every 5 minutes (the recreated
    `ops.template_sync_due` stays), spending Meta's management allowance. To stop that after a
-   rollback, settle such edits as failed: `UPDATE app.message_templates SET edit_state = 'failed',
-edit_error = 'Not sent: HyFib was rolled back. Send the edit again.' WHERE edit_state =
-'sending';` (as the owner role); members can send them again once the release returns.
+   rollback, settle such edits as failed. The table has forced row security and the owner role has
+   no policy on it, so an `UPDATE` as the owner changes nothing: list the companies with
+   `SELECT DISTINCT tenant_id FROM app.message_templates WHERE edit_state = 'sending'` as
+   `w360_definer` (it reads those two columns under its read policy), then, connected as
+   `w360_app`, run for each company in its own transaction:
+
+   ```sql
+   BEGIN;
+   SELECT set_config('app.tenant_id', '<company id>', true);
+   UPDATE app.message_templates
+      SET edit_state = 'failed', edit_error = 'Not sent: HyFib was rolled back. Send the edit again.'
+    WHERE edit_state = 'sending';
+   COMMIT;
+   ```
+
+   Members can send them again once the release returns.
 
    Migration 0317 (ADR-405) first adds the column `app.campaign_recipients.variant` (`NOT NULL
 DEFAULT 'A'`, a constant default, so nothing is rewritten) with its check added `NOT VALID`, so

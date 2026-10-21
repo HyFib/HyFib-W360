@@ -127,6 +127,16 @@ function causeCode(error: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Whether a refusal is Meta's rate limit (HTTP 429 or a rate-limit code): Meta did not do the
+ * work, so it may be asked again. Other retryable answers (5xx, transient codes) may have done it.
+ */
+export function isRateLimited(failure: { httpStatus?: number; code?: number }): boolean {
+  return (
+    failure.httpStatus === 429 || (failure.code !== undefined && RATE_LIMIT_CODES.has(failure.code))
+  );
+}
+
 export function classifyGraphError(
   httpStatus: number,
   body: unknown,

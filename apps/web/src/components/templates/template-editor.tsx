@@ -65,6 +65,12 @@ function UsageList({ usage }: { usage: TemplateUsage }) {
       (a) =>
         `${a.name ? `Automation “${a.name}”` : 'An automation'} (${a.status === 'active' ? 'live' : 'paused'})`,
     ),
+    ...usage.automationRuns
+      .filter((r) => !usage.automations.some((a) => a.id === r.id))
+      .map(
+        (r) =>
+          `${r.name ? `Automation “${r.name}”` : 'An automation'} (${r.runs} ${r.runs === 1 ? 'run' : 'runs'} in progress)`,
+      ),
     ...usage.storeRules.map(
       (r) =>
         `${r.storeName ?? 'Store'}: ${STORE_EVENT_LABEL[r.event] ?? r.event} message (${r.enabled ? 'on' : 'off'})`,

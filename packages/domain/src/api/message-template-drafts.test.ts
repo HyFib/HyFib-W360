@@ -1074,6 +1074,9 @@ describe('submitting templates and deleting those Meta has, through the API (ADR
   });
 });
 
+/** A caller who may read every name a usage list holds. */
+const SEE_ALL = { campaigns: true, automations: true, stores: true };
+
 describe('editing a template Meta has through the API (ADR-404)', () => {
   const approved = {
     id: TEMPLATE,
@@ -1134,7 +1137,7 @@ describe('editing a template Meta has through the API (ADR-404)', () => {
 
   it('writes the edit ahead: sending, the content sent, who asked, its change and the job in one transaction', async () => {
     const run = recorder([[], connected]);
-    await writeEditTemplate(run.tx, run, TENANT, approved, delayed, 'user-1', NOW);
+    await writeEditTemplate(run.tx, run, TENANT, approved, delayed, 'user-1', NOW, SEE_ALL);
     // Campaigns scheduled or sending, read under a share lock (none here).
     expect(run.steps[0]?.[1]).toBe('campaigns');
     expect(run.steps[0]?.[2]).toContain('("scheduled", "running")');
@@ -1184,11 +1187,20 @@ describe('editing a template Meta has through the API (ADR-404)', () => {
   it('refuses while a campaign is scheduled or sends it, a disconnected account, a pause, and writes nothing', async () => {
     const sending = recorder([[{ id: 'campaign-1' }]]);
     await expect(
-      writeEditTemplate(sending.tx, sending, TENANT, approved, delayed, null, NOW),
+      writeEditTemplate(sending.tx, sending, TENANT, approved, delayed, null, NOW, SEE_ALL),
     ).rejects.toMatchObject({ code: 'precondition_failed' });
     const disconnected = recorder([[], [{ ...connected[0], status: 'disconnected' }]]);
     await expect(
-      writeEditTemplate(disconnected.tx, disconnected, TENANT, approved, delayed, null, NOW),
+      writeEditTemplate(
+        disconnected.tx,
+        disconnected,
+        TENANT,
+        approved,
+        delayed,
+        null,
+        NOW,
+        SEE_ALL,
+      ),
     ).rejects.toMatchObject({
       code: 'precondition_failed',
       publicMessage: 'Reconnect this WhatsApp account before editing templates.',
@@ -1196,7 +1208,7 @@ describe('editing a template Meta has through the API (ADR-404)', () => {
     const pausedUntil = new Date(NOW.getTime() + 5 * 60_000);
     const paused = recorder([[], [{ ...connected[0], managementPausedUntil: pausedUntil }]]);
     await expect(
-      writeEditTemplate(paused.tx, paused, TENANT, approved, delayed, null, NOW),
+      writeEditTemplate(paused.tx, paused, TENANT, approved, delayed, null, NOW, SEE_ALL),
     ).rejects.toMatchObject({ code: 'provider_unavailable' });
     for (const run of [sending, disconnected, paused]) {
       expect(run.steps.every((step) => step[0] === 'read')).toBe(true);
@@ -1212,6 +1224,7 @@ describe('editing a template Meta has through the API (ADR-404)', () => {
         { ...delayed, body: { text: 'Hi {{1}}', examples: [] } },
         null,
         NOW,
+        SEE_ALL,
       ),
     ).rejects.toMatchObject({ code: 'validation_failed' });
     expect(invalid.steps).toEqual([]);

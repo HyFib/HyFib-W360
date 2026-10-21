@@ -137,12 +137,27 @@ templates, template history, template pages or template webhooks use `toMatchObj
 or read objects the slice did not extend. Hand mutations of the new branches: 14/14 caught (13/14
 first; the survivor, refusing only with two or more users, led to a test with one).
 
+### Second review fixes (before merge)
+
+A second review found no High issue and four Mediums, all fixed (ADR-404's second review
+section): a stale refusal text in the integration test (the only other refusal texts tests match
+were checked); a 5xx or transient answer that paused the account keeps the edit's attempt (only a
+rate limit clears it, and a rate limit that paused nothing is retried); a shape-change refusal
+masks names as the usage list does, for members and keys; automations with runs in progress on any
+version that sends the template count as users; the deferral is stored on the database's clock;
+failed edits keep their account synced every 5 minutes for an hour; DEPLOYMENT's rollback statement
+works under forced row security. Documented rather than refused: launching, publishing or saving
+something that uses the template while a shape-changing edit is sending; the shape check being
+broader than each sender needs; the credit of a late confirmation. Hand mutations of the new
+branches: 10/11 caught by the unit tests; the eleventh (the refusal's masking inside
+`writeEditTemplate`) is covered only by a new integration test, run in CI.
+
 ### Test commands and results (local, 2026-10-21)
 
 | Command                                        | Result                                                                        |
 | ---------------------------------------------- | ----------------------------------------------------------------------------- |
 | `eslint`, `prettier --check`, `pnpm typecheck` | clean                                                                         |
-| `pnpm test` (unit)                             | 1,981 of 1,981 passed (180 files)                                             |
+| `pnpm test` (unit)                             | 1,984 of 1,984 passed (180 files)                                             |
 | `pnpm build`                                   | passed                                                                        |
 | migration parse (pglast)                       | 0316 parses                                                                   |
 | `pnpm test:integration`, `pnpm test:e2e`       | not run here: the local PostgreSQL and browsers are unavailable; CI runs them |
