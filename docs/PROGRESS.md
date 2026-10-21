@@ -286,6 +286,9 @@ started only from customer messages, store events, members' tests and the public
   The end-to-end run then failed two steps, both the tests', on WebKit and again on retry:
   `getByLabel('Whom')` also matched the enrol page's form, whose label ends "and whom" (now exact),
   and `webhook-events.spec.ts` still named the api trigger's checkbox by its old label, "API (api)".
+  The next run failed one more step on Chromium and mobile Chromium: the test typed the
+  automation's name before the Automations page had replaced the contact page, whose own "Name"
+  field took it, so "Create draft" stayed disabled; it now waits for the Automations page first.
 
 ### Test commands and results (local, 2026-10-16)
 

@@ -461,6 +461,9 @@ test('a member enrols the contacts the Contacts page’s filters match in an aut
   // An automation started by a member or through the API, from the company's number: it tags the
   // contact, so nothing needs the service window.
   await openFromNav(page, 'Automations');
+  // The contact page this comes from has a "Name" field too: wait for the Automations page first.
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/automations$`));
+  await expect(page.getByRole('heading', { name: 'Automations', exact: true })).toBeVisible();
   await page.getByLabel('Name', { exact: true }).fill('Festival follow-up');
   await page.getByRole('button', { name: 'Create draft' }).click();
   await expect(page.getByRole('heading', { name: 'Festival follow-up' })).toBeVisible();
