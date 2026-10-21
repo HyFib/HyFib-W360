@@ -17138,3 +17138,111 @@ the refresh went on reading every remaining number for up to 40 seconds, throwin
 earlier read); that 0313's grant had no test (now asserted); that an attempt failing after Meta's
 failure relabelled it as a store failure (Meta's kind and code are kept); and wording and test
 gaps. All were fixed.
+
+## ADR-403 API keys enrol contacts or a segment in an automation (P4-01) (2026-10-21)
+
+Context: since ADR-401 a member enrols the contacts the Contacts page's filters match, or a saved
+segment, in an automation started by a member or through the API, at most 10,000, in paced batches
+of 50. A key could only start runs one contact at a time (ADR-077) or 50 per call (ADR-161), so an
+integration with a list of thousands paged through it and sent each start itself, without the
+snapshot, the one-running rule, the pacing or the sweep. ADR-401 left "enrolling through the public
+API" out of scope and P4-01's Remaining listed it.
+
+Decision:
+
+- **Four operations, ADR-401's enrolment:** `POST /api/v1/automations/{id}/enrollments` starts one
+  (201 with it); `GET /automations/{id}/enrollments` pages the automation's enrolments, newest
+  first, on keyset pages (`limit`, `cursor`); `GET /automations/{id}/enrollments/{enrollmentId}`
+  reads one; `POST …/{enrollmentId}/stop` stops one. The enrolment is the same row, snapshot, job,
+  batches, pacing, sweep, refusals and end as a member's: the shared steps moved out of the member
+  service (`snapshotEnrollment`, `matchingContactIds`, `loadEnrollmentSegment`,
+  `stopRunningEnrollment`, `selectEnrollmentPage`, `readEnrollmentDetail`), so the two cannot drift.
+- **Whom: a saved segment (`segmentId`) or `contacts.conditions`.** For the contacts, the call takes
+  what `POST /contacts/search` takes, written the same way, but only the conditions ADR-401's
+  `contactFilterSchema` holds: one `tag` condition with op `has` (the tag filter) and one `consent`
+  condition for purpose `marketing` (the consent filter: `opted_in`, `opted_out`, `not_recorded`
+  as `marketing_unknown`). Anything else, a second tag included, is refused (422, naming
+  `contacts.conditions.<n>`) with "save a segment with them and enrol it": no second filter language,
+  and no condition silently dropped. The search text is not offered (it compares numbers by how a
+  member sees them, which a key has no notion of). A tag the app would not keep is refused: the
+  Contacts page's filter ignores one, which would take every contact. No conditions take every
+  contact that is not erased, as an empty Contacts filter does. The mapped filter goes through the
+  same conditions (`contactFilterConditionsFor`, the member function's body without a member).
+  Supporting every search condition was not chosen: the snapshot, the audit (`filter.tag`,
+  `filter.consent`) and members' pages describe ADR-401's filter, and segments already carry the
+  whole language.
+- **Scopes, before anything is read:** `automations.start` (refused while the company is suspended,
+  as starts are) and `contacts.read`; `campaigns.read` for a segment, as reading segments needs
+  (ADR-125), with `conversations.read` or `orders.read` for a segment whose conditions read
+  conversations or store orders, as `GET /segments/{id}/contacts` needs (ADR-126, ADR-231); and
+  `messages.send_marketing` when the automation's live version sends a marketing template, checked
+  as API starts check it (`sendingChannel`, now exported). Each within the plan's scopes (ADR-092:
+  `not_in_plan`). Reads need `automations.start` only (also while suspended) and stops
+  `automations.start` with an active company, as runs' reads and stops do.
+- **ADR-401's checks, unchanged:** the automation's checks of a start (404 another company's or an
+  unknown one; 412 paused, unavailable, inactive number), the inputs as a start validates them (422
+  naming `inputs.<name>`), a segment not archived (404; a segment with a problem 412 saying it, as
+  reading its contacts does), 1 to 10,000 contacts (422 otherwise). No `expectedCount`: the member's
+  count guards a page that counted before the member confirmed; a key has no preview, and the
+  answer gives `total`.
+- **409 when one is running, clearly:** before the snapshot the call looks for a running enrolment
+  of the automation and refuses with 409, reason `enrollment_running`, its message naming that
+  enrolment's id, so an integration can wait for it or stop it. Two calls at once still meet
+  ADR-401's partial unique index, which gives the same 409 (without the id). Stopping an enrolment
+  that has ended is refused with 409, reason `enrollment_ended`, as members' stops are refused; GET
+  says how it ended. Both reasons are new in the error schema.
+- **Idempotency and limits:** the POST needs an `Idempotency-Key` and runs in one transaction with
+  it, so a retry answers as the first call did and a key reused for another body is refused
+  (`idempotency_key_reused`). The POST is one request against the key's and company's limits;
+  batches count none (they are not requests). No per-key safeguard was added: the API has the key's
+  and company's request rates and monthly counts (ADR-061, ADR-068, ADR-097) and nothing per key
+  for background work; ADR-401's one-running-enrolment-per-automation and 10,000-contact cap bound
+  what one key can queue, and the plan's runs bound what starts. The stop takes no key: stopping an
+  ended one changes nothing.
+- **Who started and stopped it (migration 0315):** `created_by_api_key_id` and
+  `stopped_by_api_key_id`, composite foreign keys to `app.api_keys` (keys are never deleted, so
+  enrolments keep naming them), with a check that exactly one of member and key started it (and
+  the member's user with the member) and the stopper check extended (`stopped_by_api` with the key);
+  the runtime role may update only the stopper. A key's enrolment is audited as the key
+  (`automation.enrollment_started` and `automation.enrollment_stopped`, actor `api_key`, with the
+  request id; never the inputs). Keys read every enrolment of the company, members' included, as
+  ids and counts (`startedBy` member or api, `apiKeyId`, `stoppedBy`, `stoppedByApiKeyId`, the
+  counts, refusals by reason, `stalledSince`), never a member's name or the inputs; members with
+  `automations.read` see keys' enrolments on the automation's page and the enrolment's page
+  ("started … through the API with key <name>", "(key <name>)" for a key's stop), and a run page
+  says "an enrolment through the API with key “<name>”".
+- **Each batch re-checks the key as a fresh request would,** in place of ADR-401's re-check of the
+  member's roles, under the enrolment's row lock: the key exists and is not revoked
+  (`api_key_revoked`), has not expired by the database's now (`api_key_expired`; the same instant
+  the batch paces by), the plan still includes the API (`api_not_in_plan`, monthly requests 0) and
+  the key and the plan still give every scope enrolling needs (`api_scope_missing`; key scopes never
+  change, ADR-052, so this is the plan narrowing them), and `messages.send_marketing` for a
+  marketing automation (`marketing_not_allowed`, as for a member without `campaigns.send`). A failed
+  re-check ends it as ADR-401 ends one whose member lost permission: `stopped` with the reason, the
+  contacts not handled not started, runs already started going on, audited once. The company's
+  suspension is checked before the batch, as for members: the job is deferred. Not re-checked: the
+  month's request count (batches are not requests), the key's or company's allowed networks (no
+  client address), and `conversations.read`/`orders.read` for a segment's conditions (the segment was
+  read when the snapshot was taken; nothing reads it again). A rotated key expires when its 72-hour
+  overlap ends (ADR-052): 10,000 contacts take about nine minutes at the default rate, so only a
+  stalled or suspended enrolment meets that; the enrolment is not moved to the new key, which would
+  let a rotation extend what the old key started.
+- **Jobs act for the company:** a key's enrolment job is signed with no user (`actorUserId: null`),
+  so `authorizeJob` checks the company (deferred while suspended) and no member; the sweep's due
+  list returns the enrolment's user, now null for keys. Runs it starts record the enrolment only
+  (`enrollment_id`; `api_key_id` stays null, so 0311's check is unchanged).
+- **Webhooks: runs of a key's enrolment do not carry the key.** They reach endpoints as ADR-401's
+  do, with `trigger: "api"`, `apiKeyId: null` and `run.enrollmentId`; the enrolment the POST
+  returned ties them to the key. Carrying the key in `apiKeyId` was not chosen: endpoints narrowed
+  to keys (`runApiKeyIds`, ADR-319) asked for the runs a key starts one by one, and would suddenly
+  receive up to 10,000 runs per enrolment; and `GET /automation-runs/{id}` would have to start
+  reading enrolment runs. Nothing changes in the payload, the capture or the filters; additive by
+  being no change.
+- **Per-contact outcomes are not listed** (in the API or the app): the enrolment gives refusals by
+  reason. Paging `automation_enrollment_contacts` by position is cheap (a unique index), but each
+  row names a contact and a run that `GET /automation-runs/{id}` does not read (key runs only), so
+  the right shape (contacts with `contacts.read`, runs readable) is a slice of its own.
+
+Not built: an enrolment's contacts listed with their outcomes; enrolling contacts by id; the
+search text or other search conditions (save a segment); `expectedCount`; scheduling an enrolment;
+moving a rotated key's enrolments to its successor.

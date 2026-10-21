@@ -30,7 +30,7 @@ export const metadata: Metadata = { title: 'Enrolment' };
 export const dynamic = 'force-dynamic';
 
 /**
- * One enrolment of contacts in an automation (ADR-401): its progress, how many started and were
+ * One enrolment of contacts in an automation (ADR-401), a member's or an API key's (ADR-403): its progress, how many started and were
  * refused (by reason) or not started, who started or stopped it, and Stop while it runs. The page
  * re-checks the member's permission itself and re-renders every 15 seconds while it runs.
  */
@@ -67,9 +67,13 @@ export default async function EnrollmentPage({
         description={`${
           enrollment.source === 'segment'
             ? `Members of the segment “${enrollment.segmentName ?? 'a segment'}”`
-            : 'Contacts chosen on the Contacts page'
-        }, started ${formatDateTime(enrollment.createdAt.toISOString(), tz)} by ${
-          enrollment.createdByName ?? 'a member'
+            : enrollment.startedBy === 'api'
+              ? 'Contacts chosen by a tag and marketing consent'
+              : 'Contacts chosen on the Contacts page'
+        }, started ${formatDateTime(enrollment.createdAt.toISOString(), tz)} ${
+          enrollment.startedBy === 'api'
+            ? `through the API with key ${enrollment.createdByKeyName ?? 'a key'}`
+            : `by ${enrollment.createdByName ?? 'a member'}`
         }.`}
         actions={
           <Link href={base} className="text-sm text-primary underline-offset-4 hover:underline">
@@ -88,7 +92,11 @@ export default async function EnrollmentPage({
                 ? 'Runs start in the background, at most 50 at a time. This page updates itself.'
                 : enrollment.endReason
                   ? `${ENROLLMENT_END_REASON_LABELS[enrollment.endReason]}${
-                      enrollment.stoppedByName ? ` (${enrollment.stoppedByName})` : ''
+                      enrollment.stoppedByName
+                        ? ` (${enrollment.stoppedByName})`
+                        : enrollment.stoppedByKeyName
+                          ? ` (key ${enrollment.stoppedByKeyName})`
+                          : ''
                     } Ended ${formatDateTime(enrollment.endedAt?.toISOString() ?? null, tz)}.`
                   : `Every contact was handled. Ended ${formatDateTime(
                       enrollment.endedAt?.toISOString() ?? null,

@@ -330,7 +330,7 @@ export async function apiStartManyAutomationRuns(
  * The number the automation sends from, when the key may start what it sends (marketing templates
  * need the marketing scope) and the number is active.
  */
-async function sendingChannel(
+export async function sendingChannel(
   tx: Tx,
   ctx: ApiContext,
   automation: StartableAutomation,

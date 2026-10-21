@@ -262,7 +262,19 @@ export function contactFilterConditions(
   ctx: TenantContext,
   filter: z.infer<typeof contactFilterSchema>,
 ): SQL[] {
-  const conditions: SQL[] = [eq(contacts.tenantId, ctx.tenant.id), isNull(contacts.erasedAt)];
+  return contactFilterConditionsFor(ctx.tenant.id, filter, { seesNumbers: seesNumbers(ctx) });
+}
+
+/**
+ * The same conditions for a company without a member's context: an API key's enrolment (ADR-403),
+ * whose filter never has a search (`seesNumbers` only says how a search by number compares).
+ */
+export function contactFilterConditionsFor(
+  tenantId: string,
+  filter: z.infer<typeof contactFilterSchema>,
+  viewer: { seesNumbers: boolean },
+): SQL[] {
+  const conditions: SQL[] = [eq(contacts.tenantId, tenantId), isNull(contacts.erasedAt)];
   const q = filter.q?.trim();
   if (q) {
     const digits = q.replace(/[\s()+\-.]/g, '');
@@ -270,7 +282,7 @@ export function contactFilterConditions(
       // A member who sees numbers masked finds a contact by its whole number only: searching
       // by parts of numbers would reveal them digit by digit (ADR-226).
       conditions.push(
-        seesNumbers(ctx)
+        viewer.seesNumbers
           ? sql`${contacts.phoneE164} like ${likePattern(digits)}`
           : eq(contacts.phoneE164, `+${digits}`),
       );

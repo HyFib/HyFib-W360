@@ -296,6 +296,8 @@ export interface RunDetail extends RunSummary {
   apiKeyName: string | null;
   /** The member whose enrolment started the run (ADR-401); null for other runs. */
   enrolledByName: string | null;
+  /** The API key whose enrolment started the run (ADR-403); null for other runs. */
+  enrolledByKeyName: string | null;
   /** The order the run reads (members with `commerce.read`; null when none or gone). */
   order: { id: string; name: string; storeName: string } | null;
   graph: AutomationGraph | null;
@@ -1809,6 +1811,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               assigned: conversations.assignedMembershipId,
               apiKeyName: apiKeys.name,
               enrolledBy: automationEnrollments.createdByMembershipId,
+              enrolledByKey: automationEnrollments.createdByApiKeyId,
             })
             .from(automationRuns)
             .leftJoin(
@@ -1867,6 +1870,13 @@ export function createAutomationService(deps: AutomationServiceDeps) {
                   )
               : [];
           const nameOf = (id: string | null) => names.find((n) => n.id === id)?.name ?? null;
+          // The key whose enrolment started the run (ADR-403).
+          const [enrolledByKey] = r.enrolledByKey
+            ? await tx
+                .select({ name: apiKeys.name })
+                .from(apiKeys)
+                .where(and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, r.enrolledByKey)))
+            : [];
           const steps = await tx
             .select()
             .from(automationRunSteps)
@@ -1949,6 +1959,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             storeEvent: r.run.storeEvent,
             apiKeyName: r.apiKeyName,
             enrolledByName: nameOf(r.enrolledBy),
+            enrolledByKeyName: enrolledByKey?.name ?? null,
             order: order ?? null,
             graph: graph.ok ? graph.graph : null,
             variables: visible ? r.run.variables : null,

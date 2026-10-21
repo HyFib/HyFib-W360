@@ -1,5 +1,70 @@
 # Progress
 
+## 2026-10-21 — API keys enrol contacts or a segment in an automation (P4-01, ADR-403)
+
+Status: **Implemented (migration 0315); unit tests run locally, integration and e2e tests in CI
+only.** P4-01's Remaining listed "enrolling through the public API": keys started runs one contact
+at a time or 50 per call, without ADR-401's snapshot, one-running rule, pacing or sweep.
+
+### Completed
+
+- **Endpoints** (`api/automation-enrollments.ts`): `POST /api/v1/automations/{id}/enrollments`
+  (a `segmentId`, or `contacts.conditions` as `POST /contacts/search` writes them, limited to one
+  `tag` `has` and one marketing `consent` condition and mapped onto ADR-401's
+  `contactFilterSchema`; the inputs; `Idempotency-Key` required; 201 with the enrolment),
+  `GET …/enrollments` (newest first, keyset pages), `GET …/enrollments/{enrollmentId}` and
+  `POST …/{enrollmentId}/stop`. Scopes `automations.start` and `contacts.read`, `campaigns.read`
+  for a segment (with its conversation and order scopes), `messages.send_marketing` for marketing,
+  within the plan. 409 `enrollment_running` names the running enrolment; 409 `enrollment_ended` for
+  a stop of an ended one. OpenAPI: four operations, three schemas, the two new reasons.
+- **Shared with members' enrolments** (`automations/enrollments.ts`): the snapshot and first job,
+  the contacts' match, the segment, the stop, the list page and the detail moved into exported
+  steps both use; members' behaviour unchanged.
+- **Who started it** (migration 0315): `created_by_api_key_id` and `stopped_by_api_key_id` with
+  composite foreign keys and partial indexes, exactly one of member and key (a check), the stopper
+  check now also holding running rows, five new end reasons, `UPDATE` on the stopper only; export
+  spec lists the columns. Jobs of a key's enrolment are signed with no user.
+- **Each batch re-checks the key** in place of the member (`apiKeyEnrollmentEnd`): revoked or
+  gone, expired by the database's now, the API and every needed scope in the plan, the marketing
+  scope; a failure ends the enrolment with its reason.
+- **Pages:** the automation's and the enrolment's pages say "Started through the API with key
+  <name>" (and name a key that stopped it); a run page says "an enrolment through the API with key".
+- **Webhooks:** unchanged; runs of a key's enrolment carry `run.enrollmentId` and `apiKeyId: null`
+  (documented in ADR-403 and the OpenAPI description).
+- **Docs:** ADR-403, SECURITY, THREAT-MODEL T354, DATA-RETENTION, DEPLOYMENT (0315), RUNBOOKS,
+  ARCHITECTURE, BACKLOG P4-01, feature matrix H-054.
+
+### Tests
+
+- Unit (`automations/enrollments.test.ts`, 17 new): the key's re-check and every end reason, the
+  scopes, the marketing scope, the condition mapping and its refusals, the request schema, scopes
+  refused before any read, the 409s, a start and a stop as the key and a key's batch against the
+  recording database, and the OpenAPI document. Manual mutations of the key branches: 22/22 caught.
+- Integration (`tests/integration/api-automation-enrollments.test.ts`, CI only): a key's
+  enrolment in batches acting for the company with members and keys seeing each other's, a segment
+  with an idempotent replay and a reused key, missing scopes, another company's automation, segment
+  and enrolment not found, a key revoked mid-way, stop as a key, the starter check, foreign keys and
+  grants.
+- E2E (`tests/e2e/automations.spec.ts`, CI only): ADR-401's enrolment test goes on with a key's
+  enrolment through the API and checks both member pages name the key.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                        | Result                                                               |
+| ---------------------------------------------- | -------------------------------------------------------------------- |
+| `eslint`, `prettier --check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                             | 1,975 of 1,975 passed (179 files)                                    |
+| `pnpm build`                                   | passed                                                               |
+| migration parse check (pglast, 0311 to 0315)   | every file parsed                                                    |
+| manual mutations of the key branches           | 22/22 caught by `enrollments.test.ts`                                |
+| `pnpm test:integration`, `pnpm test:e2e`       | not run here: no PostgreSQL or browser on this machine; CI runs them |
+
+### Not done
+
+An enrolment's contacts listed with their outcomes (left for later: their runs are not readable
+through the API); enrolling contacts by id; other search conditions (save a segment);
+`expectedCount`; moving a rotated key's enrolments to its successor.
+
 ## 2026-10-21 — CI: the dependency audit cleared again (vite, GHSA-587h-7wmj-h5pm)
 
 Status: **Fixed and locally verified; CI to confirm.** PR #102's "Dependency audit and secret

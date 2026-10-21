@@ -3,6 +3,7 @@ import { QUEUES } from '@w360/contracts';
 import { AppError, isAppError, notFound, uuidv7, type Clock } from '@w360/core';
 import {
   and,
+  apiKeys,
   asc,
   automationEnrollmentContacts,
   automationEnrollments,
@@ -12,6 +13,7 @@ import {
   contacts,
   desc,
   eq,
+  exactTimestamp,
   gt,
   inArray,
   isUniqueViolation,
@@ -42,11 +44,14 @@ import { loadFieldTypes } from '../campaigns/segments';
 import { contactFilterConditions } from '../contacts/service';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
+import { loadEntitlements } from '../plans/entitlements';
 import { parseInput } from '../validation';
 import { triggerSchema } from './graph';
 import {
   ENROLLMENT_LIMITS,
+  apiKeyEnrollmentEnd,
   assertEnrollableCount,
+  enrollmentKeyMayUse,
   enrollmentBatchDelayMs,
   enrollmentBatchDue,
   enrollmentEndForRefusal,
@@ -72,8 +77,8 @@ import {
 } from './starts';
 
 /**
- * Members enrol contacts or a segment in an automation started by a member or through the API
- * (ADR-401). A member who may publish automations chooses the contacts the contacts page's filters
+ * Members (ADR-401) and API keys (ADR-403, api/automation-enrollments) enrol contacts or a segment
+ * in an automation started by a member or through the API. A member who may publish automations chooses the contacts the contacts page's filters
  * match, or a saved segment, gives the trigger's inputs once (validated as the API validates them)
  * and confirms the count; the enrolment snapshots those contacts and a signed `automation.enroll`
  * job starts their runs in batches of at most 50 per transaction, each contact through the API's
@@ -118,6 +123,7 @@ export interface EnrollmentSummary {
   id: string;
   automationId: string;
   source: AutomationEnrollmentSource;
+  segmentId: string | null;
   segmentName: string | null;
   status: AutomationEnrollmentStatus;
   endReason: AutomationEnrollmentEndReason | null;
@@ -125,7 +131,15 @@ export interface EnrollmentSummary {
   started: number;
   refused: number;
   cancelled: number;
+  /** Who started it: a member, or an API key (ADR-403). */
+  startedBy: 'member' | 'api';
   createdByName: string | null;
+  createdByApiKeyId: string | null;
+  /** The key's name, for members' pages ("Started through the API with key …"). */
+  createdByKeyName: string | null;
+  /** Who stopped it: a member, an API key (ADR-403), or nobody. */
+  stoppedBy: 'member' | 'api' | null;
+  stoppedByApiKeyId: string | null;
   createdAt: Date;
   endedAt: Date | null;
 }
@@ -133,6 +147,8 @@ export interface EnrollmentSummary {
 export interface EnrollmentDetail extends EnrollmentSummary {
   automationName: string;
   stoppedByName: string | null;
+  /** The name of the API key that stopped it (ADR-403). */
+  stoppedByKeyName: string | null;
   /** Contacts not handled yet. */
   pending: number;
   /** Refusals by reason, most frequent first. */
@@ -149,8 +165,9 @@ export interface EnrollmentDetail extends EnrollmentSummary {
 async function memberPermissions(
   tx: Tx,
   tenantId: string,
-  membershipId: string,
+  membershipId: string | null,
 ): Promise<Set<Permission> | null> {
+  if (membershipId === null) return null;
   const [member] = await tx
     .select({ roles: memberships.roles })
     .from(memberships)
@@ -189,7 +206,8 @@ export async function signalEnrollment(
   input: {
     tenantId: string;
     enrollmentId: string;
-    actorUserId: string;
+    /** The member who started it; null for a key's enrolment, whose jobs act for the company. */
+    actorUserId: string | null;
     key: string;
     delaySeconds?: number;
   },
@@ -219,7 +237,12 @@ type EnrollmentRow = typeof automationEnrollments.$inferSelect;
 async function endEnrollment(
   tx: Tx,
   enrollment: EnrollmentRow,
-  end: { reason: AutomationEnrollmentEndReason | null; stoppedByMembershipId?: string; now: Date },
+  end: {
+    reason: AutomationEnrollmentEndReason | null;
+    stoppedByMembershipId?: string;
+    stoppedByApiKeyId?: string;
+    now: Date;
+  },
 ): Promise<{ cancelled: number }> {
   const cancelled = await tx
     .update(automationEnrollmentContacts)
@@ -241,6 +264,7 @@ async function endEnrollment(
       inputs: {},
       nextBatchAt: null,
       stoppedByMembershipId: end.stoppedByMembershipId ?? null,
+      stoppedByApiKeyId: end.stoppedByApiKeyId ?? null,
       endedAt: end.now,
     })
     .where(
@@ -297,7 +321,8 @@ export type EnrollmentBatchOutcome =
 /**
  * Handles the enrolment's next batch in one transaction, under its row lock: re-checks the member
  * who started it (still active, may still publish automations, and send campaigns when it sends
- * marketing templates), the automation's checks of a start (published, active, its number, the
+ * marketing templates) or the key (not revoked or expired, its scopes and the API still in the
+ * plan, ADR-403), the automation's checks of a start (published, active, its number, the
  * inputs its live version takes), then starts up to 50 pending contacts in order, each in a
  * savepoint, records each outcome, the counts and the position, and signals the next batch in the
  * same transaction, or ends the enrolment. A failure rolls back the whole batch, runs included, and
@@ -347,9 +372,10 @@ export async function processEnrollmentBatch(
       };
     };
 
-    // The member's authority, as the campaign runner re-checks its launcher's.
-    const permissions = await memberPermissions(tx, tenantId, enrollment.createdByMembershipId);
-    if (!permissions?.has('automations.publish')) return finish('member_removed');
+    // Who started it, once per batch: a member's authority, as the campaign runner re-checks its
+    // launcher's; or a key, as a fresh request with it would be checked (ADR-403).
+    const starter = await starterStanding(tx, enrollment, now);
+    if ('end' in starter) return finish(starter.end);
 
     let automation: StartableAutomation;
     let channelId: string;
@@ -370,7 +396,7 @@ export async function processEnrollmentBatch(
       return finish('inputs_changed');
     }
     const marketing = await automationSendsMarketing(tx, tenantId, automation);
-    if (marketing && !permissions.has('campaigns.send')) return finish('marketing_not_allowed');
+    if (marketing && !starter.mayStartMarketing) return finish('marketing_not_allowed');
     const consent: TemplateCategory[] = marketing ? ['UTILITY', 'MARKETING'] : ['UTILITY'];
 
     const pending = await tx
@@ -459,6 +485,341 @@ export async function processEnrollmentBatch(
     });
     return { outcome: 'batch', ...batch, nextBatchAt };
   });
+}
+
+/**
+ * Whether whoever started a locked enrolment may still go on, and send marketing templates: the
+ * member still active and holding `automations.publish` (and `campaigns.send`), or the key not
+ * revoked or expired by the database's now, the plan still including the API and every scope
+ * enrolling needs (and `messages.send_marketing`). The end when not (ADR-401, ADR-403).
+ */
+async function starterStanding(
+  tx: Tx,
+  enrollment: EnrollmentRow,
+  now: Date,
+): Promise<{ end: AutomationEnrollmentEndReason } | { mayStartMarketing: boolean }> {
+  const tenantId = enrollment.tenantId;
+  if (enrollment.createdByApiKeyId === null) {
+    const permissions = await memberPermissions(tx, tenantId, enrollment.createdByMembershipId);
+    if (!permissions?.has('automations.publish')) return { end: 'member_removed' };
+    return { mayStartMarketing: permissions.has('campaigns.send') };
+  }
+  const [key] = await tx
+    .select({ revokedAt: apiKeys.revokedAt, expiresAt: apiKeys.expiresAt, scopes: apiKeys.scopes })
+    .from(apiKeys)
+    .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.id, enrollment.createdByApiKeyId)));
+  const entitlements = await loadEntitlements(tx, tenantId);
+  const plan = { apiRequests: entitlements.limits.apiRequests, apiScopes: entitlements.apiScopes };
+  const end = apiKeyEnrollmentEnd({ key: key ?? null, plan, source: enrollment.source, now });
+  if (end) return { end };
+  if (!key) return { end: 'api_key_revoked' };
+  return { mayStartMarketing: enrollmentKeyMayUse(key, plan, 'messages.send_marketing') };
+}
+
+/** Who starts an enrolment: a member, or an API key (ADR-403). */
+export type EnrollmentStarter =
+  { kind: 'member'; membershipId: string; userId: string } | { kind: 'key'; apiKeyId: string };
+
+/**
+ * Takes an enrolment's snapshot and queues its first batch, in the caller's transaction, after the
+ * caller's checks (the automation, the inputs, the marketing right, the count): the enrolment row,
+ * one row per contact in the order given (contact id order), and the first job, signed with the
+ * member who started it, or with no user for a key (its batches re-check the key instead). The
+ * partial unique index refuses a second running enrolment of the automation
+ * (`enrollmentRunningConflict`).
+ */
+export async function snapshotEnrollment(
+  deps: Pick<EnrollmentDeps, 'jobs' | 'signer'>,
+  tx: Tx,
+  input: {
+    id: string;
+    tenantId: string;
+    automationId: string;
+    audience: { kind: 'contacts' } | { kind: 'segment'; segmentId: string };
+    inputs: Record<string, string>;
+    contactIds: readonly string[];
+    starter: EnrollmentStarter;
+  },
+): Promise<void> {
+  const { id, tenantId, starter } = input;
+  await tx.insert(automationEnrollments).values({
+    id,
+    tenantId,
+    automationId: input.automationId,
+    source: input.audience.kind,
+    segmentId: input.audience.kind === 'segment' ? input.audience.segmentId : null,
+    inputs: input.inputs,
+    total: input.contactIds.length,
+    // The database's now: the first batch's job (queued without a delay) finds it due.
+    nextBatchAt: sql`now()`,
+    createdByMembershipId: starter.kind === 'member' ? starter.membershipId : null,
+    createdByUserId: starter.kind === 'member' ? starter.userId : null,
+    createdByApiKeyId: starter.kind === 'key' ? starter.apiKeyId : null,
+  });
+  const contactIds = [...input.contactIds];
+  await tx.execute(sql`
+    insert into app.automation_enrollment_contacts (id, tenant_id, enrollment_id, position, contact_id)
+    select t.id, ${tenantId}::uuid, ${id}::uuid, t.position::int, t.contact_id
+      from unnest(${sql.param(contactIds.map(() => uuidv7()))}::uuid[], ${sql.param(contactIds)}::uuid[])
+           with ordinality as t(id, contact_id, position)`);
+  await signalEnrollment(deps, tx, {
+    tenantId,
+    enrollmentId: id,
+    actorUserId: starter.kind === 'member' ? starter.userId : null,
+    key: enrollmentJobKey(id, 0),
+  });
+}
+
+/** The message of a second running enrolment of an automation (ADR-401's partial unique index). */
+export const ENROLLMENT_RUNNING_MESSAGE =
+  'Contacts are being enrolled in this automation already. Wait until that enrolment ends, or stop it.';
+
+/** The 409 for a second running enrolment of an automation, or null for any other error. */
+export function enrollmentRunningConflict(error: unknown): AppError | null {
+  if (!isUniqueViolation(error, 'automation_enrollments_running_uq')) return null;
+  return new AppError('conflict', ENROLLMENT_RUNNING_MESSAGE, {
+    details: { apiReason: 'enrollment_running' },
+  });
+}
+
+/** The contacts a WHERE over app.contacts matches now, in id order, at most one over the limit. */
+export async function matchingContactIds(tx: Tx, where: SQL): Promise<string[]> {
+  const rows = await tx
+    .select({ id: contacts.id })
+    .from(contacts)
+    .where(where)
+    .orderBy(asc(contacts.id))
+    .limit(ENROLLMENT_LIMITS.contacts + 1);
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Stops a running enrolment under its row lock (a batch in progress finishes first): the contacts
+ * not handled are cancelled and no further run starts; runs already started go on. Not found for
+ * another company's or an unknown id (or one of another automation, when given); 409 once it has
+ * ended (reason `enrollment_ended`). Returns it as it was and how many contacts were cancelled; the
+ * caller audits.
+ */
+export async function stopRunningEnrollment(
+  tx: Tx,
+  tenantId: string,
+  enrollmentId: string,
+  by: { membershipId: string } | { apiKeyId: string },
+  now: Date,
+  automationId?: string,
+): Promise<{ enrollment: EnrollmentRow; cancelled: number }> {
+  const [enrollment] = await tx
+    .select()
+    .from(automationEnrollments)
+    .where(
+      and(
+        eq(automationEnrollments.tenantId, tenantId),
+        eq(automationEnrollments.id, enrollmentId),
+        automationId ? eq(automationEnrollments.automationId, automationId) : undefined,
+      ),
+    )
+    .for('update');
+  if (!enrollment) throw notFound('Enrolment');
+  if (enrollment.status !== 'running') {
+    throw new AppError('conflict', 'This enrolment has already ended.', {
+      details: { apiReason: 'enrollment_ended' },
+    });
+  }
+  const { cancelled } = await endEnrollment(
+    tx,
+    enrollment,
+    'membershipId' in by
+      ? { reason: 'stopped_by_member', stoppedByMembershipId: by.membershipId, now }
+      : { reason: 'stopped_by_api', stoppedByApiKeyId: by.apiKeyId, now },
+  );
+  return { enrollment, cancelled };
+}
+
+/** A saved segment an enrolment takes: not archived, its definition checked (ADR-401). */
+export async function loadEnrollmentSegment(
+  tx: Tx,
+  tenantId: string,
+  segmentId: string,
+): Promise<{ name: string; definition: Awaited<ReturnType<typeof parseSegmentDefinition>> }> {
+  const [segment] = await tx
+    .select({
+      name: segments.name,
+      definition: segments.definition,
+      archivedAt: segments.archivedAt,
+    })
+    .from(segments)
+    .where(and(eq(segments.tenantId, tenantId), eq(segments.id, segmentId)));
+  if (!segment || segment.archivedAt) throw notFound('Segment');
+  return {
+    name: segment.name,
+    definition: await parseSegmentDefinition(tx, tenantId, segment.definition),
+  };
+}
+
+/**
+ * An automation's enrolments, newest first, after a keyset cursor, with the names members' pages
+ * show (the API gives ids only).
+ */
+export async function selectEnrollmentPage(
+  tx: Tx,
+  tenantId: string,
+  automationId: string,
+  page: { limit: number; before?: { at: string; id: string } | null },
+): Promise<(EnrollmentSummary & { cursorAt: string })[]> {
+  const rows = await tx
+    .select({
+      e: automationEnrollments,
+      segmentName: segments.name,
+      createdByName: users.name,
+      createdByKeyName: apiKeys.name,
+      cursorAt: exactTimestamp(automationEnrollments.createdAt),
+    })
+    .from(automationEnrollments)
+    .leftJoin(
+      segments,
+      and(
+        eq(segments.tenantId, automationEnrollments.tenantId),
+        eq(segments.id, automationEnrollments.segmentId),
+      ),
+    )
+    .leftJoin(
+      memberships,
+      and(
+        eq(memberships.tenantId, automationEnrollments.tenantId),
+        eq(memberships.id, automationEnrollments.createdByMembershipId),
+      ),
+    )
+    .leftJoin(users, eq(users.id, memberships.userId))
+    .leftJoin(
+      apiKeys,
+      and(
+        eq(apiKeys.tenantId, automationEnrollments.tenantId),
+        eq(apiKeys.id, automationEnrollments.createdByApiKeyId),
+      ),
+    )
+    .where(
+      and(
+        eq(automationEnrollments.tenantId, tenantId),
+        eq(automationEnrollments.automationId, automationId),
+        page.before
+          ? sql`(${automationEnrollments.createdAt}, ${automationEnrollments.id}) < (${page.before.at}::timestamptz, ${page.before.id}::uuid)`
+          : undefined,
+      ),
+    )
+    .orderBy(desc(automationEnrollments.createdAt), desc(automationEnrollments.id))
+    .limit(page.limit);
+  return rows.map((r) => ({
+    ...toSummary(r.e, r.segmentName, r.createdByName, r.createdByKeyName),
+    cursorAt: r.cursorAt,
+  }));
+}
+
+/**
+ * One enrolment with its progress, its refusals by reason and whether it has stalled (ADR-401), as
+ * members' pages and the API read it; not found for another company's or an unknown id.
+ */
+export async function readEnrollmentDetail(
+  tx: Tx,
+  tenantId: string,
+  id: string,
+  tenantActive: boolean,
+): Promise<EnrollmentDetail> {
+  const [r] = await tx
+    .select({
+      e: automationEnrollments,
+      automationName: automations.name,
+      segmentName: segments.name,
+    })
+    .from(automationEnrollments)
+    .innerJoin(
+      automations,
+      and(
+        eq(automations.tenantId, automationEnrollments.tenantId),
+        eq(automations.id, automationEnrollments.automationId),
+      ),
+    )
+    .leftJoin(
+      segments,
+      and(
+        eq(segments.tenantId, automationEnrollments.tenantId),
+        eq(segments.id, automationEnrollments.segmentId),
+      ),
+    )
+    .where(and(eq(automationEnrollments.tenantId, tenantId), eq(automationEnrollments.id, id)));
+  if (!r) throw notFound('Enrolment');
+  const memberIds = [r.e.createdByMembershipId, r.e.stoppedByMembershipId].filter(
+    (x): x is string => x !== null,
+  );
+  const names =
+    memberIds.length > 0
+      ? await tx
+          .select({ id: memberships.id, name: users.name })
+          .from(memberships)
+          .innerJoin(users, eq(users.id, memberships.userId))
+          .where(and(eq(memberships.tenantId, tenantId), inArray(memberships.id, memberIds)))
+      : [];
+  const nameOf = (m: string | null) => names.find((n) => n.id === m)?.name ?? null;
+  const keyIds = [r.e.createdByApiKeyId, r.e.stoppedByApiKeyId].filter(
+    (x): x is string => x !== null,
+  );
+  const keyNames =
+    keyIds.length > 0
+      ? await tx
+          .select({ id: apiKeys.id, name: apiKeys.name })
+          .from(apiKeys)
+          .where(and(eq(apiKeys.tenantId, tenantId), inArray(apiKeys.id, keyIds)))
+      : [];
+  const keyNameOf = (k: string | null) => keyNames.find((n) => n.id === k)?.name ?? null;
+  const reasons = await tx
+    .select({
+      reason: automationEnrollmentContacts.reason,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(automationEnrollmentContacts)
+    .where(
+      and(
+        eq(automationEnrollmentContacts.tenantId, tenantId),
+        eq(automationEnrollmentContacts.enrollmentId, id),
+        eq(automationEnrollmentContacts.outcome, 'refused'),
+      ),
+    )
+    .groupBy(automationEnrollmentContacts.reason);
+  const summary = toSummary(
+    r.e,
+    r.segmentName,
+    nameOf(r.e.createdByMembershipId),
+    keyNameOf(r.e.createdByApiKeyId),
+  );
+  // When it last handled a contact (its start when it has handled none).
+  // Not while the company is suspended: no run starts then, and that is not a stall. Signalled
+  // again since its last batch, or overdue by the database's time as the due list judges it.
+  const stalled =
+    r.e.status === 'running' &&
+    tenantActive &&
+    (r.e.resignalCount > 0 || enrollmentStalled(r.e.nextBatchAt, await databaseNow(tx)));
+  // Mapped as the column is: the driver gives a computed timestamp as text.
+  const [lastProgress] = await tx
+    .select({
+      at: sql`max(${automationEnrollmentContacts.processedAt})`.mapWith(
+        automationEnrollmentContacts.processedAt,
+      ),
+    })
+    .from(automationEnrollmentContacts)
+    .where(
+      and(
+        eq(automationEnrollmentContacts.tenantId, tenantId),
+        eq(automationEnrollmentContacts.enrollmentId, id),
+      ),
+    );
+  return {
+    ...summary,
+    automationName: r.automationName,
+    stoppedByName: nameOf(r.e.stoppedByMembershipId),
+    stoppedByKeyName: keyNameOf(r.e.stoppedByApiKeyId),
+    pending: summary.total - summary.started - summary.refused - summary.cancelled,
+    refusals: summariseRefusals(reasons.map((x) => ({ reason: x.reason ?? '', count: x.count }))),
+    stalledSince: stalled ? (lastProgress?.at ?? r.e.createdAt) : null,
+  };
 }
 
 /** Records a batch's outcomes in one statement; returns how many started and were refused. */
@@ -564,21 +925,12 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
         segmentName: null,
       };
     }
-    const [segment] = await tx
-      .select({
-        name: segments.name,
-        definition: segments.definition,
-        archivedAt: segments.archivedAt,
-      })
-      .from(segments)
-      .where(and(eq(segments.tenantId, ctx.tenant.id), eq(segments.id, audience.segmentId)));
-    if (!segment || segment.archivedAt) throw notFound('Segment');
-    const definition = await parseSegmentDefinition(tx, ctx.tenant.id, segment.definition);
-    assertCanUseDefinition(ctx, definition);
+    const segment = await loadEnrollmentSegment(tx, ctx.tenant.id, audience.segmentId);
+    assertCanUseDefinition(ctx, segment.definition);
     return {
       where: segmentWhere(
         ctx.tenant.id,
-        definition,
+        segment.definition,
         ctx.tenant.timezone,
         await loadFieldTypes(tx, ctx.tenant.id),
       ),
@@ -586,16 +938,7 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
     };
   }
 
-  /** The contacts the audience matches now, in id order, at most one more than the limit. */
-  async function matching(tx: Tx, where: SQL): Promise<string[]> {
-    const rows = await tx
-      .select({ id: contacts.id })
-      .from(contacts)
-      .where(where)
-      .orderBy(asc(contacts.id))
-      .limit(ENROLLMENT_LIMITS.contacts + 1);
-    return rows.map((r) => r.id);
-  }
+  const matching = matchingContactIds;
 
   /** Refuses an automation that sends marketing templates to a member who may not send campaigns. */
   async function assertMayStartMarketing(
@@ -708,24 +1051,15 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
           const inputs = Object.fromEntries(
             automation.inputs.map((name) => [name, String(data.inputs[name])]),
           );
-          await tx.insert(automationEnrollments).values({
+          await snapshotEnrollment(deps, tx, {
             id,
             tenantId: ctx.tenant.id,
             automationId: automation.id,
-            source: data.audience.kind,
-            segmentId: data.audience.kind === 'segment' ? data.audience.segmentId : null,
+            audience: data.audience,
             inputs,
-            total: ids.length,
-            // The database's now: the first batch's job (queued without a delay) finds it due.
-            nextBatchAt: sql`now()`,
-            createdByMembershipId: ctx.membership.id,
-            createdByUserId: ctx.user.id,
+            contactIds: ids,
+            starter: { kind: 'member', membershipId: ctx.membership.id, userId: ctx.user.id },
           });
-          await tx.execute(sql`
-            insert into app.automation_enrollment_contacts (id, tenant_id, enrollment_id, position, contact_id)
-            select t.id, ${ctx.tenant.id}::uuid, ${id}::uuid, t.position::int, t.contact_id
-              from unnest(${sql.param(ids.map(() => uuidv7()))}::uuid[], ${sql.param(ids)}::uuid[])
-                   with ordinality as t(id, contact_id, position)`);
           await recordAudit(
             tx,
             ctx,
@@ -750,64 +1084,23 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
             },
             meta,
           );
-          await signalEnrollment(deps, tx, {
-            tenantId: ctx.tenant.id,
-            enrollmentId: id,
-            actorUserId: ctx.user.id,
-            key: enrollmentJobKey(id, 0),
-          });
           return { id, total: ids.length };
         });
       } catch (error) {
-        if (isUniqueViolation(error, 'automation_enrollments_running_uq')) {
-          throw new AppError(
-            'conflict',
-            'Contacts are being enrolled in this automation already. Wait until that enrolment ends, or stop it.',
-          );
-        }
-        throw error;
+        throw enrollmentRunningConflict(error) ?? error;
       }
     },
 
-    /** An automation's enrolments, newest first (at most 50). */
+    /** An automation's enrolments, newest first (at most 50), by members and by keys. */
     async listEnrollments(ctx: TenantContext, automationId: string): Promise<EnrollmentSummary[]> {
       assertCan(ctx, 'automations.read');
       if (!z.uuid().safeParse(automationId).success) return [];
       return db.run(
         ctx.scope,
-        async (tx) => {
-          const rows = await tx
-            .select({
-              e: automationEnrollments,
-              segmentName: segments.name,
-              createdByName: users.name,
-            })
-            .from(automationEnrollments)
-            .leftJoin(
-              segments,
-              and(
-                eq(segments.tenantId, automationEnrollments.tenantId),
-                eq(segments.id, automationEnrollments.segmentId),
-              ),
-            )
-            .leftJoin(
-              memberships,
-              and(
-                eq(memberships.tenantId, automationEnrollments.tenantId),
-                eq(memberships.id, automationEnrollments.createdByMembershipId),
-              ),
-            )
-            .leftJoin(users, eq(users.id, memberships.userId))
-            .where(
-              and(
-                eq(automationEnrollments.tenantId, ctx.tenant.id),
-                eq(automationEnrollments.automationId, automationId),
-              ),
-            )
-            .orderBy(desc(automationEnrollments.createdAt), desc(automationEnrollments.id))
-            .limit(50);
-          return rows.map((r) => toSummary(r.e, r.segmentName, r.createdByName));
-        },
+        async (tx) =>
+          (await selectEnrollmentPage(tx, ctx.tenant.id, automationId, { limit: 50 })).map(
+            ({ cursorAt: _cursorAt, ...summary }) => summary,
+          ),
         { accessMode: 'read only' },
       );
     },
@@ -818,101 +1111,16 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
       if (!z.uuid().safeParse(id).success) throw notFound('Enrolment');
       return db.run(
         ctx.scope,
-        async (tx) => {
-          const [r] = await tx
-            .select({
-              e: automationEnrollments,
-              automationName: automations.name,
-              segmentName: segments.name,
-            })
-            .from(automationEnrollments)
-            .innerJoin(
-              automations,
-              and(
-                eq(automations.tenantId, automationEnrollments.tenantId),
-                eq(automations.id, automationEnrollments.automationId),
-              ),
-            )
-            .leftJoin(
-              segments,
-              and(
-                eq(segments.tenantId, automationEnrollments.tenantId),
-                eq(segments.id, automationEnrollments.segmentId),
-              ),
-            )
-            .where(
-              and(
-                eq(automationEnrollments.tenantId, ctx.tenant.id),
-                eq(automationEnrollments.id, id),
-              ),
-            );
-          if (!r) throw notFound('Enrolment');
-          const memberIds = [r.e.createdByMembershipId, r.e.stoppedByMembershipId].filter(
-            (x): x is string => x !== null,
-          );
-          const names = await tx
-            .select({ id: memberships.id, name: users.name })
-            .from(memberships)
-            .innerJoin(users, eq(users.id, memberships.userId))
-            .where(
-              and(eq(memberships.tenantId, ctx.tenant.id), inArray(memberships.id, memberIds)),
-            );
-          const nameOf = (m: string | null) => names.find((n) => n.id === m)?.name ?? null;
-          const reasons = await tx
-            .select({
-              reason: automationEnrollmentContacts.reason,
-              count: sql<number>`count(*)::int`,
-            })
-            .from(automationEnrollmentContacts)
-            .where(
-              and(
-                eq(automationEnrollmentContacts.tenantId, ctx.tenant.id),
-                eq(automationEnrollmentContacts.enrollmentId, id),
-                eq(automationEnrollmentContacts.outcome, 'refused'),
-              ),
-            )
-            .groupBy(automationEnrollmentContacts.reason);
-          const summary = toSummary(r.e, r.segmentName, nameOf(r.e.createdByMembershipId));
-          // When it last handled a contact (its start when it has handled none).
-          // Not while the company is suspended: no run starts then, and that is not a stall. Signalled
-          // again since its last batch, or overdue by the database's time as the due list judges it.
-          const stalled =
-            r.e.status === 'running' &&
-            ctx.tenant.status === 'active' &&
-            (r.e.resignalCount > 0 || enrollmentStalled(r.e.nextBatchAt, await databaseNow(tx)));
-          // Mapped as the column is: the driver gives a computed timestamp as text.
-          const [lastProgress] = await tx
-            .select({
-              at: sql`max(${automationEnrollmentContacts.processedAt})`.mapWith(
-                automationEnrollmentContacts.processedAt,
-              ),
-            })
-            .from(automationEnrollmentContacts)
-            .where(
-              and(
-                eq(automationEnrollmentContacts.tenantId, ctx.tenant.id),
-                eq(automationEnrollmentContacts.enrollmentId, id),
-              ),
-            );
-          return {
-            ...summary,
-            automationName: r.automationName,
-            stoppedByName: nameOf(r.e.stoppedByMembershipId),
-            pending: summary.total - summary.started - summary.refused - summary.cancelled,
-            refusals: summariseRefusals(
-              reasons.map((x) => ({ reason: x.reason ?? '', count: x.count })),
-            ),
-            stalledSince: stalled ? (lastProgress?.at ?? r.e.createdAt) : null,
-          };
-        },
+        (tx) => readEnrollmentDetail(tx, ctx.tenant.id, id, ctx.tenant.status === 'active'),
         { accessMode: 'read only' },
       );
     },
 
     /**
-     * Stops a running enrolment: the contacts not handled yet are cancelled and no further run
-     * starts; runs already started go on (each can be stopped from its page). Waits for a batch in
-     * progress (the enrolment's row lock), so nothing starts after the stop. Audited.
+     * Stops a running enrolment, a member's or a key's: the contacts not handled yet are cancelled
+     * and no further run starts; runs already started go on (each can be stopped from its page).
+     * Waits for a batch in progress (the enrolment's row lock), so nothing starts after the stop.
+     * Audited.
      */
     async stopEnrollment(
       ctx: TenantContext,
@@ -922,25 +1130,13 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
       assertCan(ctx, 'automations.publish');
       const data = parseInput(stopEnrollmentSchema, input);
       return db.run(ctx.scope, async (tx) => {
-        const [enrollment] = await tx
-          .select()
-          .from(automationEnrollments)
-          .where(
-            and(
-              eq(automationEnrollments.tenantId, ctx.tenant.id),
-              eq(automationEnrollments.id, data.id),
-            ),
-          )
-          .for('update');
-        if (!enrollment) throw notFound('Enrolment');
-        if (enrollment.status !== 'running') {
-          throw new AppError('conflict', 'This enrolment has already ended.');
-        }
-        const { cancelled } = await endEnrollment(tx, enrollment, {
-          reason: 'stopped_by_member',
-          stoppedByMembershipId: ctx.membership.id,
-          now: clock.now(),
-        });
+        const { enrollment, cancelled } = await stopRunningEnrollment(
+          tx,
+          ctx.tenant.id,
+          data.id,
+          { membershipId: ctx.membership.id },
+          clock.now(),
+        );
         await recordAudit(
           tx,
           ctx,
@@ -969,11 +1165,13 @@ function toSummary(
   e: EnrollmentRow,
   segmentName: string | null,
   createdByName: string | null,
+  createdByKeyName: string | null,
 ): EnrollmentSummary {
   return {
     id: e.id,
     automationId: e.automationId,
     source: e.source,
+    segmentId: e.segmentId,
     segmentName,
     status: e.status,
     endReason: e.endReason,
@@ -981,7 +1179,12 @@ function toSummary(
     started: e.startedCount,
     refused: e.refusedCount,
     cancelled: e.cancelledCount,
+    startedBy: e.createdByApiKeyId === null ? 'member' : 'api',
     createdByName,
+    createdByApiKeyId: e.createdByApiKeyId,
+    createdByKeyName,
+    stoppedBy: e.stoppedByApiKeyId ? 'api' : e.stoppedByMembershipId ? 'member' : null,
+    stoppedByApiKeyId: e.stoppedByApiKeyId,
     createdAt: e.createdAt,
     endedAt: e.endedAt,
   };
@@ -991,7 +1194,8 @@ function toSummary(
 export interface DueEnrollment {
   tenantId: string;
   enrollmentId: string;
-  actorUserId: string;
+  /** The member who started it; null for a key's enrolment (ADR-403). */
+  actorUserId: string | null;
   cursorPosition: number;
 }
 
@@ -1007,7 +1211,7 @@ export async function findDueEnrollments(db: Database, limit = 100): Promise<Due
       tx.execute<{
         tenant_id: string;
         enrollment_id: string;
-        actor_user_id: string;
+        actor_user_id: string | null;
         cursor_position: number;
       }>(
         sql`select tenant_id, enrollment_id, actor_user_id, cursor_position

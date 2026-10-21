@@ -256,9 +256,16 @@ verification, app review, Embedded Signup configuration).
   automation started by a member or through the API, with its inputs given once; a signed
   `automation.enroll` job starts them 50 per transaction with the API's start steps, each refusal
   recorded with its reason, resumable without a second run; one running enrolment per automation;
-  stop leaves started runs going). **Remaining:** starting runs from campaigns, enrolling through
-  the public API, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real
-  sandbox run (release checklist).
+  stop leaves started runs going). **[Enrolling through the public API built; its database and
+  browser tests run only in CI]** (ADR-403, migration 0315: `POST /automations/{id}/enrollments`
+  with a saved segment or a tag and marketing consent written as `POST /contacts/search` writes
+  them, scopes `automations.start` and `contacts.read` (`campaigns.read` for a segment), one
+  per `Idempotency-Key`; keyset-paged reads and a stop; the enrolment names its key, each batch
+  re-checks the key and the plan and ends it with its reason; members' and keys' enrolments are
+  visible to both; contacts' outcomes one by one not listed). **Remaining:** starting runs from
+  campaigns, an enrolment's contacts listed with their outcomes (in the app and the API), a
+  drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox run (release
+  checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
   placeholders, headers, JSON body, values saved from the response, success and failure branches);

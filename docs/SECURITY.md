@@ -916,6 +916,32 @@ Phase 5 rules (Public API, P5-08):
   naming its place in the list, and stops nothing (an integration test, run in CI), so a call never
   stops or reveals another company's runs beyond saying an id is not one of the company's. A call
   counts as one request against the key's limits.
+- Enrolling contacts in an automation through the API (ADR-403,
+  `POST /automations/{id}/enrollments`) needs `automations.start` (refused while the company is
+  suspended) and `contacts.read`, `campaigns.read` for a saved segment, the scopes that read a
+  segment's conditions on conversations (`conversations.read`) or store orders (`orders.read`), and
+  `messages.send_marketing` when the automation sends marketing templates, each also within the
+  plan's scopes (ADR-092). The scopes are checked before anything is read; the automation, the
+  segment and the inputs are then checked as a member's enrolment checks them (ADR-401), in the
+  key's company scope, so another company's automation or segment is not found (an integration
+  test, run in CI). The contacts are those of a tag and marketing consent (the Contacts page's
+  filters, written as `POST /contacts/search` writes them; any other condition is refused, and a tag
+  the app would not keep is refused rather than ignored, which would take every contact) or a
+  segment's members, at most 10,000, one running enrolment per automation, once per
+  `Idempotency-Key`; the call counts as one request. The enrolment names its key
+  (`created_by_api_key_id`, a composite foreign key, exactly one of member and key by a check,
+  never updatable by the runtime role) and its jobs are signed with no user, so they act for the
+  company as live runs do. **Each batch re-checks the key as a fresh request would:** not revoked
+  (or gone), not expired by the database's clock, the plan still including the API and every scope
+  enrolling needs (`messages.send_marketing` for marketing); otherwise the enrolment ends as
+  `stopped` with `api_key_revoked`, `api_key_expired`, `api_not_in_plan`, `api_scope_missing` or
+  `marketing_not_allowed` and no further run starts. A suspended company's batch waits (the job is
+  deferred), as for a member's enrolment. The month's request count is not re-checked: batches are
+  not requests. Keys read (`automations.start`, also while suspended) and stop (`automations.start`,
+  active company) every enrolment of the company, members' included, by id and counts only: never
+  a member's name, the inputs or the contacts; a stop is audited as the key and names it
+  (`stopped_by_api_key_id`). Members with `automations.read` see keys' enrolments on their pages,
+  naming the key, as run pages name a key.
 - Template sends to many numbers (ADR-163, `POST /messages/send-many`) need the scopes one send
   needs and check each number as one send does (erasure, the suppression list, consent for the
   template's category, the marketing frequency cap under the campaign runner's company lock), so a

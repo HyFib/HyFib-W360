@@ -1891,6 +1891,22 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `DROP INDEX CONCURRENTLY IF EXISTS app.automation_runs_enrollment_idx;` and the migrations again
    (RUNBOOKS).
 
+   Migration 0315 (ADR-403) lets API keys start and stop enrolments: on
+   `app.automation_enrollments` it makes the member columns nullable, adds `created_by_api_key_id`
+   and `stopped_by_api_key_id` (composite foreign keys to `app.api_keys`, each with a partial index
+   for company deletion's key step), a check that exactly one of member and key started it, and
+   replaces the end check (five new reasons: `stopped_by_api`, `api_key_revoked`,
+   `api_key_expired`, `api_not_in_plan`, `api_scope_missing`) and the stopper check (now also
+   holding a running enrolment to naming nobody, `IS NOT DISTINCT FROM`). The table is small (one
+   running enrolment per automation), so its checks are validated in place under a brief lock. The
+   runtime role gets `UPDATE` on `stopped_by_api_key_id` only; nothing else changes (deletion steps,
+   the due list and the export already cover the table; the export lists the new columns). Roll out
+   workers before web: a worker of the release before would read a key's enrolment as one whose
+   member left and end it (`member_removed`), and only a web server of this release starts one. To
+   roll the application back past this release, stop the running enrolments keys started first
+   (`SELECT id FROM app.automation_enrollments WHERE status = 'running' AND created_by_api_key_id
+IS NOT NULL`); the columns and checks can stay.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

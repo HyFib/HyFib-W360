@@ -74,6 +74,7 @@ const ENROLLMENT_DEFER_MINUTES = 5;
  * its contacts' outcomes with their runs and queues the next batch in the same transaction, so a
  * duplicate or retried job starts nothing twice. The job is signed with the member who started the
  * enrolment: a member who left ends it; a suspended company's enrolment waits and is looked at again.
+ * A key's enrolment (ADR-403) is signed with no user: each batch re-checks the key instead.
  */
 export function automationEnrollHandler(rt: WorkerRuntime) {
   return async ([job]: Job<unknown>[]): Promise<void> => {

@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import {
   AUTOMATION_END_REASONS,
+  AUTOMATION_ENROLLMENT_END_REASONS,
+  AUTOMATION_ENROLLMENT_SOURCES,
+  AUTOMATION_ENROLLMENT_STATUSES,
   AUTOMATION_RUN_STATUSES,
   CAMPAIGN_STATUSES,
   CHANNEL_STATUSES,
@@ -117,6 +120,8 @@ import {
   apiStartManyAutomationRunsSchema,
   apiStopManyAutomationRunsSchema,
 } from './automations';
+import { apiStartEnrollmentSchema } from './automation-enrollments';
+import { ENROLLMENT_LIMITS } from '../automations/enrollment-model';
 import {
   apiCampaignRecipientSchema,
   apiCampaignDetailSchema,
@@ -1194,6 +1199,58 @@ export const apiAutomationRunSchema = z.object({
   endedAt: z.iso.datetime().nullable(),
 });
 
+/** An enrolment of contacts in an automation (ADR-401, ADR-403), as the API gives it. */
+export const apiAutomationEnrollmentSchema = z.object({
+  id: z.uuid(),
+  automationId: z.uuid(),
+  source: z
+    .enum(AUTOMATION_ENROLLMENT_SOURCES)
+    .describe('contacts: the contacts filters found; segment: a saved segment’s members.'),
+  segmentId: z.uuid().nullable().describe('The segment, for a segment’s members; null otherwise.'),
+  status: z
+    .enum(AUTOMATION_ENROLLMENT_STATUSES)
+    .describe(
+      'running while its batches start runs; completed once every contact was handled; stopped (endReason says why) or failed (stalled) otherwise.',
+    ),
+  endReason: z
+    .enum(AUTOMATION_ENROLLMENT_END_REASONS)
+    .nullable()
+    .describe(
+      'Why it stopped before every contact was handled; null while it runs or once completed. stopped_by_member, stopped_by_api; member_removed (its member left or may no longer publish automations); api_key_revoked, api_key_expired, api_not_in_plan, api_scope_missing (its key may no longer enrol); automation_paused, automation_unavailable, channel_unavailable, not_in_plan, inputs_changed, marketing_not_allowed; stalled (failed).',
+    ),
+  total: z.number().int().describe('The contacts snapshotted when it started, 1 to 10,000.'),
+  started: z.number().int().describe('Contacts a run was started for.'),
+  refused: z.number().int().describe('Contacts a start refused (refusals gives the reasons).'),
+  cancelled: z.number().int().describe('Contacts not started because it stopped.'),
+  pending: z.number().int().describe('Contacts not handled yet.'),
+  startedBy: z
+    .enum(['member', 'api'])
+    .describe('Who started it: a member in the app (never which member) or an API key.'),
+  apiKeyId: z.uuid().nullable().describe('The key that started it; null for a member’s.'),
+  stoppedBy: z
+    .enum(['member', 'api'])
+    .nullable()
+    .describe('Who stopped it: a member, an API key, or null when nobody did.'),
+  stoppedByApiKeyId: z.uuid().nullable().describe('The key that stopped it, if one did.'),
+  createdAt: z.iso.datetime(),
+  endedAt: z.iso.datetime().nullable(),
+});
+
+/** One enrolment with its refusals by reason and whether it has stalled. */
+export const apiAutomationEnrollmentDetailSchema = apiAutomationEnrollmentSchema.extend({
+  refusals: z
+    .array(z.object({ reason: z.string(), count: z.number().int() }))
+    .describe(
+      'Refused contacts by reason, most frequent first: suppressed, opted_out, contact_erased, no_marketing_opt_in, conversation_assigned, automation_busy, automation_limit, automation_quota, contact_gone (merged away since) or no_number.',
+    ),
+  stalledSince: z.iso
+    .datetime()
+    .nullable()
+    .describe(
+      'While it runs without progress (its next batch 10 minutes overdue, or tried again since), when it last handled a contact; HyFib tries again and fails it after 3 tries. null otherwise.',
+    ),
+});
+
 /** What a start of many runs answers for one number (ADR-161). */
 export const apiAutomationRunStartSchema = z.object({
   to: z.string().describe('The number, in E.164 form.'),
@@ -1835,7 +1892,7 @@ export const apiErrorSchema = z.object({
       .string()
       .optional()
       .describe(
-        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, contact_merged, conversation_assigned, idempotency_key_reused, idempotency_response_too_large, ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed.',
+        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, contact_merged, conversation_assigned, enrollment_ended, enrollment_running, idempotency_key_reused, idempotency_response_too_large, ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed.',
       ),
     mergedInto: z
       .uuid()
@@ -1876,7 +1933,7 @@ const errors = (...statuses: number[]) =>
             401: 'No valid API key: missing, unknown, revoked or expired.',
             403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one, the CRM for pipelines, deals and tasks, or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
-            409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason.',
+            409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason. Enrolling contacts in an automation: another enrolment of it is running (reason enrollment_running, the message naming it); stopping an enrolment: it has ended (enrollment_ended).',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
             415: 'The body must be JSON (Content-Type: application/json).',
             422: 'The request body or parameters are invalid.',
@@ -1901,6 +1958,16 @@ const tagPrefixParam = {
 /** How pages of tags are read, for both lists (ADR-272). */
 const tagPagesNote =
   'Pages continue after the last tag of the page before, so paging never skips or repeats a tag that stays in use; a tag first used meanwhile before the cursor is listed on the next pass, and the counts are read with each page.';
+
+/** An enrolment of the automation the path names (ADR-403). */
+const enrollmentIdParam = {
+  name: 'enrollmentId',
+  in: 'path',
+  required: true,
+  schema: { type: 'string', format: 'uuid' },
+  description:
+    'An enrolment of the automation (GET /automations/{id}/enrollments); another automation’s is not found.',
+};
 
 const pageParams = [
   {
@@ -3614,6 +3681,75 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/automations/{id}/enrollments': {
+        get: {
+          operationId: 'listAutomationEnrollments',
+          summary: 'An automation’s enrolments, newest first',
+          description: `${scopeNote('automations.start')} Every enrolment of the automation, those members started in the app and those keys started, newest first, with its status and counts. Reading works while the company is suspended.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
+          responses: {
+            '200': {
+              description: 'A page of enrolments.',
+              content: pageOf('AutomationEnrollment'),
+            },
+            ...errors(401, 403, 404, 422, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'startAutomationEnrollment',
+          summary: 'Enrol contacts or a segment in an automation',
+          description: [
+            `${scopeNote('automations.start')} Also needs \`contacts.read\`, \`campaigns.read\` for a segment, the scopes that read a segment's conditions on conversations (\`conversations.read\`) or store orders (\`orders.read\`), and \`messages.send_marketing\` when the automation sends marketing templates. Enrols in a published, active automation started by a member or through the API either a saved segment's members (\`segmentId\`) or the contacts a tag and marketing consent find (\`contacts.conditions\`, written as POST /contacts/search writes them: the Contacts page's filters), with every input its trigger declares, once for everyone.`,
+            `The contacts are counted and snapshotted now, in contact id order: 1 to ${ENROLLMENT_LIMITS.contacts.toLocaleString('en-US')} (422 otherwise; send a campaign to more); contacts matching later are not enrolled. Runs then start in the background in batches of ${ENROLLMENT_LIMITS.batch}, paced by the number's send rate, each contact with the checks of POST /automations/{id}/runs (a refused contact is counted with its reason and the others go on). One enrolment of an automation runs at a time: another is refused with 409 (reason \`enrollment_running\`, naming it).`,
+            'Each batch checks the key again as a request would: a key revoked or expired since, a plan that no longer includes the API or a scope this needs, ends the enrolment (`stopped`, with the reason); contacts not handled are not started and runs already started go on. The call counts as one request; batches count none. Runs it starts send `automation.run_started` and the other run events with `run.enrollmentId` set and `run.apiKeyId` null. One enrolment per `Idempotency-Key`: a retry answers as the first request did.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKey' },
+          ],
+          requestBody: { required: true, content: json(ref('StartAutomationEnrollment')) },
+          responses: {
+            '201': {
+              description: 'The enrolment, as it starts.',
+              content: json(dataOf(ref('AutomationEnrollmentWithProgress'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/automations/{id}/enrollments/{enrollmentId}': {
+        get: {
+          operationId: 'getAutomationEnrollment',
+          summary: 'An enrolment’s progress',
+          description: `${scopeNote('automations.start')} One enrolment of the automation, a member's or a key's: its status, counts, refusals by reason, who started and stopped it, and whether it has stalled. Its contacts are not listed one by one.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }, enrollmentIdParam],
+          responses: {
+            '200': {
+              description: 'The enrolment.',
+              content: json(dataOf(ref('AutomationEnrollmentWithProgress'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
+      '/automations/{id}/enrollments/{enrollmentId}/stop': {
+        post: {
+          operationId: 'stopAutomationEnrollment',
+          summary: 'Stop an enrolment',
+          description: [
+            `${scopeNote('automations.start')} Any running enrolment of the automation, a member's or a key's, as a member stops one in the app: once a batch in progress has finished, its contacts not handled are not started (\`cancelled\`) and it ends as \`stopped\` with \`stopped_by_api\`, naming the key. Runs already started go on; stop one with POST /automation-runs/{id}/stop only when a key started it.`,
+            'One that has ended is refused with 409 (reason `enrollment_ended`): GET it to see how it ended.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }, enrollmentIdParam],
+          responses: {
+            '200': {
+              description: 'The enrolment, as it now is.',
+              content: json(dataOf(ref('AutomationEnrollmentWithProgress'))),
+            },
+            ...errors(401, 403, 404, 409, 423, 429, 500),
+          },
+        },
+      },
       '/automation-runs/{id}': {
         get: {
           operationId: 'getAutomationRun',
@@ -5035,6 +5171,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         StartManyAutomationRuns: jsonSchema(apiStartManyAutomationRunsSchema, 'input'),
         StopManyAutomationRuns: jsonSchema(apiStopManyAutomationRunsSchema, 'input'),
         AutomationRunStart: jsonSchema(apiAutomationRunStartSchema),
+        AutomationEnrollment: jsonSchema(apiAutomationEnrollmentSchema),
+        AutomationEnrollmentWithProgress: jsonSchema(apiAutomationEnrollmentDetailSchema),
+        StartAutomationEnrollment: jsonSchema(apiStartEnrollmentSchema, 'input'),
         WebhookEndpoint: jsonSchema(apiWebhookEndpointSchema),
         WebhookEndpointWithSecret: jsonSchema(apiWebhookEndpointWithSecretSchema),
         WebhookDelivery: jsonSchema(apiWebhookDeliverySchema),
@@ -5171,6 +5310,10 @@ export const API_ROUTES = [
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],
   ['post', '/automations/{id}/runs/start-many'],
+  ['get', '/automations/{id}/enrollments'],
+  ['post', '/automations/{id}/enrollments'],
+  ['get', '/automations/{id}/enrollments/{enrollmentId}'],
+  ['post', '/automations/{id}/enrollments/{enrollmentId}/stop'],
   ['get', '/automation-runs/{id}'],
   ['post', '/automation-runs/{id}/stop'],
   ['post', '/automation-runs/stop-many'],

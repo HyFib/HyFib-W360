@@ -75,7 +75,9 @@ export default async function AutomationRunPage({
           run.mode === 'test'
             ? (run.startedByName ?? 'a member')
             : run.enrollmentId
-              ? `an enrolment by ${run.enrolledByName ?? 'a member'}`
+              ? run.enrolledByKeyName
+                ? `an enrolment through the API with key “${run.enrolledByKeyName}”`
+                : `an enrolment by ${run.enrolledByName ?? 'a member'}`
               : run.triggerType === 'api'
                 ? run.apiKeyName
                   ? `the API key “${run.apiKeyName}”`

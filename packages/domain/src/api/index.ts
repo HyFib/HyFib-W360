@@ -41,6 +41,7 @@ export * from './message-changes';
 export * from './members';
 export * from './channels';
 export * from './automations';
+export * from './automation-enrollments';
 export * from './webhook-endpoints';
 export * from './campaigns';
 export * from './segments';

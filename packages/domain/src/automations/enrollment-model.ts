@@ -1,13 +1,14 @@
 import { z } from 'zod';
 import { AppError } from '@w360/core';
-import type { AutomationEnrollmentEndReason } from '@w360/db';
+import type { ApiScope, AutomationEnrollmentEndReason, AutomationEnrollmentSource } from '@w360/db';
 import { contactFilterSchema } from '../contacts/service';
 import { startRefusalOf, type StartRefusal } from './starts';
 
 /**
- * Members' enrolments of contacts or a segment in an automation started by a member or through the
- * API (ADR-401): the bounds, what a member submits, and the batch logic the enrolment job runs, kept
- * apart from the database so it is tested on its own.
+ * Enrolments of contacts or a segment in an automation started by a member or through the API, by
+ * members (ADR-401) or API keys (ADR-403): the bounds, what a member submits, the batch logic the
+ * enrolment job runs and the re-check of the key that started one, kept apart from the database so
+ * they are tested on their own.
  */
 
 export const ENROLLMENT_LIMITS = {
@@ -160,9 +161,16 @@ export const ENROLLMENT_END_REASON_LABELS: Record<AutomationEnrollmentEndReason,
   not_in_plan: 'The company’s plan does not include automations.',
   inputs_changed: 'The automation’s live version takes other inputs than the ones given.',
   marketing_not_allowed:
-    'The automation sends marketing templates, which the member who started it may no longer send.',
+    'The automation sends marketing templates, which the member or API key that started it may no longer send.',
   stalled:
     'Its next batch kept failing: HyFib tried it again 3 times after it stopped making progress.',
+  stopped_by_api: 'An API key stopped it.',
+  api_key_revoked: 'The API key that started it was revoked.',
+  api_key_expired:
+    'The API key that started it expired (a rotated key expires when its overlap ends).',
+  api_not_in_plan: 'The company’s plan no longer includes the API.',
+  api_scope_missing:
+    'The company’s plan no longer includes a scope the API key that started it needs to enrol contacts.',
 };
 
 /** The status an enrolment ends with for a reason (none: every contact was handled). */
@@ -265,4 +273,65 @@ export function summariseRefusals(
       count: c.count,
     }))
     .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
+
+/**
+ * The scopes a key needs to enrol contacts (ADR-403): to start automations and read contacts, and
+ * to read segments for a segment's members (`messages.send_marketing` too when the automation sends
+ * marketing templates, checked where that is known). Each batch checks them again.
+ */
+export function enrollmentKeyScopes(source: AutomationEnrollmentSource): ApiScope[] {
+  return source === 'segment'
+    ? ['automations.start', 'contacts.read', 'campaigns.read']
+    : ['automations.start', 'contacts.read'];
+}
+
+/** The key that started an enrolment, as its batch reads it (the scopes never change, 0024). */
+export interface EnrollmentKeyStanding {
+  revokedAt: Date | null;
+  expiresAt: Date | null;
+  scopes: readonly string[];
+}
+
+/** What the company's plan gives the API now (ADR-061, ADR-092). */
+export interface EnrollmentKeyPlan {
+  /** The plan's monthly API requests: 0 leaves the API out; null has no limit. */
+  apiRequests: number | null;
+  /** The scopes the plan includes; null: every scope. */
+  apiScopes: ReadonlySet<ApiScope> | null;
+}
+
+/**
+ * Whether a key may still use a scope as a fresh request would: the key holds it and the plan
+ * includes it (`hasScope`, ADR-092).
+ */
+export function enrollmentKeyMayUse(
+  key: EnrollmentKeyStanding,
+  plan: EnrollmentKeyPlan,
+  scope: ApiScope,
+): boolean {
+  return key.scopes.includes(scope) && (plan.apiScopes === null || plan.apiScopes.has(scope));
+}
+
+/**
+ * Why an enrolment a key started may not go on, checked once per batch as a fresh request with the
+ * key would be (ADR-403), or null: the key is gone or revoked, it expired (by the database's now),
+ * the plan no longer includes the API, or the key or the plan no longer gives a scope enrolling
+ * needs. The monthly request count is not checked: batches are not requests (the POST counted
+ * once). A suspended company's job is deferred before any batch runs, as for a member's enrolment.
+ */
+export function apiKeyEnrollmentEnd(input: {
+  key: EnrollmentKeyStanding | null;
+  plan: EnrollmentKeyPlan;
+  source: AutomationEnrollmentSource;
+  now: Date;
+}): AutomationEnrollmentEndReason | null {
+  const { key, plan, source, now } = input;
+  if (!key || key.revokedAt) return 'api_key_revoked';
+  if (key.expiresAt && key.expiresAt.getTime() <= now.getTime()) return 'api_key_expired';
+  if (plan.apiRequests === 0) return 'api_not_in_plan';
+  if (!enrollmentKeyScopes(source).every((scope) => enrollmentKeyMayUse(key, plan, scope))) {
+    return 'api_scope_missing';
+  }
+  return null;
 }

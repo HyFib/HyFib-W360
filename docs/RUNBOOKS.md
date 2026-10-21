@@ -776,6 +776,23 @@ started say so on their page and reach webhooks as runs of trigger `api` with no
 `enrollmentId`: an endpoint that filters runs by the trigger `api` receives them too; one limited to
 API keys' runs does not.
 
+**Enrolments started through the API (ADR-403).** A key holding `automations.start` and
+`contacts.read` (and `campaigns.read` for a segment) enrols contacts with
+`POST /api/v1/automations/{id}/enrollments`; its enrolment's page says "started … through the API
+with key <name>" and the automation's page lists it beside members'. It runs exactly as a member's
+(the same limits, pacing, sweep and refusals); its jobs act for the company, so a member leaving
+changes nothing. It stops by itself, with its reason on the page and in `endReason`, when the key
+is revoked ("The API key that started it was revoked"), expires (a rotated key expires when its
+72-hour overlap ends: an enrolment of 10,000 contacts takes about nine minutes, so only a stalled or
+suspended one meets it), or the plan no longer includes the API or a scope it needs; enrol again
+with a usable key. A key stops any running enrolment with
+`POST /api/v1/automations/{id}/enrollments/{enrollmentId}/stop` ("A key stopped it", naming the
+key), as a member stops one from its page; the audit log names the key (actor `api_key`) for its
+starts and stops. An integration that gets 409 `enrollment_running` sees the running enrolment's id
+in the message: wait for it (`GET …/enrollments/{enrollmentId}`) or stop it. Runs a key's
+enrolment started reach webhooks with `run.apiKeyId` null and their `run.enrollmentId`; the
+enrolment names the key.
+
 **Budgets and failed sends.** A run fails, and hands the conversation to people, when it exceeds
 200 steps, enters one step 20 times, sends 50 messages or runs longer than 7 days, or when a
 message cannot be queued (number not active, 24-hour window closed, no WhatsApp id for the contact).

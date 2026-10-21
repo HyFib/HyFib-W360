@@ -781,6 +781,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   again, through the definer due list `ops.automation_enrollments_due`, a running enrolment whose
   next batch is more than 10 minutes overdue (a lost job, or one out of retries). A suspended
   company's job is queued again five minutes later; a job whose member left ends the enrolment.
+- **Enrolments through the public API** (`api/automation-enrollments.ts`, migration 0315,
+  ADR-403): a key with `automations.start` and `contacts.read` (and `campaigns.read` for a
+  segment) starts the same enrolment through the same steps (`snapshotEnrollment`,
+  `matchingContactIds`, `loadEnrollmentSegment`), choosing a segment or a tag and marketing consent
+  written as `POST /contacts/search` writes them, mapped onto the Contacts page's
+  `contactFilterSchema` (`enrollmentFilterOf`, `contactFilterConditionsFor`). The enrolment names
+  its key (`created_by_api_key_id`, exactly one of member and key) and its jobs are signed with no
+  user; each batch re-checks the key in place of the member (`apiKeyEnrollmentEnd`: revoked,
+  expired, the API and the scopes in the plan). Keys list (keyset pages), read and stop every
+  enrolment of the company (`selectEnrollmentPage`, `readEnrollmentDetail`,
+  `stopRunningEnrollment`, shared with members' pages).
 - **Not built yet:** templates with media headers in template steps, usage billing. Form steps
   (ADR-248), runs started through the public API (ADR-077), template steps' website buttons whose
   link ends with a value (ADR-229), products steps (ADR-383), steps that set deal fields
