@@ -1995,9 +1995,14 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    choice field, a campaign's checks and send of such a segment, the API's segments and contact
    searches naming one, and `GET /contacts?fields[<key>]=…` for one all answer 500 (old code has no
    comparisons for the type). Create choice fields only after both the worker and the web rollouts
-   end. Every write of contact field values now takes the company's contact-field
-   advisory lock shared (`contact-fields:<company id>`, the key additions already took); expect no
-   change in contention, since only additions and changes of options take it exclusively. Rolling an
+   end. Every write of contact field values now takes the company's contact-field advisory lock
+   shared (`contact-fields:<company id>`, the key additions already took) and locks the rows of the
+   fields it writes `FOR SHARE`; merges lock every field row. Writers never wait for each other.
+   What can wait: adding a field or changing options waits for every write of values in progress
+   (an import of up to 5,000 rows or a bulk edit of up to 10,000 contacts runs in one transaction),
+   and writes wait for it; renaming or deleting a field waits for the writes of that field (and for
+   merges), and later writes of that field wait behind it. Do those in quiet hours on busy
+   companies. Rolling an
    image back leaves the column, checks and grant in place; an older release then fails the same way
    for choice values, and every segment, campaign and API filter naming a choice field fails with
    500s, until the choice fields are deleted (which removes their values and leaves those segments

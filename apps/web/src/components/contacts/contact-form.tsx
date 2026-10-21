@@ -58,13 +58,15 @@ export function ContactForm({
     setError(null);
     try {
       if (contactId) {
+        // Only the values the member changed, so a value its field no longer takes (a choice whose
+        // options changed since it was set) never blocks saving the rest, and none at all when
+        // nothing changed, so no field is locked (ADR-407).
+        const attributes = changedAttributes(initial.attributes, values.attributes);
         const result = await updateContactAction(slug, contactId, {
           displayName: values.displayName,
           email: values.email,
           ...(phoneEditable ? { phone: values.phone } : {}),
-          // Only the values the member changed, so a value its field no longer takes (a choice
-          // whose options changed since it was set) never blocks saving the rest (ADR-407).
-          attributes: changedAttributes(initial.attributes, values.attributes),
+          ...(Object.keys(attributes).length > 0 ? { attributes } : {}),
         });
         if (!result.ok) setError(result.message);
         else setSaved(true);

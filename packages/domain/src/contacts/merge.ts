@@ -19,7 +19,7 @@ import {
 import { assertCan, type TenantContext } from '../authz/context';
 import { recordAudit, type RequestMeta } from '../audit';
 import { parseInput } from '../validation';
-import { lockContactFieldValues } from './field-definitions';
+import { lockContactFieldsForMerge } from './field-definitions';
 import { MAX_TAGS_PER_CONTACT, type AttributeValue } from './fields';
 
 /**
@@ -351,9 +351,10 @@ export function createContactMergeService(deps: { db: Database; clock: Clock }) 
       return db.run(ctx.scope, async (tx) => {
         // The kept contact takes the other's field values where it has none. Both are values of the
         // company's fields, so they are not read again, but they move under the contact-field lock
-        // every write of values takes before locking contacts (ADR-407): a change of a choice
-        // field's options counts them on one contact or the other, never between.
-        await lockContactFieldValues(tx, ctx.tenant.id);
+        // and the field rows' share locks, before the contacts are locked (ADR-407): a change of a
+        // choice field's options counts them on one contact or the other, never between, and a
+        // field being deleted is not copied past its deletion.
+        await lockContactFieldsForMerge(tx, ctx.tenant.id);
         const res = await tx.execute<{ summary: unknown }>(
           sql`select app.merge_contacts(${data.keepContactId}::uuid, ${data.mergeContactId}::uuid) as summary`,
         );

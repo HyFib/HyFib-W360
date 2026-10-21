@@ -406,13 +406,20 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
   }
 
   /**
-   * The fields, read under the company's contact-field lock (ADR-407), for writes of values: taken
-   * before any contact is locked, so a choice field's options cannot change until they commit. The
-   * field rows are then locked `FOR SHARE`, still before the contact, in the order a field's
-   * deletion takes them (ADR-112): a deletion in progress is waited for and its field is then
-   * gone, or the deletion waits and removes what this transaction writes.
+   * The fields with these keys, read under the company's contact-field lock (ADR-407), for writes
+   * of their values: taken before any contact is locked, so a choice field's options cannot change
+   * until they commit. Only the rows of the keys written are then locked `FOR SHARE`, still before
+   * the contact, in the order a field's deletion takes them (ADR-112), as the API's `lockFields`
+   * does: a deletion of one of them in progress is waited for and its field is then gone, or the
+   * deletion waits and removes what this transaction writes; other fields' renames and deletions
+   * do not wait. A key no field has is simply not returned.
    */
-  async function lockedFields(tx: Tx, tenantId: string): Promise<ContactFieldRow[]> {
+  async function lockedFields(
+    tx: Tx,
+    tenantId: string,
+    keys: readonly string[],
+  ): Promise<ContactFieldRow[]> {
+    if (keys.length === 0) return [];
     await lockContactFieldValues(tx, tenantId);
     return tx
       .select({
@@ -423,8 +430,8 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         options: contactFields.options,
       })
       .from(contactFields)
-      .where(eq(contactFields.tenantId, tenantId))
-      .orderBy(asc(contactFields.label))
+      .where(and(eq(contactFields.tenantId, tenantId), inArray(contactFields.key, [...keys])))
+      .orderBy(asc(contactFields.key))
       .for('share');
   }
 
@@ -672,7 +679,9 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'contacts.write');
       const data = parseInput(bulkFieldSchema, input);
       return db.run(ctx.scope, async (tx) => {
-        const field = (await lockedFields(tx, ctx.tenant.id)).find((f) => f.key === data.key);
+        const field = (await lockedFields(tx, ctx.tenant.id, [data.key])).find(
+          (f) => f.key === data.key,
+        );
         if (!field) {
           const message = 'Choose one of the company’s custom fields.';
           throw new AppError('validation_failed', message, {
@@ -842,7 +851,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       if (!email.ok) throw new AppError('validation_failed', email.message);
       const tags = normalizeTags(data.tags ?? []);
       return db.run(ctx.scope, async (tx) => {
-        const fields = data.attributes ? await lockedFields(tx, ctx.tenant.id) : [];
+        const fields = await lockedFields(tx, ctx.tenant.id, Object.keys(data.attributes ?? {}));
         const attributes = mergeAttributes({}, coerceAttributes(fields, data.attributes ?? {}));
         const id = uuidv7();
         const [row] = await tx
@@ -900,7 +909,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       const data = parseInput(updateContactSchema, input);
       await db.run(ctx.scope, async (tx) => {
         // The fields before the contact, as every write of values takes them (ADR-407).
-        const fields = data.attributes ? await lockedFields(tx, ctx.tenant.id) : [];
+        const fields = await lockedFields(tx, ctx.tenant.id, Object.keys(data.attributes ?? {}));
         const current = await lockContact(tx, ctx, contactId);
         const set: Partial<typeof contacts.$inferInsert> = {};
         if (data.displayName !== current.displayName) set.displayName = data.displayName;
@@ -1350,7 +1359,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         // (ADR-407) the fields mapped must be as they were then, so no value is stored that a
         // field's options or type no longer take.
         if (Object.keys(opts.mapping.fields).length > 0) {
-          const locked = await lockedFields(tx, ctx.tenant.id);
+          const locked = await lockedFields(tx, ctx.tenant.id, Object.keys(opts.mapping.fields));
           for (const key of Object.keys(opts.mapping.fields)) {
             const before = fields.find((f) => f.key === key);
             const after = locked.find((f) => f.key === key);

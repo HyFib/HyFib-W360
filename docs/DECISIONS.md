@@ -17810,9 +17810,13 @@ Decision: ADR-385's design, for contacts, through the same functions.
   exclusively (the advisory lock additions already took, ADR-115), and every write of values takes
   it shared before reading the fields and before locking a contact (`lockContactFieldValues`), so a
   value is never checked against options being replaced and a change of options counts every value
-  committed. Each writer then reads the fields it checks against `FOR SHARE`, still before the
-  contact, in the order a field's deletion takes them (ADR-112), so a value written while its
-  field is being deleted is refused once the deletion commits, or removed by it. Writers: the
+  committed. Each writer then locks the rows of the fields it writes `FOR SHARE` (only those, so
+  other fields' renames and deletions never wait for it), still before the contact, in the order a
+  field's deletion takes them (ADR-112), so a value written while its field is being deleted is
+  refused once the deletion commits, or removed by it. A merge locks every field row, since
+  `app.merge_contacts` copies the merged contact's values unfiltered. A Flow answer is saved in an
+  inbound transaction that may already hold its contact; a deletion of one of its fields waiting on
+  that contact deadlocks with it, which PostgreSQL detects (the inbound job is retried). Writers: the
   contact page and new-contact form, CSV import, bulk field edits (ADR-238), `POST`/`PATCH
 /contacts` and the call that changes many (through `lockFields`), automation steps that set a
   field, Flow answers saved into fields (which now read the fields before locking the contact),

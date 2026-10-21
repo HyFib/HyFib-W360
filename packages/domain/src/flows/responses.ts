@@ -7,6 +7,7 @@ import {
   flowResponses,
   flowSends,
   flows,
+  inArray,
   isNull,
   sql,
   type FlowAnswerOutcome,
@@ -128,20 +129,35 @@ export async function recordFlowCompletion(
     });
   } else if (send && completion.answers && send.mapping.length > 0) {
     // The answers belong to the contact the form was sent to (the token names that send). The
-    // company's contact-field lock first, as every write of values takes it (ADR-407).
-    await lockContactFieldValues(tx, input.tenantId);
-    // The fields before the contact, locked against a deletion, in the order a deletion takes
-    // them (ADR-112).
-    const fieldRows = await tx
-      .select({
-        key: contactFields.key,
-        label: contactFields.label,
-        type: contactFields.type,
-        options: contactFields.options,
-      })
-      .from(contactFields)
-      .where(eq(contactFields.tenantId, input.tenantId))
-      .for('share');
+    // company's contact-field lock first, as every write of values takes it (ADR-407), then the
+    // rows of the fields the form saves into, locked against a deletion before the contact, in the
+    // order a deletion takes them (ADR-112); other fields are not locked. The inbound transaction
+    // may already hold this contact from an earlier message of the same webhook; a deletion of one
+    // of these fields waiting on it then deadlocks with this, which PostgreSQL detects (the job is
+    // retried).
+    const keys = [
+      ...new Set(
+        send.mapping.flatMap(({ target }) =>
+          target.startsWith('field:') ? [target.slice('field:'.length)] : [],
+        ),
+      ),
+    ];
+    if (keys.length > 0) await lockContactFieldValues(tx, input.tenantId);
+    const fieldRows =
+      keys.length === 0
+        ? []
+        : await tx
+            .select({
+              key: contactFields.key,
+              label: contactFields.label,
+              type: contactFields.type,
+              options: contactFields.options,
+            })
+            .from(contactFields)
+            .where(
+              and(eq(contactFields.tenantId, input.tenantId), inArray(contactFields.key, keys)),
+            )
+            .for('share');
     const [contact] = await tx
       .select({ id: contacts.id, erasedAt: contacts.erasedAt })
       .from(contacts)

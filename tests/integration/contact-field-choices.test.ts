@@ -10,6 +10,7 @@ import {
   apiUpdateContactField,
   authenticateApiToken,
   createApiKeysService,
+  createContactMergeService,
   createContactsService,
   createSegmentsService,
   type ApiContext,
@@ -84,6 +85,53 @@ const audits = (c: Company, action: string) =>
     `SELECT metadata FROM app.audit_events
       WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
     [c.tenant.id, action],
+  );
+
+/**
+ * Deletes a field in the service's order (its row, then every contact's value) in a transaction
+ * that waits until `start`'s work blocks on it, then finishes and commits; returns what the work
+ * ended with.
+ */
+async function whileDeleting(
+  c: Company,
+  fieldId: string,
+  key: string,
+  start: () => Promise<string>,
+): Promise<string> {
+  const holder = await fx.dbs.adminPool.connect();
+  let outcome: Promise<string> | undefined;
+  try {
+    await holder.query('BEGIN');
+    await holder.query('DELETE FROM app.contact_fields WHERE id = $1', [fieldId]);
+    const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+    outcome = start();
+    await vi.waitFor(
+      async () => {
+        const [waiting] = await fx.query<{ n: number }>(
+          'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+          [lock!.pid],
+        );
+        if (waiting!.n < 1) throw new Error('the work is not waiting yet');
+      },
+      { timeout: 4_000, interval: 20 },
+    );
+    // The work waits on the field's row without holding a contact, so the deletion goes on.
+    await holder.query(
+      `UPDATE app.contacts SET attributes = attributes - $2::text
+        WHERE tenant_id = $1 AND attributes ? $2::text`,
+      [c.tenant.id, key],
+    );
+  } finally {
+    await holder.query('COMMIT');
+    holder.release();
+  }
+  return outcome!;
+}
+
+const settled = (promise: Promise<unknown>) =>
+  promise.then(
+    () => 'done',
+    (error: unknown) => (isAppError(error) ? error.publicMessage : String(error)),
   );
 
 let phoneSeq = 0;
@@ -390,7 +438,7 @@ describe('choice-type custom contact fields (ADR-407)', () => {
     expect(await optionsOf(tier.id)).toEqual(['Gold', 'Silver', 'Bronze']);
   });
 
-  it('a member’s write waits for a field being deleted, then refuses it, so no value outlives its field', async () => {
+  it('a member’s write waits for a field being deleted, then refuses it, leaving no value behind', async () => {
     const { c, owner, tier } = await setup();
     const { id } = await contactsSvc().createContact(owner, { phone: nextPhone() });
     const agent = await fx.ctx(c, c.agent);
@@ -435,6 +483,80 @@ describe('choice-type custom contact fields (ADR-407)', () => {
       type: 'choice',
       options: ['Platinum'],
     });
+    expect(await attributesOf(id)).toEqual({});
+  });
+
+  it('a bulk edit waits for a field being deleted, then refuses it, leaving no value behind', async () => {
+    const { c, owner, tier } = await setup();
+    const a = await contactsSvc().createContact(owner, { phone: nextPhone(), tags: ['vip'] });
+    const outcome = await whileDeleting(c, tier.id, 'tier', () =>
+      settled(
+        contactsSvc().bulkSetField(owner, {
+          filter: { tag: 'vip' },
+          key: 'tier',
+          value: 'Gold',
+          expectedCount: 1,
+        }),
+      ),
+    );
+    expect(outcome).toBe('Choose one of the company’s custom fields.');
+    expect(await attributesOf(a.id)).toEqual({});
+  });
+
+  it('a merge waits for a field being deleted, so the kept contact never takes its value', async () => {
+    const { c, owner, tier } = await setup();
+    const kept = await contactsSvc().createContact(owner, { phone: nextPhone() });
+    // A contact without a number (as WhatsApp usernames make them) that has a value.
+    const merged = uuidv7();
+    await fx.query(
+      `INSERT INTO app.contacts (id, tenant_id, phone_e164, source, attributes)
+       VALUES ($1, $2, NULL, 'manual', '{"tier":"Gold"}')`,
+      [merged, c.tenant.id],
+    );
+    const merges = createContactMergeService({ db: fx.dbs.app, clock: systemClock });
+    const outcome = await whileDeleting(c, tier.id, 'tier', () =>
+      settled(merges.mergeContacts(owner, { keepContactId: kept.id, mergeContactId: merged })),
+    );
+    expect(outcome).toBe('done');
+    expect(await attributesOf(kept.id)).toEqual({});
+    await contactsSvc().createField(owner, { label: 'Tier', type: 'choice', options: ['Silver'] });
+    expect(await attributesOf(kept.id)).toEqual({});
+  });
+
+  it('a deletion waits for a write holding the field, then removes its value', async () => {
+    const { c, owner, tier } = await setup();
+    const { id } = await contactsSvc().createContact(owner, { phone: nextPhone() });
+    // A write in the service's order: the company's lock, the field's row, then the contact.
+    const writer = await fx.dbs.adminPool.connect();
+    let deletion: Promise<string> | undefined;
+    try {
+      await writer.query('BEGIN');
+      await writer.query(
+        `SELECT pg_advisory_xact_lock_shared(hashtextextended('contact-fields:' || $1::text, 0))`,
+        [c.tenant.id],
+      );
+      await writer.query('SELECT 1 FROM app.contact_fields WHERE id = $1 FOR SHARE', [tier.id]);
+      await writer.query(
+        `UPDATE app.contacts SET attributes = attributes || '{"tier":"Gold"}' WHERE id = $1`,
+        [id],
+      );
+      const [lock] = (await writer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      deletion = settled(contactsSvc().deleteField(owner, tier.id));
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+            [lock!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the deletion is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await writer.query('COMMIT');
+      writer.release();
+    }
+    expect(await deletion).toBe('done');
     expect(await attributesOf(id)).toEqual({});
   });
 

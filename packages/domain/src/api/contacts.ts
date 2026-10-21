@@ -31,7 +31,7 @@ import {
   type AttributeValue,
   type FieldShape,
 } from '../contacts/fields';
-import { lockContactFieldValues } from '../contacts/field-definitions';
+import { lockContactFieldValues, lockContactFieldsForMerge } from '../contacts/field-definitions';
 import { normalizePhone } from '../contacts/phone';
 import type { OutboundDeps } from '../messaging/outbound';
 import { encodeKeysetCursor, parseInput } from '../validation';
@@ -917,8 +917,8 @@ export async function apiMergeContacts(
     if (!exists.has(data.mergeContactId)) {
       throw await apiContactNotFound(tx, ctx.tenant.id, data.mergeContactId);
     }
-    // Values move under the contact-field lock, as a member's merge moves them (ADR-407).
-    await lockContactFieldValues(tx, ctx.tenant.id);
+    // Values move under the contact-field locks, as a member's merge moves them (ADR-407).
+    await lockContactFieldsForMerge(tx, ctx.tenant.id);
     const res = await tx.execute<{ summary: unknown }>(
       sql`select app.merge_contacts(${contactId}::uuid, ${data.mergeContactId}::uuid) as summary`,
     );

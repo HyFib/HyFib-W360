@@ -47,8 +47,13 @@ An independent review found one High and one Medium; both are fixed, with the Lo
 - **Medium:** only the API locked field rows `FOR SHARE` before the contact (ADR-112), so a field
   deleted while a member, an import, a bulk edit, an automation or a Flow wrote its value could
   leave a value behind for a field added again with the key. These writers now read the fields
-  `FOR SHARE` after the advisory lock and before the contact (Flow answers now read them before
-  locking the contact); an integration test races a member's write with a deletion.
+  `FOR SHARE` after the advisory lock and before the contact, only the rows of the fields they
+  write (Flow answers now read them before locking the contact). Merges copy values unfiltered in
+  `app.merge_contacts`, so both merge paths lock every field row first. Integration tests race a
+  member's write, a bulk edit and a merge with a deletion, and a deletion with a write holding the
+  field. Not raced: imports, automation steps and Flow answers (their lock order is reviewed). A
+  Flow answer's inbound transaction can already hold its contact from an earlier message, so a
+  deletion of one of its fields can deadlock with it; PostgreSQL detects it and the job retries.
 - DEPLOYMENT now says old servers also fail segments, campaigns and API filters naming a choice
   field (500s), including after a rollback. The contact page sends only changed values and shows a
   value its options no longer hold as a disabled option. The W-048 matrix row is `implemented`

@@ -70,6 +70,24 @@ const matching = (tenantId: string, ref: ContactFieldRef) =>
   );
 
 /**
+ * Locks every field row of the company `FOR SHARE` after the contact-field lock, for a merge of two
+ * contacts (ADR-224, ADR-407): `app.merge_contacts` copies the merged contact's values into the
+ * kept one unfiltered, so a field being deleted must finish first (its values are then gone from
+ * both contacts) or wait for the merge (and then removes the value from the kept contact). Every
+ * row, not only the keys the two contacts hold now, because a value added to either before the
+ * function locks them would otherwise be copied unseen. Merges are rare and short; renames and
+ * deletions wait for them.
+ */
+export async function lockContactFieldsForMerge(tx: Tx, tenantId: string): Promise<void> {
+  await lockContactFieldValues(tx, tenantId);
+  await tx
+    .select({ id: contactFields.id })
+    .from(contactFields)
+    .where(eq(contactFields.tenantId, tenantId))
+    .for('share');
+}
+
+/**
  * Adds a field, its key made from the label unless given. A company's additions take turns under one
  * lock, so two at once cannot both pass the limit; a key the company has is refused, naming `key`.
  */
@@ -201,9 +219,14 @@ export async function setContactFieldOptions(
 
 /**
  * Deletes a field and its values on every contact; null when the company has no such field. The
- * field row goes first, then the contacts: a change of a contact's values locks the fields it names
- * before the contact (ADR-112), so it waits for the deletion, or the deletion for it, and its value
- * is removed either way.
+ * field row goes first, then the contacts. Every write of values (members' forms, imports, bulk
+ * edits, automation steps, Flow answers and the API) locks the rows of the fields it names `FOR
+ * SHARE`, and a merge every row (`lockContactFieldsForMerge`), before it writes the contact
+ * (ADR-112, ADR-407), so each waits for the deletion and then no longer finds the field, or the
+ * deletion waits for it and removes its value. A Flow answer is saved in an inbound transaction
+ * that may already hold the contact from an earlier message; a deletion waiting on that contact
+ * then deadlocks with it, which PostgreSQL detects, failing one of the two (the inbound job is
+ * retried).
  */
 export async function deleteContactField(
   tx: Tx,
