@@ -17813,26 +17813,33 @@ Decision: ADR-385's design, for contacts, through the same functions.
   committed. Each writer then locks the rows of the fields it writes `FOR SHARE` (only those, so
   other fields' renames never wait for it), still before the contact, in the order a field's
   deletion takes them (ADR-112), so a value written while its field is being deleted is refused once
-  the deletion commits, or removed by it. A deletion then locks the contacts holding a value
-  `FOR NO KEY UPDATE` in id order before removing the values, so it waits for any transaction
-  holding one of those contacts. Bulk field edits and imports lock the contacts they may change `FOR NO KEY UPDATE`
+  the deletion commits, or removed by it. A deletion then locks the contacts holding a value `FOR NO
+KEY UPDATE` in id order before removing the values, so it waits for any transaction holding one of
+  those contacts. Bulk field edits and imports lock the contacts they may change `FOR NO KEY UPDATE`
   in id order too (they never change `tenant_id` or `id`, the only key other tables reference), so
-  neither crosses a deletion, and automation steps and foreign key checks do not wait for them. An
-  import locks every existing contact the file names before writing and writes values as a patch
-  over the locked row, so neither a deleted field's value nor a member's concurrent change is
-  written back from an earlier read. A merge locks every field row, since `app.merge_contacts`
-  copies the merged contact's values unfiltered. What can still cycle, each detected by PostgreSQL,
-  which fails one transaction: a bulk tag edit or the API's call changing many contacts (both lock
-  `FOR UPDATE`, as they change tags, which automation steps take turns on through their key share
-  lock) with an automation step waiting for a field being deleted and that deletion; a contact
-  created or merged during an import, locked out of id order; and a Flow answer whose inbound
-  transaction already holds some contact locked by an earlier message of the same webhook change (an
-  earlier form answer, or the name filled in when a new identity joins an existing contact) that has
-  a value of a field being deleted, possibly with a change of options too. A member's or key's
-  request then gets a conflict to retry; a failed automation step rolls back and its run stays due,
-  so its job or the minute sweep runs it again; a failed inbound change rolls back whole, its
-  receipt is marked failed and the webhook job retries it with backoff, skipping changes already
-  committed. Writers: the contact page and new-contact form, CSV import, bulk field edits (ADR-238),
+  neither crosses a deletion in id order; automation steps' key share locks and foreign key checks
+  (tags, consent events, a message's conversation) do not wait for them, while steps that set a
+  field or create a deal, Flow answers and a first name from WhatsApp wait until they commit. An
+  import that adds tags locks `FOR UPDATE` instead, as bulk tag edits do, so automation steps adding
+  a tag take turns with it; it does not itself keep a contact under the 50 tags members and steps
+  keep (an existing limit, not changed here). An import locks every existing contact the file names
+  before writing and writes values as a patch over the locked row, so neither a deleted field's
+  value nor a member's concurrent change is written back from an earlier read. A merge locks every
+  field row, since `app.merge_contacts` copies the merged contact's values unfiltered. What can
+  still cycle, each detected by PostgreSQL, which fails one transaction: a bulk tag edit, the API's
+  call changing many contacts or an import that adds tags (all lock `FOR UPDATE`, as they change
+  tags, which automation steps take turns on through their key share lock) with an automation step
+  waiting for a field being deleted and that deletion; the contact a merge kept during an import,
+  locked after the import's other contacts and possibly out of id order (a contact created meanwhile
+  has a later id); and a Flow answer whose inbound transaction already holds some contact locked by
+  an earlier message of the same webhook change (an earlier form answer, or the name filled in when
+  a new identity joins an existing contact) that has a value of a field being deleted, possibly with
+  a change of options too. A member's or key's request then gets a conflict, which the member or the
+  API client sends again; a failed automation step rolls back and its run stays due, so its job or
+  the minute sweep runs it again (each failure counts toward the five failed attempts in a row after
+  which the run ends with `step_error`); a failed inbound change rolls back whole, its receipt is
+  marked failed and the webhook job retries it with backoff, skipping changes already committed.
+  Writers: the contact page and new-contact form, CSV import, bulk field edits (ADR-238),
   `POST`/`PATCH /contacts` and the call that changes many (through `lockFields`), automation steps
   that set a field, Flow answers saved into fields (which read the fields before locking the
   contact), and merges by members and through the API (ADR-224, ADR-227), whose values move

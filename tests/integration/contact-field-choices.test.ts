@@ -1,5 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
+import pg from 'pg';
 import { isAppError, systemClock, uuidv7 } from '@w360/core';
+import { createDatabase } from '@w360/db';
 import {
   apiCreateContact,
   apiCreateContactField,
@@ -654,6 +656,12 @@ describe('choice-type custom contact fields (ADR-407)', () => {
     }
     const [a, b, c] = made as [string, string, string];
     expect(a < b && b < c).toBe(true);
+    const storagePool = new pg.Pool({
+      connectionString: inject('dbUrls').app,
+      max: 1,
+      options: '-c enable_indexscan=off -c enable_indexonlyscan=off -c enable_bitmapscan=off',
+    });
+    const storageOrder = createDatabase(storagePool);
     // Rewrite a, then b, until each row version is stored after c's, so a scan in storage order
     // meets c first: the deletion's old locking (in its update's scan order) would lock c, then
     // wait for a, which the bulk edit holds while it waits for b, then for c.
@@ -714,8 +722,13 @@ describe('choice-type custom contact fields (ADR-407)', () => {
         { timeout: 4_000, interval: 20 },
       );
       // The deletion locks the contacts with a value in id order, so it waits for a, held by the
-      // bulk edit, without locking c first.
-      deletion = settled(contactsSvc().deleteField(owner, tier.id));
+      // bulk edit, without locking c first. It runs on connections that cannot scan an index, so
+      // a deletion that locked contacts in its scan's order (as before ADR-407's fix) would meet
+      // them in storage order (c first) and deadlock, rather than happen to meet them in id order
+      // through the (tenant_id, id) index; the fix sorts by id whatever the plan.
+      deletion = settled(
+        createContactsService({ db: storageOrder, clock: systemClock }).deleteField(owner, tier.id),
+      );
       await vi.waitFor(
         async () => {
           if ((await blockedBy(bulkPid)).length < 1) {
@@ -728,8 +741,12 @@ describe('choice-type custom contact fields (ADR-407)', () => {
       await holder.query('COMMIT');
       holder.release();
     }
-    expect(await bulk).toBe('done');
-    expect(await deletion).toBe('done');
+    try {
+      expect(await bulk).toBe('done');
+      expect(await deletion).toBe('done');
+    } finally {
+      await storagePool.end();
+    }
     for (const id of made) expect(await attributesOf(id)).toEqual({ city: 'Pune' });
   });
 

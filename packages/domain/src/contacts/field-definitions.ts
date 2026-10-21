@@ -237,26 +237,29 @@ export async function setContactFieldOptions(
  * The contacts holding a value are locked `FOR NO KEY UPDATE` in id order before their values are
  * removed, the order bulk edits, imports and the API's calls changing many contacts lock contacts
  * in, so a deletion waits for any transaction holding one of them and does not cross a bulk field
- * edit or an import, which lock `FOR NO KEY UPDATE` too. Not `FOR UPDATE`: an automation step
+ * edit or an import in id order (but see the cycles below). Not `FOR UPDATE`: an automation step
  * holds its contact `FOR KEY SHARE` while it waits for this field's row, which `FOR UPDATE` would
  * wait for in turn. The update that removes the values needs no stronger lock than this one.
  *
  * Cycles that remain, each detected by PostgreSQL, which fails one of the transactions:
- * - a bulk tag edit or the API's call changing many contacts locks them `FOR UPDATE` (they change
- *   tags, which automation steps take turns on through their key share lock); with an automation
- *   step holding one of those contacts while it waits for this field's row, and this deletion
- *   waiting for another of them, the three can cycle;
- * - a contact created or merged during an import is locked out of id order;
+ * - a bulk tag edit, the API's call changing many contacts or an import that adds tags locks them
+ *   `FOR UPDATE` (they change tags, which automation steps take turns on through their key share
+ *   lock); with an automation step holding one of those contacts while it waits for this field's
+ *   row, and this deletion waiting for another of them, the three can cycle;
+ * - the contact a merge kept during an import is locked after the import's other contacts, which
+ *   may be out of id order (a contact created meanwhile has a later id, so it is not);
  * - a Flow answer is saved in an inbound transaction that may already hold some contact locked by
  *   an earlier message of the same webhook change (an earlier form answer, or the name filled in
  *   when a new WhatsApp identity joins an existing contact); if that contact has a value of the
  *   field being deleted, the inbound transaction and the deletion cycle, possibly with a change of
  *   options waiting for this field's row while holding the company's lock the inbound one waits
  *   for.
- * Retries: a member's or key's request gets a conflict ("Please retry") and is sent again; a failed
- * automation step rolls back and its run stays due, so its job or the minute sweep runs it again; a
- * failed inbound change rolls back whole, its receipt is marked failed and the webhook job retries
- * it with backoff (changes already committed are skipped on replay).
+ * Retries: a member's or key's request gets a conflict ("Please retry"), which the member or the
+ * API client sends again; a failed automation step rolls back and its run stays due, so its job or
+ * the minute sweep runs it again (each failure counts toward `MAX_STEP_FAILURES`, 5 in a row, after
+ * which the run ends failed with `step_error`); a failed inbound change rolls back whole, its
+ * receipt is marked failed and the webhook job retries it with backoff (changes already committed
+ * are skipped on replay).
  */
 export async function deleteContactField(
   tx: Tx,

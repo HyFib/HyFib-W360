@@ -1619,20 +1619,23 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   ADR-112's row order and do not take the advisory lock; the row locks make them wait for writers of
   their field, or those writers for them, and after deleting the row they lock the contacts holding
   a value `FOR NO KEY UPDATE` in id order before removing the values. Bulk field edits and imports
-  lock contacts `FOR NO KEY UPDATE` in id order too; bulk tag edits and the API's many-contact calls
-  lock `FOR UPDATE` in id order (they change tags). Imports lock every existing contact the file
-  names up front (contacts created or merged meanwhile when found) and write `attributes || set -
-removed` (`attributePatch`). Renames of other fields never wait for writers. What can still cycle,
-  each detected by PostgreSQL, which fails one transaction: a bulk tag edit or the API's call
-  changing many contacts (both lock `FOR UPDATE`, as they change tags, which automation steps take
-  turns on through their key share lock) with an automation step waiting for a field being deleted
-  and that deletion; a contact created or merged during an import, locked out of id order; and a
-  Flow answer whose inbound transaction already holds some contact locked by an earlier message of
-  the same webhook change (an earlier form answer, or the name filled in when a new identity joins
-  an existing contact) that has a value of a field being deleted, possibly with a change of options
-  too. A member's or key's request then gets a conflict to retry; a failed automation step rolls
-  back and its run stays due, so its job or the minute sweep runs it again; a failed inbound change
-  rolls back whole, its receipt is marked failed and the webhook job retries it with backoff,
+  lock contacts `FOR NO KEY UPDATE` in id order too; bulk tag edits, the API's many-contact calls
+  and imports that add tags lock `FOR UPDATE` in id order (they change tags). Imports lock every
+  existing contact the file names up front (contacts created or merged meanwhile when found) and
+  write `attributes || set - removed` (`attributePatch`). Renames of other fields never wait for
+  writers. What can still cycle, each detected by PostgreSQL, which fails one transaction: a bulk
+  tag edit, the API's call changing many contacts or an import that adds tags (all lock `FOR
+UPDATE`, as they change tags, which automation steps take turns on through their key share lock)
+  with an automation step waiting for a field being deleted and that deletion; the contact a merge
+  kept during an import, locked after the import's other contacts and possibly out of id order (a
+  contact created meanwhile has a later id); and a Flow answer whose inbound transaction already
+  holds some contact locked by an earlier message of the same webhook change (an earlier form
+  answer, or the name filled in when a new identity joins an existing contact) that has a value of a
+  field being deleted, possibly with a change of options too. A member's or key's request then gets
+  a conflict, which the member or the API client sends again; a failed automation step rolls back
+  and its run stays due, so its job or the minute sweep runs it again (each failure counts toward
+  the five failed attempts in a row after which the run ends with `step_error`); a failed inbound
+  change rolls back whole, its receipt is marked failed and the webhook job retries it with backoff,
   skipping changes already committed. The contact page sends only changed values
   (`changedAttributes`, `lib/contact-fields.ts`). The company export carries `options`. Segments
   compare a choice as text (`FIELD_OPS.choice`: equals, not equals, set, not set); webhook field

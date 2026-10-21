@@ -65,20 +65,34 @@ An independent review found one High and one Medium; both are fixed, with the Lo
 - **Fourth review:** the import locked its contacts `FOR UPDATE`, which waits for an automation
   step's key share lock, bringing back a three-way cycle with a deletion. Imports and bulk field
   edits now lock `FOR NO KEY UPDATE` (they never change `tenant_id` or `id`, the only key other
-  tables reference; the number's unique index is partial, so it is no key), so automation steps and
-  foreign key checks no longer wait for them. Bulk tag edits and the API's many-contact calls keep
-  `FOR UPDATE`, since automation steps take turns with them on tags through that conflict. A contact
-  read during an import but not locked up front (created or merged into since) is now locked and
+  tables reference; the number's unique index is partial, so it is no key). Bulk tag edits and the
+  API's many-contact calls keep `FOR UPDATE`, since automation steps take turns with them on tags
+  through that conflict. A contact read during an import but not locked up front is now locked and
   read again before its patch is decided. The bulk edit and deletion race now uses three contacts
-  whose physical order differs from their id order (asserted by `ctid`), so it fails with the
-  deletion's old scan-order locking, and waits on the two pids involved. What can still cycle, each
-  detected by PostgreSQL and retried (a member's or key's request gets a conflict; a failed
-  automation step stays due and runs again; a failed inbound change is retried by the webhook job):
-  a bulk tag edit or the API's many-contact call with an automation step and a deletion; a contact
-  created or merged during an import; and a Flow answer whose inbound transaction already holds some
-  contact locked by an earlier message of the same webhook change that has a value of a field being
-  deleted, possibly with a change of options too. Not raced in tests: automation steps and Flow
-  answers (their lock order is reviewed).
+  whose storage order differs from their id order (asserted by `ctid`) and waits on the two pids
+  involved.
+- **Final review:** an import that adds tags now locks its contacts `FOR UPDATE` (otherwise `FOR NO
+KEY UPDATE`), so an automation step adding a tag takes turns with it; the import still does not
+  itself keep a contact under 50 tags (an existing limit, stated in ADR-407). A contact the import
+  re-locks is now kept for a number only when its locked row still has that number; a number whose
+  contact went (merged away, erased) or moved is read again, at most three times
+  (`settleLockedContacts`), and otherwise reported as a row error ("This contact changed during the
+  import; import it again"), so every row is counted once. That reconciliation is unit tested with a
+  scripted database (merged away, number moved, still changing, gone); no integration test forces
+  the interleaving. The bulk edit and deletion race now runs the deletion on connections with index
+  and bitmap scans turned off, so a deletion locking contacts in its scan order would meet them in
+  storage order (the one asserted) and deadlock; it is designed to fail without the fix, but like
+  every integration test here it has not been run, so that is not verified. Comments and docs now
+  say which waits remain: automation steps' key share locks and foreign key checks do not wait for
+  an import or a bulk field edit, while steps that set a field or create a deal, Flow answers and a
+  first name from WhatsApp do; a failed automation step counts toward the five failed attempts after
+  which its run ends with `step_error`; a conflict is resent by the member or the API client. What
+  can still cycle, each detected by PostgreSQL and retried: a bulk tag edit, the API's many-contact
+  call or an import that adds tags with an automation step and a deletion; the contact a merge kept
+  during an import; and a Flow answer whose inbound transaction already holds some contact locked by
+  an earlier message of the same webhook change that has a value of a field being deleted, possibly
+  with a change of options too. Not raced in tests: automation steps and Flow answers (their lock
+  order is reviewed).
 - DEPLOYMENT now says old servers also fail segments, campaigns and API filters naming a choice
   field (500s), including after a rollback. The contact page sends only changed values and shows a
   value its options no longer hold as a disabled option. The W-048 matrix row is `implemented`
@@ -112,7 +126,7 @@ An independent review found one High and one Medium; both are fixed, with the Lo
 | Command                                            | Result                                                               |
 | -------------------------------------------------- | -------------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
-| `pnpm test` (unit)                                 | 1,983 of 1,983 passed (181 files), after the third review's fixes    |
+| `pnpm test` (unit)                                 | 1,987 of 1,987 passed (181 files), after the final review's fixes    |
 | `pnpm build`                                       | passed                                                               |
 | migration 0320                                     | parses (pglast); not applied here                                    |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: no PostgreSQL or browser on this machine; CI runs them |

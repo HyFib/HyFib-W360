@@ -215,8 +215,50 @@ export interface ContactFieldRow {
   options: string[] | null;
 }
 
+/** How many times an import reads a number's contact again before reporting it as changing. */
+export const IMPORT_RELOCK_ROUNDS = 3;
+
+/**
+ * Finds, for each number, the contact that has it once that contact is locked (ADR-407): reads the
+ * contacts by number, locks those not locked yet, and keeps a number only when its locked contact
+ * still has it (a contact already locked cannot change). A contact merged away or erased before its
+ * lock does not come back, and one whose number changed is ignored for this number; those numbers
+ * are read again, at most `IMPORT_RELOCK_ROUNDS` times. A number found on no contact, or still
+ * changing, is `unsettled`, for the import to report as a row error, so every row of the file is
+ * counted once.
+ */
+export async function settleLockedContacts(
+  phones: readonly string[],
+  deps: {
+    selectByPhones: (phones: string[]) => Promise<(readonly [string, ContactLockRow])[]>;
+    lockContacts: (ids: string[]) => Promise<ContactLockRow[]>;
+    isLocked: (id: string) => boolean;
+  },
+): Promise<{ locked: Map<string, ContactLockRow>; unsettled: string[] }> {
+  const locked = new Map<string, ContactLockRow>();
+  let pending = [...new Set(phones)];
+  for (let round = 0; round < IMPORT_RELOCK_ROUNDS && pending.length > 0; round += 1) {
+    const found = await deps.selectByPhones(pending);
+    const already = found.filter(([, e]) => deps.isLocked(e.id));
+    const fresh = await deps.lockContacts(
+      found.filter(([, e]) => !deps.isLocked(e.id)).map(([, e]) => e.id),
+    );
+    const freshById = new Map(fresh.map((e) => [e.id, e]));
+    for (const [phone, e] of already) locked.set(phone, e);
+    for (const [phone, e] of found) {
+      const row = freshById.get(e.id);
+      if (row && row.phoneE164 === phone) locked.set(phone, row);
+    }
+    pending = pending.filter((phone) => !locked.has(phone));
+    // A number no contact has now was found by nobody: reading it again finds nobody either.
+    const seen = new Set(found.map(([phone]) => phone));
+    if (pending.every((phone) => !seen.has(phone))) break;
+  }
+  return { locked, unsettled: pending };
+}
+
 /** A contact as an import reads it once locked. */
-interface ContactLockRow {
+export interface ContactLockRow {
   id: string;
   phoneE164: string | null;
   displayName: string | null;
@@ -528,8 +570,10 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
    * waits for before it changes a tag, so the two take turns on a contact's tags. A field edit
    * changes only `attributes`, never `tenant_id` or `id` (the only key other tables reference;
    * the number's unique index is partial, so no key), so it locks `FOR NO KEY UPDATE` (ADR-407):
-   * automation steps and foreign key checks (a tag, a message's conversation) do not wait for it,
-   * and it cannot join a deletion and an automation step in a cycle.
+   * automation steps' key share locks and foreign key checks (tags, consent events, a message's
+   * conversation) do not wait for it, and it cannot join a deletion and an automation step in a
+   * cycle; steps that set a field or create a deal, Flow answers and a first name from WhatsApp
+   * still wait until it commits.
    */
   async function lockMatching(
     tx: Tx,
@@ -1435,14 +1479,20 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
           return rows.flatMap((r) => (r.phoneE164 ? [[r.phoneE164, r] as const] : []));
         };
         /**
-         * Locks contacts the import may change `FOR NO KEY UPDATE` in id order, as bulk field edits
-         * and field deletions lock them, and reads them as they are once locked: values are written
-         * as a patch over the locked row, so a value a field's deletion removed meanwhile, or a
-         * member's change of another field, is never written back from an earlier read (ADR-407).
-         * The import changes the name, email and values, never `tenant_id` or `id` (the only key
-         * other tables reference), so automation steps and foreign key checks (an inbound message's
-         * conversation, a tag, a consent event) do not wait for it.
+         * Locks contacts the import may change in id order, as bulk edits and field deletions lock
+         * them, and reads them as they are once locked: values are written as a patch over the
+         * locked row, so a value a field's deletion removed meanwhile, or a member's change of
+         * another field, is never written back from an earlier read (ADR-407). An import that adds
+         * tags (a tag column or tags for every row) locks `FOR UPDATE`, as bulk tag edits do, so an
+         * automation step adding a tag (which takes its contact's key share lock, counts the tags,
+         * then adds one) takes turns with it. Otherwise `FOR NO KEY UPDATE`: the import changes the
+         * name, email and values, never `tenant_id` or `id` (the only key other tables reference),
+         * so automation steps' key share locks and foreign key checks (tags, consent events, a
+         * message's conversation) do not wait for it; steps that set a field or create a deal, Flow
+         * answers and a first name from WhatsApp still wait until it commits.
          */
+        const lockMode =
+          globalTags.length > 0 || opts.mapping.tags !== null ? 'update' : 'no key update';
         const lockedIds = new Set<string>();
         const lockContacts = async (ids: string[]) => {
           const rows: ContactLockRow[] = [];
@@ -1453,7 +1503,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
                 .from(contacts)
                 .where(and(eq(contacts.tenantId, ctx.tenant.id), inArray(contacts.id, part)))
                 .orderBy(asc(contacts.id))
-                .for('no key update')),
+                .for(lockMode)),
             );
           }
           for (const row of rows) lockedIds.add(row.id);
@@ -1461,8 +1511,10 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         };
         if (opts.updateExisting) {
           // Every contact the file names that exists now, locked before any is changed, all in id
-          // order. Contacts created or merged during the import are found below and locked then,
-          // out of id order (a rare cycle PostgreSQL detects; the member imports again).
+          // order. A contact merged into, or created by another request, during the import is
+          // found below and locked then; a created one has a later id (UUIDv7) than those locked
+          // here, a kept contact of a merge may not, so that rare case can cycle, which
+          // PostgreSQL detects (the member imports again).
           const known: string[] = [];
           for (const part of chunks([...records.keys()], 1000)) {
             for (const [, e] of await selectByPhones(part)) known.push(e.id);
@@ -1506,14 +1558,28 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
           }
           if (opts.updateExisting) {
             // A contact read here but not locked above (created or merged into since) is locked
-            // now and read again, so the patch is decided on the locked row.
-            const unlocked = [...existing.values()].filter((e) => !lockedIds.has(e.id));
-            if (unlocked.length > 0) {
-              for (const phone of unlocked.map((e) => e.phoneE164)) {
-                if (phone) existing.delete(phone);
-              }
-              for (const e of await lockContacts(unlocked.map((u) => u.id))) {
-                if (e.phoneE164) existing.set(e.phoneE164, e);
+            // now and read again, so the patch is decided on the locked row; a number whose
+            // contact keeps changing is reported instead of being dropped or applied elsewhere.
+            const pending = [...existing]
+              .filter(([, e]) => !lockedIds.has(e.id))
+              .map(([phone]) => phone);
+            if (pending.length > 0) {
+              for (const phone of pending) existing.delete(phone);
+              const settledRows = await settleLockedContacts(pending, {
+                selectByPhones,
+                lockContacts,
+                isLocked: (id) => lockedIds.has(id),
+              });
+              for (const [phone, e] of settledRows.locked) existing.set(phone, e);
+              for (const phone of settledRows.unsettled) {
+                const r = records.get(phone);
+                if (r) {
+                  messages.push({
+                    row: r.line,
+                    level: 'error',
+                    message: 'This contact changed during the import; import it again.',
+                  });
+                }
               }
             }
           }

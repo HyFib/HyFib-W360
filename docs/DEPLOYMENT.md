@@ -2004,17 +2004,20 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    any transaction holding a contact that has a value of it (an import or a bulk edit over that
    contact), and later writes of that field wait behind it. Writers of values wait on each other's
    contact row locks, as before. An import with "update existing contacts" now locks every existing
-   contact the file names `FOR NO KEY UPDATE` in id order for its whole transaction (up to 5,000,
-   unchanged ones included); members' and keys' changes of those contacts wait for it, while inbound
-   messages, tags, consent events and automation steps do not. Bulk field edits lock their contacts
-   `FOR NO KEY UPDATE` too (bulk tag edits keep `FOR UPDATE`). Rare deadlocks remain between the
-   API's many-contact calls or bulk tag edits, automation steps and a field's deletion, and around
-   imports and Flow answers during a deletion; PostgreSQL detects them and the failed request, step
-   or inbound change is retried (ADR-407). Do deletions in quiet hours on busy companies. Rolling an
-   image back leaves the column, checks and grant in place; an older release then fails the same way
-   for choice values, and every segment, campaign and API filter naming a choice field fails with
-   500s, until the choice fields are deleted (which removes their values and leaves those segments
-   refused as naming a field that does not exist).
+   contact the file names in id order for its whole transaction (up to 5,000, unchanged ones
+   included): `FOR NO KEY UPDATE`, or `FOR UPDATE` when it adds tags. Members' and keys' changes of
+   those contacts, automation steps that set a field or create a deal, Flow answers and a first name
+   from WhatsApp wait for it; automation steps' key share locks and foreign key checks (an inbound
+   message's conversation, tags, consent events) wait only for an import that adds tags. Bulk field
+   edits lock their contacts `FOR NO KEY UPDATE` too (bulk tag edits keep `FOR UPDATE`). Rare
+   deadlocks remain between the API's many-contact calls, bulk tag edits or imports that add tags,
+   automation steps and a field's deletion, and around imports and Flow answers during a deletion;
+   PostgreSQL detects them and the failed request, step or inbound change is retried (ADR-407). Do
+   deletions in quiet hours on busy companies. Rolling an image back leaves the column, checks and
+   grant in place; an older release then fails the same way for choice values, and every segment,
+   campaign and API filter naming a choice field fails with 500s, until the choice fields are
+   deleted (which removes their values and leaves those segments refused as naming a field that does
+   not exist).
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

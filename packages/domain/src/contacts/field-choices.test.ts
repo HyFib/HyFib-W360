@@ -29,10 +29,13 @@ import {
   sameOptions,
 } from './fields';
 import {
+  IMPORT_RELOCK_ROUNDS,
   attributePatch,
   createContactsService,
   createFieldSchema,
   sameFieldShape,
+  settleLockedContacts,
+  type ContactLockRow,
 } from './service';
 
 const tier = { label: 'Tier', type: 'choice' as const, options: ['Gold', 'Silver', 'Bronze'] };
@@ -421,6 +424,90 @@ describe('the patch an import writes over a locked contact (ADR-407)', () => {
     expect(attributePatch({}, {})).toBeNull();
     // Values compare by type: the number 3 is not the text "3".
     expect(attributePatch({ n: '3' }, { n: 3 })).toEqual({ set: { n: 3 }, removed: [] });
+  });
+});
+
+describe('an import’s contacts found after its first locks (ADR-407)', () => {
+  const contact = (id: string, phone: string | null): ContactLockRow => ({
+    id,
+    phoneE164: phone,
+    displayName: null,
+    email: null,
+    attributes: {},
+  });
+  /**
+   * A database whose reads by number and locks answer from scripts, one per round, recording what
+   * was asked; `locked` holds the ids locked before.
+   */
+  function scripted(
+    reads: Record<string, ContactLockRow>[],
+    locks: ((ids: string[]) => ContactLockRow[])[],
+    locked: string[] = [],
+  ) {
+    const asked: { read: string[][]; lock: string[][] } = { read: [], lock: [] };
+    let round = 0;
+    let lockRound = 0;
+    return {
+      asked,
+      deps: {
+        selectByPhones: async (phones: string[]) => {
+          asked.read.push(phones);
+          const byPhone = reads[round++] ?? {};
+          return phones.flatMap((p) => (byPhone[p] ? [[p, byPhone[p]] as const] : []));
+        },
+        lockContacts: async (ids: string[]) => {
+          asked.lock.push(ids);
+          return (locks[lockRound++] ?? (() => []))(ids);
+        },
+        isLocked: (id: string) => locked.includes(id),
+      },
+    };
+  }
+
+  it('keeps a number whose contact is locked with it, and one already locked', async () => {
+    const { deps, asked } = scripted(
+      [{ p1: contact('x', 'p1'), p2: contact('y', 'p2') }],
+      [() => [contact('x', 'p1')]],
+      ['y'],
+    );
+    const result = await settleLockedContacts(['p1', 'p2'], deps);
+    expect([...result.locked.keys()].sort()).toEqual(['p1', 'p2']);
+    expect(result.locked.get('p1')?.id).toBe('x');
+    expect(result.unsettled).toEqual([]);
+    expect(asked.lock).toEqual([['x']]);
+  });
+
+  it('follows a number to the contact a merge kept when its first contact went before the lock', async () => {
+    const { deps, asked } = scripted(
+      [{ p1: contact('merged', 'p1') }, { p1: contact('kept', 'p1') }],
+      [() => [], () => [contact('kept', 'p1')]],
+    );
+    const result = await settleLockedContacts(['p1'], deps);
+    expect(result.locked.get('p1')?.id).toBe('kept');
+    expect(result.unsettled).toEqual([]);
+    expect(asked.read).toEqual([['p1'], ['p1']]);
+  });
+
+  it('never applies a number to a contact that has another number once locked', async () => {
+    const { deps } = scripted([{ p1: contact('x', 'p1') }, {}], [() => [contact('x', 'p9')]]);
+    const result = await settleLockedContacts(['p1'], deps);
+    expect(result.locked.size).toBe(0);
+    expect(result.unsettled).toEqual(['p1']);
+  });
+
+  it('reports a number still changing after its rounds, or that no contact has any more', async () => {
+    const reads = Array.from({ length: IMPORT_RELOCK_ROUNDS + 1 }, (_, i) => ({
+      p1: contact(`c${i}`, 'p1'),
+    }));
+    const { deps, asked } = scripted(
+      reads,
+      reads.map(() => () => []),
+    );
+    const changing = await settleLockedContacts(['p1'], deps);
+    expect(changing.unsettled).toEqual(['p1']);
+    expect(asked.read).toHaveLength(IMPORT_RELOCK_ROUNDS);
+    const gone = scripted([{ p1: contact('x', 'p1') }, {}], [() => []]);
+    expect((await settleLockedContacts(['p1'], gone.deps)).unsettled).toEqual(['p1']);
   });
 });
 
