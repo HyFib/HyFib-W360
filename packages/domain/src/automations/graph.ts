@@ -1421,7 +1421,46 @@ function httpStepIssues(node: NodeOf<'http_request'>, refs: GraphReferences): st
     const refusal = savedHeaderSecretRefusal(item.header, node.headers, refs.secrets?.keys());
     if (refusal) out.push(refusal);
   }
+  // A step that saves values from the response must keep each secret apart from other text, or a
+  // server echoing the header could hand back a short secret disguised inside a longer word.
+  if (node.save.length > 0) {
+    for (const header of node.headers) {
+      const problem = secretAdjacencyProblem(header.name, header.value);
+      if (problem) out.push(problem);
+    }
+  }
   return out;
+}
+
+const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
+
+/**
+ * Why a header value's `{{secret.<name>}}` touches a letter, a digit or another placeholder, or
+ * null (ADR-406). A step that saves response values could otherwise wrap a short secret in letters
+ * (`q{{secret.pin}}q`) or repeat it so that an echo no longer shows it as a token; a separator
+ * (space, -, :, =, comma, ;, / or .) beside it is fine.
+ */
+export function secretAdjacencyProblem(headerName: string, value: string): string | null {
+  const spans = [...value.matchAll(PLACEHOLDER_RE)].map((m) => ({
+    start: m.index,
+    end: m.index + m[0].length,
+    name: (m[1] ?? '').toLowerCase(),
+  }));
+  for (const span of spans) {
+    if (!span.name.startsWith('secret.') || !SECRET_NAME_RE.test(span.name.slice(7))) continue;
+    const before = value[span.start - 1];
+    const after = value[span.end];
+    const touches =
+      (before !== undefined && LETTER_OR_DIGIT.test(before)) ||
+      (after !== undefined && LETTER_OR_DIGIT.test(after)) ||
+      spans.some(
+        (other) => other !== span && (other.end === span.start || other.start === span.end),
+      );
+    if (touches) {
+      return `In the ${headerName} header, put a separator (a space, -, :, =, comma, ;, / or .) between {{secret.${span.name.slice(7)}}} and the text or placeholder beside it, so that HyFib can recognise the secret if the server sends it back.`;
+    }
+  }
+  return null;
 }
 
 /**

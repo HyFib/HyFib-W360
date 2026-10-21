@@ -25,7 +25,7 @@ import {
   type Tx,
 } from '@w360/db';
 import type { JobSigner } from '../jobs/envelope';
-import { echoedSecret } from './echo';
+import { adjacentSecrets, echoMatcher } from './echo';
 import type { JobQueue } from '../jobs/queue';
 import {
   AUTOMATION_LIMITS,
@@ -335,6 +335,11 @@ export interface SaveGuard {
   secretNames?: Iterable<string>;
   /** The secret values the request carried. */
   secretValues?: Iterable<string>;
+  /**
+   * Those of them the request sent touching a letter, a digit or another secret (`adjacentSecrets`,
+   * a step published before the separator check): found anywhere in a value, not only as tokens.
+   */
+  looseSecretValues?: Iterable<string>;
 }
 
 /**
@@ -413,7 +418,7 @@ export interface SavedValues {
  * code, clipped as answers are (to 1,000 UTF-16 code units, never splitting an emoji). A missing
  * or non-scalar value and a path into a body that is not JSON save nothing. A refused header, a
  * value holding a secret the request carried and one that may be an echo cut inside a secret
- * (checked on the whole value before clipping, in the encodings `echoedSecret` reads) are left out
+ * (checked on the whole value before clipping, in the encodings `echoMatcher` reads) are left out
  * and named in `dropped`.
  */
 export function savedValuesFrom(
@@ -423,7 +428,8 @@ export function savedValuesFrom(
 ): SavedValues {
   const out: SavedValues = { values: {}, dropped: {} };
   if (save.length === 0) return out;
-  const secretValues = [...(guard.secretValues ?? [])];
+  // One matcher per response: each secret's patterns are prepared once for every value saved.
+  const echoes = echoMatcher(guard.secretValues ?? [], guard.looseSecretValues ?? []);
   const checks = {
     requestHeaders: guard.requestHeaders ?? [],
     secretNames: [...(guard.secretNames ?? [])],
@@ -439,7 +445,7 @@ export function savedValuesFrom(
     }
     const value = clipText(raw, AUTOMATION_LIMITS.answerLength);
     // A server that echoes the request would otherwise hand a secret to whoever reads the answers.
-    const echo = echoedSecret(raw, value, secretValues);
+    const echo = echoes(raw, value);
     if (echo !== null) {
       out.dropped[item.saveAs] = echo;
       continue;
@@ -704,6 +710,11 @@ async function send(egress: EgressClient, claimed: Claimed): Promise<SendOutcome
             })),
             secretNames: claimed.secretNames,
             secretValues: claimed.secrets.values(),
+            // Secrets a step published before the separator check sends touching other text.
+            looseSecretValues: [...adjacentSecrets(claimed.request.headers)].flatMap((name) => {
+              const value = claimed.secrets.get(name);
+              return value === undefined ? [] : [value];
+            }),
           })
         : { values: {}, dropped: {} },
     };

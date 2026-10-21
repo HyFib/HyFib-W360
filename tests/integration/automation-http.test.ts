@@ -1117,12 +1117,12 @@ describe('web request settings', () => {
     await svc.addDomain(owner, { domain: '*.partner.test' });
 
     await expectAppError(
-      svc.saveSecret(owner, { name: 'shop_token', domain: 'other.test', value: 'x' }),
+      svc.saveSecret(owner, { name: 'shop_token', domain: 'other.test', value: 'xxxx-value' }),
       'validation_failed',
       /allowed domains/,
     );
     await expectAppError(
-      svc.saveSecret(owner, { name: 'Shop-Token', domain: HOST, value: 'x' }),
+      svc.saveSecret(owner, { name: 'Shop-Token', domain: HOST, value: 'xxxx-value' }),
       'validation_failed',
     );
     await expectAppError(
@@ -1130,7 +1130,7 @@ describe('web request settings', () => {
       'validation_failed',
     );
     await expectAppError(
-      svc.saveSecret(marketer, { name: 'shop_token', domain: HOST, value: 'x' }),
+      svc.saveSecret(marketer, { name: 'shop_token', domain: HOST, value: 'xxxx-value' }),
       'forbidden',
     );
     const created = await svc.saveSecret(owner, { name: 'shop_token', domain: HOST, value: TOKEN });

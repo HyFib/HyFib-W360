@@ -17665,27 +17665,44 @@ Decision:
   address in it; that address is then an answer like any other (T355).
 - **Echoed secrets:** the worker leaves out a value, from any source, that holds a secret value
   the request carried, so a server echoing the request does not hand the secret to whoever reads
-  the run's answers or a message sends it on. The check (`automations/echo.ts`) runs on the whole
-  value before it is clipped, so padding cannot move a secret across the 1,000-character cut. It
-  reads the value as written and in the encodings ordinary echoes use: JSON string escapes
-  (`\/`, `\"`, `\u002F`), URL and form encoding (`%2F`, `+`), XML and HTML character references
-  (`&#x2F;`, `&#47;`, `&sol;`), and the secret in base64 or base64url at any of the three
-  alignments, in each of those forms (base64 written with `\/` or `%2B`). A secret of eight
-  characters or more counts anywhere in the value; a shorter one (a PIN) only as a whole token, with
-  no letter or digit right before or after it, so `482913` is found in `pin=482913` but not in
-  `1482913`, and a status of 201 is left out only when a secret is exactly `201`. A value whose
-  last four or more characters (an escape cut short ignored) are the start of a long secret, after
-  other text, before or after clipping, is left out as a possible cut echo, so a server that cuts
-  its echo inside a secret reveals at most its first three characters; a value that is only the
-  start of a secret ("live" against `live_9f8a…`) is saved. A secret the server transforms in any
-  other way (hashed, split, encrypted, encoded twice, base64 wrapped in lines, a number parsed and
-  written again without its leading zeros, or another encoding) is not recognised: allowing a
-  domain still means trusting its server (ADR-043).
-- **Short secrets are still accepted:** Settings → Web requests keeps accepting secrets of any
-  length, since some company APIs use short PINs and refusing them would only push them into a
-  header as plain text. Their echoes are found as whole tokens (above). Settings does not warn
-  about existing short secrets: values are write-only and encrypted, so the page cannot know a
-  length without decrypting.
+  the run's answers or a message sends it on. The check (`automations/echo.ts`, one matcher per
+  response) runs on the whole value before it is clipped, so padding cannot move a secret across
+  the 1,000-character cut. It reads the value as written and in the encodings ordinary echoes use:
+  JSON string escapes (`\/`, `\"`, `\u002F`), URL and form encoding (`%2F`, `+`), XML and HTML
+  character references (`&#x2F;`, `&#47;`, `&sol;`), and a secret of eight characters or more in
+  base64 or base64url at any of the three alignments, in each of those forms (base64 written with
+  `\/` or `%2B`). A secret of six characters or more counts anywhere in the value. A shorter one
+  (one to five characters, a PIN) counts as a whole token: no letter or digit right before it when
+  it starts with one, nor right after it when it ends with one, so `4829` is found in `pin=4829`
+  and `#123` in `x#123`, but `4829` not in `148291`, and a status of 201 is left out only when a
+  secret is exactly `201`. A short secret the request sent touching a letter, a digit or another
+  secret part (a step published before the separator check below) counts anywhere instead, for
+  that call (`adjacentSecrets` over the headers as rendered).
+- **Cut echoes:** a value whose last characters (an escape cut short ignored) are the start of a
+  secret of eight characters or more is left out as a possible cut echo: four or more characters
+  after other text ("Bearer sk_l"), or eight or more when nothing precedes them (a JSON field
+  holding the first 64 characters of a token). So a value of up to seven characters that is a
+  secret's bare start is saved ("live" against `live_9f8a…`), and a value ending in four to seven
+  characters of a secret's start after other text is dropped even when it is ordinary data
+  (`Environment: live`, `mode=live`): that fails safe, with its own reason.
+- **Separators beside a secret in a header:** because short secrets are matched as tokens, a
+  member who can edit automations but not see secrets could otherwise build the adjacency on
+  purpose (`X-Probe: q{{secret.crm_pin}}q`, a secret twice in a row, `%41` or a placeholder right
+  before it) so that an echo hides the secret inside a longer word, then strip the padding from
+  the saved answer. In a step that saves response values, a `{{secret.<name>}}` placeholder that
+  touches a letter, a digit or another placeholder is refused by the checks run when the draft is
+  saved (shown as an error) and before publishing or a test run ("In the X-Probe header, put a
+  separator (a space, -, :, =, comma, ;, / or .) between {{secret.crm_pin}} and the text or
+  placeholder beside it, so that HyFib can recognise the secret if the server sends it back."). It
+  is a check, not part of the graph's schema, because published versions are parsed again when
+  they run and must not break; for those, the worker's `adjacentSecrets` rule above applies.
+- **Secret length:** new secrets, and new values for existing ones, need at least four characters
+  (`WEB_REQUEST_LIMITS.secretValueMinLength`, "Secret values need at least 4 characters."): a one
+  to three character secret would leave out ordinary values ("1" in "price 1.5"). Secrets saved
+  shorter before keep working. Short PINs of four or more characters stay accepted, since refusing
+  them would push them into headers as plain text; Settings says "At least 4 characters." beside
+  the value. It does not warn about existing short secrets: values are write-only and encrypted,
+  so the page cannot know a length without decrypting.
 - **The answers left out are recorded:** each refused header (`refused_header`), a header the step
   sends a secret in or named like a company secret (`secret_header`), each echoed secret
   (`echoed_secret`) and each possible cut echo (`possible_cut_echo`) is recorded by answer name with
@@ -17693,8 +17710,9 @@ Decision:
   `dropped_values` (migration 0319, written with the outcome and fixed with it by the call's
   guard). The run page's web request table shows them ("Not saved: ref (it held a secret the
   request sent, which the server echoed)", in the step's order), and the runbook tells operators to
-  replace a secret that was echoed and to check the company's server for a possible cut echo. The names are configuration, not customer content: exported with the call and
-  deleted with its run.
+  replace a secret that was echoed and to check the company's server for a possible cut echo.
+  The names are configuration, not customer content: exported with the call and deleted with its
+  run.
 - **Editor:** each saved value has "Value N from" (JSON path, Header, Body text, Status code) and
   the input its source needs: the path, the header's name, or a line saying what is saved. The
   domain's `withHttpSaveSource` changes a value's source keeping its answer name; the simulator
@@ -17709,8 +17727,14 @@ Decision:
   rolling web servers back makes such drafts unreadable to the editor.
 
 Known limits: a value is saved only from a 2xx response; secrets the server transforms other than
-as above are not recognised; headers are matched as Node presents them, so one Node drops as a
-duplicate (a second Content-Type) cannot be saved.
+as above are not recognised (hashed, split, encrypted, encoded twice, base64 wrapped in lines, a
+number parsed and written again without its leading zeros); a value that is a secret's bare start
+can reveal up to seven characters; a secret's start followed by other text (an ellipsis or a
+closing quote: `Invalid key sk_live_abcd... (truncated)`, a text body ending `"}`) is not
+recognised, so a server that truncates its echo that way can reveal that much; a short secret
+(under eight characters) is not looked for in base64; a short secret run into letters or digits by
+the server, not by the step, is not recognised; headers are matched as Node presents them, so one
+Node drops as a duplicate (a second Content-Type) cannot be saved.
 
 Not built: values from failure responses, the body of a non-UTF-8 charset, binary bodies, a part
 of a text body (a pattern or a line), and saving all headers at once.
@@ -17734,3 +17758,12 @@ ignored on both sides), that base64 inside JSON escapes or percent-encoding was 
 checked in every decoded form), and nits (a numeric secret parsed again is a transform not
 recognised, answers left out in the step's order, `authn`, `authz`, `passcode` and `hmac`
 refused). All were fixed.
+A third review found no High. It found two Mediums: a member could defeat the token match of a
+short secret from the step itself (`q{{secret.pin}}q`, the secret twice, `%41` or a fullwidth
+digit beside it), now refused by the separator check and, for steps already published, matched
+anywhere by the worker, with six- and seven-character secrets matched anywhere always; and the
+"after other text" rule let a value that is a long secret's bare start through at any length (now
+from eight characters), with the claim that a cut echo reveals at most three characters removed.
+It also found that one to three character secrets drop ordinary values (new ones now need four)
+and nits (the token boundary only on a side where the secret's edge is a letter or digit, one
+matcher per response). All were fixed.

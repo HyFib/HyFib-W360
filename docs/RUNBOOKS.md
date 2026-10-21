@@ -919,7 +919,9 @@ request carried (as written, JSON-escaped, URL-encoded, as character references 
 treat that secret as exposed to whoever can read that server's responses and logs, replace it at
 its source and in Settings → Web requests, and ask the company to stop echoing request headers.
 `possible_cut_echo` means the value ended with four or more characters of a secret's start after
-other text, as a server cutting its echo short would send: it may be ordinary data, so ask the
+other text, or was the first eight or more characters of a secret on its own, as a server cutting
+its echo short would send: it may be ordinary data (`mode=live` against a secret starting `live_`),
+so ask the
 company whether their server echoes request headers before replacing the secret. An echo the
 server transforms otherwise is not recognised. Values are never logged; check the
 response with the company's own tools.

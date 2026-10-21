@@ -3,17 +3,21 @@
  * company server that echoes the request back would otherwise hand the secret to whoever reads the
  * run's answers. The value is checked before it is clipped, as written and in the forms ordinary
  * echoes use (JSON escapes, URL and form encoding, XML and HTML character references), and for the
- * secret in base64 or base64url at any alignment, in each of those forms. A secret shorter than
- * `ECHO_LONG_SECRET_LENGTH` (a PIN, say) counts only as a whole token, so the status "201" is not
- * taken for part of a secret. A value whose end is the start of a long secret (at least
- * `ECHO_MIN_OVERLAP` characters), before or after clipping, is a possible cut echo when the overlap
- * follows other text: a cut inside a secret must not save most of it. Secrets the server transforms
- * in other ways (hashed, split, re-encoded twice, encrypted, a number parsed and written again)
- * are not recognised.
+ * secret (eight characters or more) in base64 or base64url at any alignment, in each of those
+ * forms. A secret of six characters or more counts anywhere; a shorter one (a PIN, say) only as a
+ * whole token, so the status "201" is not taken for part of a secret, unless the request sent it
+ * touching a letter, a digit or another secret (`loose`), when it counts anywhere too. A value whose
+ * end is the start of a long secret is a possible cut echo: after other text from
+ * `ECHO_MIN_OVERLAP` characters, with nothing before it from `ECHO_LONG_SECRET_LENGTH` (so "live"
+ * against `live_9f8a…` is saved), before or after clipping. Secrets the server transforms in other
+ * ways (hashed, split, re-encoded twice, encrypted, a number parsed and written again, a prefix
+ * followed by an ellipsis) are not recognised.
  */
 
-/** Secrets at least this long are found anywhere; shorter ones only as whole tokens. */
+/** Secrets at least this long are also looked for in base64 and as the start of a cut echo. */
 export const ECHO_LONG_SECRET_LENGTH = 8;
+/** Secrets at least this long count anywhere in a value; shorter ones only as whole tokens. */
+export const ECHO_ANYWHERE_SECRET_LENGTH = 6;
 /** The fewest characters at a value's end that count as the start of a secret. */
 export const ECHO_MIN_OVERLAP = 4;
 
@@ -107,23 +111,95 @@ function base64Forms(secret: string): string[] {
 }
 
 /**
- * Whether the last characters of `text` (at least `ECHO_MIN_OVERLAP`) begin `needle`, after other
- * text: a value that is only the first word of a secret ("live" against `live_9f8a…`) is ordinary
- * data, not an echo. (A clipped value is 1,000 characters, so its overlap always follows text.)
+ * Whether the last characters of `text` begin `needle`: from `ECHO_MIN_OVERLAP` characters after
+ * other text, or from `ECHO_LONG_SECRET_LENGTH` when the whole value is the start of the needle. A
+ * value that is only a secret's first word ("live" against `live_9f8a…`) is ordinary data; one
+ * that is its first eight characters or more is not.
  */
 function endsWithStartOf(text: string, needle: string): boolean {
-  const longest = Math.min(needle.length - 1, text.length - 1);
-  for (let k = longest; k >= ECHO_MIN_OVERLAP; k -= 1) {
+  for (let k = Math.min(needle.length - 1, text.length); k >= ECHO_MIN_OVERLAP; k -= 1) {
+    if (k === text.length && k < ECHO_LONG_SECRET_LENGTH) continue;
     if (needle.startsWith(text.slice(-k))) return true;
   }
   return false;
 }
 
+const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** Whether `text` holds `token` with no letter or digit right before or after it. */
-function holdsToken(text: string, token: string): boolean {
-  return new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(token)}(?![\\p{L}\\p{N}])`, 'u').test(text);
+/**
+ * A short secret as a whole token: no letter or digit right before it when it starts with one, nor
+ * right after it when it ends with one (`#123` is found in `x#123`).
+ */
+function tokenPattern(secret: string): RegExp {
+  const before = LETTER_OR_DIGIT.test(secret.slice(0, 1)) ? '(?<![\\p{L}\\p{N}])' : '';
+  const after = LETTER_OR_DIGIT.test(secret.slice(-1)) ? '(?![\\p{L}\\p{N}])' : '';
+  return new RegExp(`${before}${escapeRegExp(secret)}${after}`, 'u');
+}
+
+interface PreparedSecret {
+  secret: string;
+  /** Set for a short secret matched as a whole token; null when it counts anywhere. */
+  token: RegExp | null;
+  /** The secret and its base64 forms, for cut echoes (long secrets only). */
+  starts: string[];
+  /** Its base64 forms, looked for anywhere (long secrets only). */
+  encoded: string[];
+}
+
+/** Finds secrets in values; built once per response, used for each value it saves. */
+export type EchoMatcher = (raw: string, clipped: string) => EchoFinding | null;
+
+/**
+ * A matcher for `secrets` (the values the request carried). `loose` are secrets the request sent
+ * touching a letter, a digit or another secret, which count anywhere whatever their length.
+ */
+export function echoMatcher(secrets: Iterable<string>, loose: Iterable<string> = []): EchoMatcher {
+  const looseSet = new Set(loose);
+  const prepared: PreparedSecret[] = [...new Set(secrets)]
+    .filter((s) => s.length > 0)
+    .map((secret) => {
+      const long = secret.length >= ECHO_LONG_SECRET_LENGTH;
+      const anywhere = secret.length >= ECHO_ANYWHERE_SECRET_LENGTH || looseSet.has(secret);
+      const encoded = long ? base64Forms(secret) : [];
+      return {
+        secret,
+        token: anywhere ? null : tokenPattern(secret),
+        starts: long ? [secret, ...encoded] : [],
+        encoded,
+      };
+    });
+  const forms = new Map<string, string[]>();
+  const formsOf = (text: string) => {
+    let found = forms.get(text);
+    if (!found) {
+      found = decodedForms(text);
+      forms.set(text, found);
+    }
+    return found;
+  };
+  return (raw, clipped) => {
+    if (prepared.length === 0) return null;
+    const whole = formsOf(raw);
+    for (const { secret, token, encoded } of prepared) {
+      const found = token
+        ? whole.some((form) => token.test(form))
+        : whole.some((form) => form.includes(secret)) ||
+          encoded.some((e) => whole.some((form) => form.includes(e)));
+      if (found) return 'echoed_secret';
+    }
+    // The end of the value, before and (when it was cut) after clipping, an escape cut short ignored.
+    const ends = [
+      ...formsOf(raw.replace(PARTIAL_ESCAPE_END, '')).concat(raw),
+      ...(clipped !== raw ? formsOf(clipped.replace(PARTIAL_ESCAPE_END, '')).concat(clipped) : []),
+    ];
+    for (const { starts } of prepared) {
+      if (starts.some((needle) => ends.some((form) => endsWithStartOf(form, needle)))) {
+        return 'possible_cut_echo';
+      }
+    }
+    return null;
+  };
 }
 
 /**
@@ -131,42 +207,37 @@ function holdsToken(text: string, token: string): boolean {
  * `secrets` (`echoed_secret`) or ends with the start of a long one (`possible_cut_echo`); null when
  * neither.
  */
-export function echoedSecret(
+export const echoedSecret = (
   raw: string,
   clipped: string,
   secrets: Iterable<string>,
-): EchoFinding | null {
-  const checked = [...new Set(secrets)].filter((s) => s.length > 0);
-  if (checked.length === 0) return null;
-  const whole = decodedForms(raw);
-  const cut = clipped !== raw;
-  for (const secret of checked) {
-    if (secret.length < ECHO_LONG_SECRET_LENGTH) {
-      // A short secret (a PIN) as a whole token only: "201" is not part of "482913", nor "12" of it.
-      if (whole.some((form) => holdsToken(form, secret))) return 'echoed_secret';
-      continue;
-    }
-    if (whole.some((form) => form.includes(secret))) return 'echoed_secret';
-    const encodings = base64Forms(secret);
-    if (encodings.some((encoded) => whole.some((form) => form.includes(encoded)))) {
-      return 'echoed_secret';
-    }
-  }
-  // The end of the value, before and (when it was cut) after clipping, an escape cut short ignored.
-  const ends = [
-    ...decodedForms(raw.replace(PARTIAL_ESCAPE_END, '')).concat(raw),
-    ...(cut ? decodedForms(clipped.replace(PARTIAL_ESCAPE_END, '')).concat(clipped) : []),
-  ];
-  for (const secret of checked) {
-    if (secret.length < ECHO_LONG_SECRET_LENGTH) continue;
-    const needles = [secret, ...base64Forms(secret)];
-    if (needles.some((needle) => ends.some((form) => endsWithStartOf(form, needle)))) {
-      return 'possible_cut_echo';
-    }
-  }
-  return null;
-}
+  loose: Iterable<string> = [],
+): EchoFinding | null => echoMatcher(secrets, loose)(raw, clipped);
 
 /** Whether a value holds a secret or may be an echo cut inside one (`echoedSecret` not null). */
 export const holdsSecret = (raw: string, clipped: string, secrets: Iterable<string>): boolean =>
   echoedSecret(raw, clipped, secrets) !== null;
+
+/**
+ * The secrets a request's headers send touching a letter, a digit or another secret (a step
+ * published before ADR-406's separator check): their echoes count anywhere, not only as tokens.
+ */
+export function adjacentSecrets(
+  headers: readonly { parts: readonly ({ text: string } | { secret: string })[] }[],
+): Set<string> {
+  const names = new Set<string>();
+  for (const { parts } of headers) {
+    parts.forEach((part, i) => {
+      if (!('secret' in part)) return;
+      const touches = (
+        neighbour: { text: string } | { secret: string } | undefined,
+        edge: number,
+      ) =>
+        neighbour !== undefined &&
+        ('secret' in neighbour ||
+          LETTER_OR_DIGIT.test(neighbour.text.slice(edge < 0 ? -1 : 0, edge < 0 ? undefined : 1)));
+      if (touches(parts[i - 1], -1) || touches(parts[i + 1], 1)) names.add(part.secret);
+    });
+  }
+  return names;
+}

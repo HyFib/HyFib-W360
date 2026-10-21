@@ -25,12 +25,14 @@ saved nothing. This closes P4-02's "response headers or non-JSON bodies as value
   name, or a secret name of six or more characters as whole parts), is refused by the publish
   checks. The worker repeats them with the company's current secret names.
 - **Echoed secrets** (`automations/echo.ts`): the worker leaves out a value holding a secret value
-  the request carried (eight characters or more anywhere; a shorter one, such as a PIN, as a whole
-  token), checked on the whole value before clipping, as written and JSON-unescaped, URL- and
+  the request carried (six characters or more anywhere; one to five as a whole token, or anywhere
+  when the request sent it touching other text), checked on the whole value before clipping, as written and JSON-unescaped, URL- and
   form-decoded, with character references read, and for the secret in base64 or base64url at every
-  alignment in each of those forms; a value ending, after other text, with four or more characters
-  of a long secret's start is left out as a possible cut echo. Secrets transformed otherwise are
-  not recognised (T355). Settings still accepts short secrets (documented in ADR-406).
+  alignment in each of those forms (secrets of eight or more); a value ending with a long secret's
+  start (four or more characters after other text, eight or more on its own) is left out as a
+  possible cut echo. Secrets transformed otherwise are not recognised (T355). In a step that saves
+  values, a secret placeholder touching a letter, a digit or another placeholder is refused; new
+  secret values need four characters.
 - **Answers left out are recorded:** by name and reason (`refused_header`, `secret_header`,
   `echoed_secret`, `possible_cut_echo`; never the value) in `automation_http_calls.dropped_values` (migration 0319,
   with the call's guard extended), returned in the run view's `httpCalls` and shown on the run
@@ -63,6 +65,20 @@ was missed (now checked in every decoded form); answers left out are shown in th
 `authn`, `authz`, `passcode` and `hmac` are refused; T355 names a numeric secret parsed again as an
 unrecognised transform. 0319 was changed in place (unapplied): only its comment.
 
+### Third review fixes (fourth commit)
+
+A third review found no High and two Mediums, fixed: a member could defeat a short secret's token
+match from the step's own header (`q{{secret.pin}}q`, the secret twice, `%41` or a fullwidth digit
+beside it), now refused by a separator check at save and publish (`secretAdjacencyProblem`) and,
+for steps published before, matched anywhere by the worker (`adjacentSecrets` over the rendered
+headers), with six- and seven-character secrets matched anywhere always; and a value that is a
+long secret's bare start was saved at any length (now dropped from eight characters; ADR-406 and
+T355 no longer claim a cut echo reveals at most three characters, and name truncated prefixes
+followed by an ellipsis as unrecognised). Also: new secret values need four characters; the token
+boundary applies only on a side where the secret's edge is a letter or digit; one matcher per
+response. The worker's passing of those secrets is not covered by a test (a published step with
+the adjacency can no longer be created through the service).
+
 ### Tests
 
 - Unit (`automations/http-save.test.ts`, `outside-json.test.ts`, `apps/web` labels): each source,
@@ -88,7 +104,7 @@ unrecognised transform. 0319 was changed in place (unapplied): only its comment.
   removed); for the first review's fixes 25/25 (24/25 first: base64url was not distinguished from
   base64 until the test used a secret whose encoding holds +); for the second review's fixes 14/14
   (13/14 first: the order of answers left out survived until the test's order differed from the
-  object's). The worker's loading of secret names and
+  object's); for the third review's fixes 11/11. The worker's loading of secret names and
   the column, its check and guard are covered by the integration tests only.
 
 ### Test commands and results (local, 2026-10-21)
@@ -96,7 +112,7 @@ unrecognised transform. 0319 was changed in place (unapplied): only its comment.
 | Command                                            | Result                                                     |
 | -------------------------------------------------- | ---------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                      |
-| `pnpm test` (unit)                                 | 1,987 of 1,987 passed (180 files)                          |
+| `pnpm test` (unit)                                 | 1,991 of 1,991 passed (180 files)                          |
 | `pnpm build`                                       | passed                                                     |
 | migration 0319 parse check (pglast)                | parsed, PL/pgSQL included                                  |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: no local PostgreSQL or browser; CI runs them |

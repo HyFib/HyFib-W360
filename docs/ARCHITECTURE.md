@@ -804,7 +804,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   are matched without regard to case (repeated ones joined with ", "), a text body only from a
   textual UTF-8 content type; headers that carry credentials or sessions, a header the step sends a
   secret in or one named like a company secret are refused, and the worker leaves out any value
-  holding a secret the request carried, checked before clipping and in ordinary encodings
+  holding a secret the request carried, checked before clipping and in ordinary encodings (a secret
+  under six characters as a whole token; a step that saves values may not put a secret right
+  beside a letter, a digit or another placeholder; new secret values need four characters)
   (`automations/echo.ts`; secrets transformed otherwise are not recognised). Answers left out are
   recorded by name and reason in `dropped_values` (migration 0319) and shown on the run page
   (`savedValuesFrom`, ADR-406).

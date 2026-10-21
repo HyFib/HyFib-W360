@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AUTOMATION_LIMITS,
   checkGraph,
+  secretAdjacencyProblem,
   describeHttpSave,
   headerNamesSecret,
   parseGraph,
@@ -10,7 +11,14 @@ import {
   type AutomationGraph,
   type HttpSave,
 } from './graph';
-import { ECHO_LONG_SECRET_LENGTH, echoedSecret, holdsSecret } from './echo';
+import {
+  adjacentSecrets,
+  ECHO_ANYWHERE_SECRET_LENGTH,
+  ECHO_LONG_SECRET_LENGTH,
+  echoedSecret,
+  holdsSecret,
+} from './echo';
+import { webRequestSecretSchema } from './web-requests';
 import {
   responseHeaderValue,
   savedValuesFrom as savedFrom,
@@ -226,6 +234,49 @@ describe('saved value sources in the graph (ADR-406)', () => {
     expect(headerNamesSecret('Shop-Ref', 'x_shop_ref')).toBe(true);
     expect(headerNamesSecret('X-Shop-Ref-Id', 'x_shop_ref')).toBe(true);
     expect(headerNamesSecret('X-Request-Id', 'x_id')).toBe(false);
+  });
+
+  it('refuses at publish a secret touching a letter, a digit or a placeholder in a step that saves values', () => {
+    const errors = (value: string, save: unknown[] = [{ from: 'status', saveAs: 'ref' }]) =>
+      checkGraph(graphOf(rawGraph(save, [{ name: 'X-Probe', value }])), {
+        allowedDomains: ['api.shop.example'],
+        secrets: new Map([['crm_pin', 'api.shop.example']]),
+      })
+        .filter((i) => i.level === 'error')
+        .map((i) => i.message);
+    const message =
+      'In the X-Probe header, put a separator (a space, -, :, =, comma, ;, / or .) between {{secret.crm_pin}} and the text or placeholder beside it, so that HyFib can recognise the secret if the server sends it back.';
+    for (const value of [
+      'q{{secret.crm_pin}}q',
+      '{{secret.crm_pin}}{{secret.crm_pin}}',
+      '%41{{secret.crm_pin}}',
+      '{{secret.crm_pin}}1',
+      '{{name}}{{secret.crm_pin}}',
+      '{{ SECRET.crm_pin }}x',
+    ]) {
+      expect(errors(value), value).toContain(message);
+      expect(secretAdjacencyProblem('X-Probe', value), value).toBe(message);
+    }
+    for (const value of [
+      'Bearer {{secret.crm_pin}}',
+      'pin={{secret.crm_pin}}; v=1',
+      'a-{{secret.crm_pin}}-b',
+      'k:{{secret.crm_pin}},{{secret.crm_pin}}/x.{{name}}',
+    ]) {
+      expect(errors(value), value).toEqual([]);
+    }
+    // A step that saves nothing from the response has nothing to hand back.
+    expect(errors('q{{secret.crm_pin}}q', [])).not.toContain(message);
+  });
+
+  it('refuses new secret values shorter than four characters', () => {
+    const parse = (value: string) =>
+      webRequestSecretSchema.safeParse({ domain: 'api.shop.example', name: 'pin', value });
+    expect(parse('482').error?.issues.map((i) => i.message)).toStrictEqual([
+      'Secret values need at least 4 characters.',
+    ]);
+    expect(parse('').error?.issues[0]?.message).toBe('Enter the secret value.');
+    expect(parse('4829').success).toBe(true);
   });
 
   it('a value saved by any source is an answer later steps can use', () => {
@@ -614,31 +665,44 @@ describe('values saved from a response (ADR-406)', () => {
     expect(holdsSecret(url, url, [plusy])).toBe(true);
   });
 
-  it('finds a short secret (a PIN) only as a whole token, in every decoded form', () => {
+  it('finds a secret of six or seven characters anywhere, a shorter one as a whole token', () => {
     expect(ECHO_LONG_SECRET_LENGTH).toBe(8);
-    const pin = '482913';
-    const echo = (value: string) =>
+    expect(ECHO_ANYWHERE_SECRET_LENGTH).toBe(6);
+    const echo = (value: string, secret: string) =>
       savedFrom(
         response({ headers: { 'x-echo': value } }),
         [{ from: 'header', header: 'X-Echo', saveAs: 'h' }],
-        { secretValues: [pin] },
+        { secretValues: [secret] },
       ).dropped;
-    for (const value of [
-      '482913',
-      'pin=482913',
-      '{"pin":"482913"}',
-      'X-Pin: 482913.',
-      'a%20482913',
+    // Six and seven characters: inside other text too.
+    for (const [value, secret] of [
+      ['482913', '482913'],
+      ['ab482913', '482913'],
+      ['q482913q', '482913'],
+      ['order 14829137', '4829137'],
+      ['%41482913', '482913'],
     ]) {
-      expect(echo(value), value).toStrictEqual({ h: 'echoed_secret' });
+      expect(echo(value!, secret!), value).toStrictEqual({ h: 'echoed_secret' });
     }
-    for (const value of ['4829130', 'order 1482913', 'ab482913', '48291']) {
-      expect(echo(value), value).toStrictEqual({});
+    // Four and five characters: as a whole token only.
+    for (const value of ['pin=4829', '{"pin":"4829"}', 'X-Pin: 4829.', 'a%204829']) {
+      expect(echo(value, '4829'), value).toStrictEqual({ h: 'echoed_secret' });
     }
+    for (const [value, secret] of [
+      ['48290', '4829'],
+      ['order 148291', '48291'],
+      ['abcd4829x', '4829'],
+      ['482', '4829'],
+    ]) {
+      expect(echo(value!, secret!), value).toStrictEqual({});
+    }
+    // The boundary counts only on a side where the secret's own edge is a letter or digit.
+    expect(echoedSecret('x#123', 'x#123', ['#123'])).toBe('echoed_secret');
+    expect(echoedSecret('x#1234', 'x#1234', ['#123'])).toBeNull();
     // The status is digits only: it is left out only when it is a short secret exactly.
     expect(
       savedFrom(response({ status: 201 }), [{ from: 'status', saveAs: 'code' }], {
-        secretValues: ['20', '2012345', '01'],
+        secretValues: ['20', '01', '2012'],
       }),
     ).toStrictEqual({ values: { code: '201' }, dropped: {} });
     expect(
@@ -648,6 +712,58 @@ describe('values saved from a response (ADR-406)', () => {
     ).toStrictEqual({ values: {}, dropped: { code: 'echoed_secret' } });
     // A long secret is found anywhere.
     expect(holdsSecret('x20123456y', 'x20123456y', ['20123456'])).toBe(true);
+  });
+
+  it('finds a short secret anywhere when the request sent it touching other text', () => {
+    const pin = '4829';
+    const echoes = ['q4829q', '48294829', '%414829', '１4829', '١4829'];
+    for (const value of echoes) {
+      // As a token it would pass; sent touching text, it counts anywhere.
+      expect(echoedSecret(value, value, [pin]), value).toBeNull();
+      expect(echoedSecret(value, value, [pin], [pin]), value).toBe('echoed_secret');
+    }
+    // Which secrets the rendered headers send touching a letter, a digit or another secret.
+    expect(
+      [
+        ...adjacentSecrets([
+          { parts: [{ text: 'q' }, { secret: 'a' }, { text: 'q' }] },
+          { parts: [{ secret: 'b' }, { secret: 'c' }] },
+          { parts: [{ text: '%41' }, { secret: 'd' }] },
+          { parts: [{ secret: 'e' }, { text: '１' }] },
+          { parts: [{ text: 'Bearer ' }, { secret: 'f' }, { text: '; v=1' }] },
+          { parts: [{ secret: 'g' }] },
+        ]),
+      ].sort(),
+    ).toStrictEqual(['a', 'b', 'c', 'd', 'e']);
+    // The worker passes them on: a step published before the separator check loses the value.
+    expect(
+      savedFrom(
+        response({ headers: { 'x-echo': 'You sent q4829q' } }),
+        [{ from: 'header', header: 'X-Echo', saveAs: 'h' }],
+        { secretValues: [pin], looseSecretValues: [pin] },
+      ),
+    ).toStrictEqual({ values: {}, dropped: { h: 'echoed_secret' } });
+  });
+
+  it('leaves out a value that is the first eight or more characters of a secret', () => {
+    const secret = 'prefix_value_for_tests_only_x';
+    const value = (v: string) =>
+      savedFrom(
+        response({ body: Buffer.from(JSON.stringify({ ref: v })) }),
+        [{ path: 'ref', saveAs: 'ref' }],
+        { secretValues: [secret] },
+      );
+    for (const prefix of [secret.slice(0, 8), secret.slice(0, 20), secret.slice(0, -1)]) {
+      expect(value(prefix), prefix).toStrictEqual({
+        values: {},
+        dropped: { ref: 'possible_cut_echo' },
+      });
+    }
+    // Seven characters or fewer with nothing before them are ordinary data ("live").
+    expect(value(secret.slice(0, 7))).toStrictEqual({
+      values: { ref: secret.slice(0, 7) },
+      dropped: {},
+    });
   });
 
   it('finds base64 of a secret inside JSON escapes or percent-encoding', () => {
