@@ -1617,9 +1617,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   and Flow answers (the form's `field:` targets). Merges (the service's and the API's) lock every
   field row (`lockContactFieldsForMerge`), since `app.merge_contacts` copies values unfiltered.
   Deletions keep ADR-112's row order and do not take the advisory lock; the row locks make them
-  wait for writers of their field, or those writers for them. A Flow answer's inbound transaction
-  may already hold its contact from an earlier message; a deletion of one of its fields waiting on
-  that contact deadlocks with it, which PostgreSQL detects (the inbound job is retried). The contact page sends only
+  wait for writers of their field, or those writers for them, and after deleting the row they lock
+  the contacts holding a value `FOR NO KEY UPDATE` in id order (as bulk edits, imports and the
+  API's many-contact calls lock contacts) before removing the values. Imports lock the contacts
+  they change up front in id order and write `attributes || set - removed` (`attributePatch`).
+  Renames of other fields never wait for writers. A Flow answer is saved in an inbound transaction that may already hold some contact locked by an earlier message of the same webhook change (an earlier form answer, or the name filled in when a new WhatsApp identity joins an existing contact); if that contact has a value of a field being deleted, the two deadlock. PostgreSQL fails one: a failed deletion is reported to the member, who retries; a failed change rolls back whole, its receipt is marked failed and the webhook job retries it with backoff, skipping changes already committed. The contact page sends only
   changed values (`changedAttributes`, `lib/contact-fields.ts`). The company export carries
   `options`. Segments compare a choice as text
   (`FIELD_OPS.choice`: equals, not equals, set, not set); webhook field value filters tick options.

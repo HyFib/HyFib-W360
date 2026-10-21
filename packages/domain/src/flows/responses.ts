@@ -132,9 +132,11 @@ export async function recordFlowCompletion(
     // company's contact-field lock first, as every write of values takes it (ADR-407), then the
     // rows of the fields the form saves into, locked against a deletion before the contact, in the
     // order a deletion takes them (ADR-112); other fields are not locked. The inbound transaction
-    // may already hold this contact from an earlier message of the same webhook; a deletion of one
-    // of these fields waiting on it then deadlocks with this, which PostgreSQL detects (the job is
-    // retried).
+    // may already hold some contact locked by an earlier message of the same webhook change (an
+    // earlier form answer, or a name filled in when a new identity joined an existing contact);
+    // if that contact has a value of one of these fields while the field is being deleted, the
+    // two deadlock. PostgreSQL fails one: the change rolls back whole, its receipt is marked failed
+    // and the webhook job retries it with backoff (`deleteContactField` says more).
     const keys = [
       ...new Set(
         send.mapping.flatMap(({ target }) =>

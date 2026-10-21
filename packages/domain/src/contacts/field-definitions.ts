@@ -1,5 +1,14 @@
 import { AppError, uuidv7 } from '@w360/core';
-import { and, contactFields, contacts, eq, sql, type ContactFieldType, type Tx } from '@w360/db';
+import {
+  and,
+  asc,
+  contactFields,
+  contacts,
+  eq,
+  sql,
+  type ContactFieldType,
+  type Tx,
+} from '@w360/db';
 import {
   MAX_CONTACT_FIELDS,
   fieldKeyFromLabel,
@@ -223,10 +232,21 @@ export async function setContactFieldOptions(
  * edits, automation steps, Flow answers and the API) locks the rows of the fields it names `FOR
  * SHARE`, and a merge every row (`lockContactFieldsForMerge`), before it writes the contact
  * (ADR-112, ADR-407), so each waits for the deletion and then no longer finds the field, or the
- * deletion waits for it and removes its value. A Flow answer is saved in an inbound transaction
- * that may already hold the contact from an earlier message; a deletion waiting on that contact
- * then deadlocks with it, which PostgreSQL detects, failing one of the two (the inbound job is
- * retried).
+ * deletion waits for it and removes its value.
+ *
+ * The contacts holding a value are locked `FOR NO KEY UPDATE` in id order before their values are
+ * removed, the order bulk edits, imports and the API's calls changing many contacts lock contacts
+ * in, so a deletion waits for any transaction holding one of them and never crosses one locking
+ * them in the other order. Not `FOR UPDATE`: an automation step holds its contact `FOR KEY SHARE`
+ * while it waits for this field's row, which `FOR UPDATE` would wait for in turn. The update that
+ * removes the values needs no stronger lock than this one.
+ *
+ * A Flow answer is saved in an inbound transaction that may already hold some contact locked by an
+ * earlier message of the same webhook change (an earlier form answer, or the name filled in when a
+ * new WhatsApp identity joins an existing contact); if that contact has a value of the field being
+ * deleted, the two deadlock. PostgreSQL detects it and fails one: a failed deletion is reported to
+ * the member, who retries; a failed inbound change rolls back whole, its receipt is marked failed
+ * and the webhook job retries it with backoff (changes already committed are skipped on replay).
  */
 export async function deleteContactField(
   tx: Tx,
@@ -235,6 +255,12 @@ export async function deleteContactField(
 ): Promise<ContactFieldDefinition | null> {
   const [row] = await tx.delete(contactFields).where(matching(tenantId, ref)).returning(definition);
   if (!row) return null;
+  await tx
+    .select({ id: contacts.id })
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, tenantId), sql`${contacts.attributes} ? ${row.key}::text`))
+    .orderBy(asc(contacts.id))
+    .for('no key update');
   await tx
     .update(contacts)
     .set({ attributes: sql`${contacts.attributes} - ${row.key}::text` })

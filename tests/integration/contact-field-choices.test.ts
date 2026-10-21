@@ -90,19 +90,28 @@ const audits = (c: Company, action: string) =>
 /**
  * Deletes a field in the service's order (its row, then every contact's value) in a transaction
  * that waits until `start`'s work blocks on it, then finishes and commits; returns what the work
- * ended with.
+ * ended with. By default the work starts once the row is deleted; with `valuesFirst`, once the
+ * values are removed too, so the deletion holds those contacts while the work starts.
  */
 async function whileDeleting(
   c: Company,
   fieldId: string,
   key: string,
   start: () => Promise<string>,
+  valuesFirst = false,
 ): Promise<string> {
   const holder = await fx.dbs.adminPool.connect();
   let outcome: Promise<string> | undefined;
+  const removeValues = () =>
+    holder.query(
+      `UPDATE app.contacts SET attributes = attributes - $2::text
+        WHERE tenant_id = $1 AND attributes ? $2::text`,
+      [c.tenant.id, key],
+    );
   try {
     await holder.query('BEGIN');
     await holder.query('DELETE FROM app.contact_fields WHERE id = $1', [fieldId]);
+    if (valuesFirst) await removeValues();
     const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
     outcome = start();
     await vi.waitFor(
@@ -116,11 +125,7 @@ async function whileDeleting(
       { timeout: 4_000, interval: 20 },
     );
     // The work waits on the field's row without holding a contact, so the deletion goes on.
-    await holder.query(
-      `UPDATE app.contacts SET attributes = attributes - $2::text
-        WHERE tenant_id = $1 AND attributes ? $2::text`,
-      [c.tenant.id, key],
-    );
+    if (!valuesFirst) await removeValues();
   } finally {
     await holder.query('COMMIT');
     holder.release();
@@ -526,7 +531,11 @@ describe('choice-type custom contact fields (ADR-407)', () => {
   it('a deletion waits for a write holding the field, then removes its value', async () => {
     const { c, owner, tier } = await setup();
     const { id } = await contactsSvc().createContact(owner, { phone: nextPhone() });
-    // A write in the service's order: the company's lock, the field's row, then the contact.
+    // A write in the service's order (the company's lock, the field's row, then the contact),
+    // written here in SQL so it can be held at a known point. This proves the deletion waits for a
+    // transaction holding the field's row and its contact, then removes the value it wrote; it
+    // does not prove the order inside the deletion (removing values before deleting the row would
+    // also pass), which the member, bulk edit and merge races above cover from the other side.
     const writer = await fx.dbs.adminPool.connect();
     let deletion: Promise<string> | undefined;
     try {
@@ -558,6 +567,147 @@ describe('choice-type custom contact fields (ADR-407)', () => {
     }
     expect(await deletion).toBe('done');
     expect(await attributesOf(id)).toEqual({});
+  });
+
+  it('an import waits for a contact a field’s deletion holds, then keeps neither the deleted value nor drops the imported one', async () => {
+    const { c, owner, tier } = await setup();
+    const phone = nextPhone();
+    const { id } = await contactsSvc().createContact(owner, {
+      phone,
+      attributes: { city: 'Pune', tier: 'Gold' },
+    });
+    const marketer = await fx.ctx(c, c.marketer);
+    const importCity = () =>
+      settled(
+        contactsSvc().importContacts(marketer, {
+          text: `Phone,City\r\n${phone},Delhi`,
+          fileName: 'cities.csv',
+          mapping: { phone: 0, fields: { city: 1 } },
+          phoneFormat: 'international',
+          updateExisting: true,
+          consent: { mode: 'none' },
+        }),
+      );
+    // The deletion removes the value, holding the contact, while the import starts.
+    expect(await whileDeleting(c, tier.id, 'tier', importCity, true)).toBe('done');
+    expect(await attributesOf(id)).toEqual({ city: 'Delhi' });
+  });
+
+  it('an import waits for a member’s change of another field, then keeps it', async () => {
+    const { c, owner } = await setup();
+    const phone = nextPhone();
+    const { id } = await contactsSvc().createContact(owner, {
+      phone,
+      attributes: { city: 'Pune' },
+    });
+    const marketer = await fx.ctx(c, c.marketer);
+    const holder = await fx.dbs.adminPool.connect();
+    let outcome: Promise<string> | undefined;
+    try {
+      // A member's change as the service makes it: the contact locked, then written.
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM app.contacts WHERE id = $1 FOR UPDATE', [id]);
+      await holder.query(
+        `UPDATE app.contacts SET attributes = attributes || '{"tier":"Silver"}' WHERE id = $1`,
+        [id],
+      );
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      outcome = settled(
+        contactsSvc().importContacts(marketer, {
+          text: `Phone,City\r\n${phone},Delhi`,
+          fileName: 'cities.csv',
+          mapping: { phone: 0, fields: { city: 1 } },
+          phoneFormat: 'international',
+          updateExisting: true,
+          consent: { mode: 'none' },
+        }),
+      );
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+            [lock!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the import is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    expect(await outcome).toBe('done');
+    expect(await attributesOf(id)).toEqual({ city: 'Delhi', tier: 'Silver' });
+  });
+
+  it('a bulk edit and a field’s deletion over two contacts both finish, locking contacts in id order', async () => {
+    const { owner, tier } = await setup();
+    // Created in turn, so the first has the lower id (UUIDv7).
+    const first = await contactsSvc().createContact(owner, {
+      phone: nextPhone(),
+      tags: ['vip'],
+      attributes: { tier: 'Gold' },
+    });
+    const second = await contactsSvc().createContact(owner, {
+      phone: nextPhone(),
+      tags: ['vip'],
+      attributes: { tier: 'Silver' },
+    });
+    expect(first.id < second.id).toBe(true);
+    const blocked = async () =>
+      (
+        await fx.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0`,
+        )
+      )[0]!.n;
+    const holder = await fx.dbs.adminPool.connect();
+    let bulk: Promise<string> | undefined;
+    let deletion: Promise<string> | undefined;
+    try {
+      // The second contact is held, so the bulk edit locks the first and waits for the second.
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM app.contacts WHERE id = $1 FOR UPDATE', [second.id]);
+      bulk = settled(
+        contactsSvc().bulkSetField(owner, {
+          filter: { tag: 'vip' },
+          key: 'city',
+          value: 'Pune',
+          expectedCount: 2,
+        }),
+      );
+      await vi.waitFor(
+        async () => {
+          if ((await blocked()) < 1) throw new Error('the bulk edit is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+      // The deletion locks the contacts with a value in id order: it waits for the first.
+      deletion = settled(contactsSvc().deleteField(owner, tier.id));
+      await vi.waitFor(
+        async () => {
+          if ((await blocked()) < 2) throw new Error('the deletion is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    expect(await bulk).toBe('done');
+    expect(await deletion).toBe('done');
+    expect(await attributesOf(first.id)).toEqual({ city: 'Pune' });
+    expect(await attributesOf(second.id)).toEqual({ city: 'Pune' });
+  });
+
+  it('refuse more keys in one change than a company can have fields, before locking any', async () => {
+    const { owner } = await setup();
+    const { id } = await contactsSvc().createContact(owner, { phone: nextPhone() });
+    const attributes = Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`k${i}`, 'x']));
+    expect(await refusal(contactsSvc().updateContact(owner, id, { attributes }))).toMatchObject({
+      code: 'validation_failed',
+      paths: ['attributes'],
+    });
   });
 
   it('compare a choice in segments as text, whatever its case', async () => {

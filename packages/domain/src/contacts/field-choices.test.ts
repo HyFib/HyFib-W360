@@ -28,7 +28,12 @@ import {
   removedChosenOptions,
   sameOptions,
 } from './fields';
-import { createContactsService, createFieldSchema, sameFieldShape } from './service';
+import {
+  attributePatch,
+  createContactsService,
+  createFieldSchema,
+  sameFieldShape,
+} from './service';
 
 const tier = { label: 'Tier', type: 'choice' as const, options: ['Gold', 'Silver', 'Bronze'] };
 const read = (result: { ok: true; value: unknown } | { ok: false; message: string }) =>
@@ -395,6 +400,27 @@ describe('an import whose fields change while it reads the file (ADR-407)', () =
     // Deleted and added again with the same key as another type: another field, and another id.
     expect(sameFieldShape(text, { ...text, type: 'number' })).toBe(false);
     expect(sameFieldShape(row, { ...row, options: null })).toBe(false);
+  });
+});
+
+describe('the patch an import writes over a locked contact (ADR-407)', () => {
+  it('sets the values given and removes those given empty, as mergeAttributes would', () => {
+    expect(attributePatch({ city: 'Pune', tier: 'Gold' }, { city: 'Delhi' })).toEqual({
+      set: { city: 'Delhi' },
+      removed: [],
+    });
+    expect(attributePatch({ city: 'Pune' }, { tier: 'Gold', city: null })).toEqual({
+      set: { tier: 'Gold' },
+      removed: ['city'],
+    });
+  });
+
+  it('changes nothing for values the contact already has, or keys it has no value for', () => {
+    expect(attributePatch({ city: 'Pune', n: 3, vip: true }, { city: 'Pune', n: 3 })).toBeNull();
+    expect(attributePatch({ vip: false }, { vip: false, tier: null })).toBeNull();
+    expect(attributePatch({}, {})).toBeNull();
+    // Values compare by type: the number 3 is not the text "3".
+    expect(attributePatch({ n: '3' }, { n: 3 })).toEqual({ set: { n: 3 }, removed: [] });
   });
 });
 

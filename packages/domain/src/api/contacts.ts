@@ -250,6 +250,9 @@ const fieldShape = {
  */
 async function lockFields(tx: Tx, tenantId: string, keys: string[]): Promise<FieldDefinition[]> {
   if (keys.length === 0) return [];
+  if (keys.length > MAX_CONTACT_FIELDS) {
+    throw invalidField('fields', `A company has at most ${MAX_CONTACT_FIELDS} custom fields.`);
+  }
   await lockContactFieldValues(tx, tenantId);
   return tx
     .select(fieldShape)

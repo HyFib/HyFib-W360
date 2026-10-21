@@ -49,6 +49,7 @@ import {
   setContactFieldOptions,
 } from './field-definitions';
 import {
+  MAX_CONTACT_FIELDS,
   MAX_TAGS_PER_CONTACT,
   coerceFieldValue,
   fieldOptionsSchema,
@@ -212,6 +213,36 @@ export interface ContactFieldRow {
   type: ContactFieldType;
   /** A choice field's options, in order; null for every other type (ADR-407). */
   options: string[] | null;
+}
+
+/** A contact as an import reads it once locked. */
+interface ContactLockRow {
+  id: string;
+  phoneE164: string | null;
+  displayName: string | null;
+  email: string | null;
+  attributes: Record<string, AttributeValue>;
+}
+
+/**
+ * The patch an import writes over a contact's values (ADR-407), as `mergeAttributes` would change
+ * them: the values given set, the keys given null removed; null when it changes nothing, compared
+ * value by value with the locked row so an unchanged contact is not rewritten.
+ */
+export function attributePatch(
+  current: Readonly<Record<string, AttributeValue>>,
+  changes: Readonly<Record<string, AttributeValue | null>>,
+): { set: Record<string, AttributeValue>; removed: string[] } | null {
+  const set: Record<string, AttributeValue> = {};
+  const removed: string[] = [];
+  for (const [key, value] of Object.entries(changes)) {
+    if (value === null) {
+      if (Object.hasOwn(current, key)) removed.push(key);
+    } else if (!Object.hasOwn(current, key) || !Object.is(current[key], value)) {
+      set[key] = value;
+    }
+  }
+  return Object.keys(set).length > 0 || removed.length > 0 ? { set, removed } : null;
 }
 
 /**
@@ -420,6 +451,12 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
     keys: readonly string[],
   ): Promise<ContactFieldRow[]> {
     if (keys.length === 0) return [];
+    if (keys.length > MAX_CONTACT_FIELDS) {
+      const message = `A company has at most ${MAX_CONTACT_FIELDS} custom fields.`;
+      throw new AppError('validation_failed', message, {
+        issues: [{ path: 'attributes', message }],
+      });
+    }
     await lockContactFieldValues(tx, tenantId);
     return tx
       .select({
@@ -1376,19 +1413,49 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         let updated = 0;
         let skipped = 0;
         const touched = new Map<string, Row>(); // contact id -> row
+        const contactColumns = {
+          id: contacts.id,
+          phoneE164: contacts.phoneE164,
+          displayName: contacts.displayName,
+          email: contacts.email,
+          attributes: contacts.attributes,
+        };
         const selectByPhones = async (phones: string[]) => {
           const rows = await tx
-            .select({
-              id: contacts.id,
-              phoneE164: contacts.phoneE164,
-              displayName: contacts.displayName,
-              email: contacts.email,
-              attributes: contacts.attributes,
-            })
+            .select(contactColumns)
             .from(contacts)
             .where(and(eq(contacts.tenantId, ctx.tenant.id), inArray(contacts.phoneE164, phones)));
           return rows.flatMap((r) => (r.phoneE164 ? [[r.phoneE164, r] as const] : []));
         };
+        /**
+         * Locks contacts the import changes `FOR UPDATE` in id order, as bulk edits and field
+         * deletions lock them, and reads them as they are once locked: values are written as a
+         * patch over the locked row, so a value a field's deletion removed meanwhile, or a member's
+         * change of another field, is never written back from an earlier read (ADR-407).
+         */
+        const lockContacts = async (ids: string[]) => {
+          const rows: ContactLockRow[] = [];
+          for (const part of chunks([...ids].sort(), 1000)) {
+            rows.push(
+              ...(await tx
+                .select(contactColumns)
+                .from(contacts)
+                .where(and(eq(contacts.tenantId, ctx.tenant.id), inArray(contacts.id, part)))
+                .orderBy(asc(contacts.id))
+                .for('update')),
+            );
+          }
+          return rows;
+        };
+        if (opts.updateExisting) {
+          // Every contact the file names that exists now, locked before any is changed, all in id
+          // order; a contact another request adds meanwhile is locked when found below.
+          const known: string[] = [];
+          for (const part of chunks([...records.keys()], 1000)) {
+            for (const [, e] of await selectByPhones(part)) known.push(e.id);
+          }
+          await lockContacts(known);
+        }
         for (const part of chunks([...records.entries()], 500)) {
           const existing = new Map(await selectByPhones(part.map(([phone]) => phone)));
           const fresh = part
@@ -1421,7 +1488,11 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
             // Numbers another request created meanwhile are handled like existing contacts.
             const raced = fresh.map((f) => f.phoneE164).filter((p) => !insertedPhones.has(p));
             if (raced.length > 0) {
-              for (const [phone, e] of await selectByPhones(raced)) existing.set(phone, e);
+              const found = await selectByPhones(raced);
+              const locked = opts.updateExisting
+                ? await lockContacts(found.map(([, e]) => e.id))
+                : found.map(([, e]) => e);
+              for (const e of locked) if (e.phoneE164) existing.set(e.phoneE164, e);
             }
           }
           for (const [phone, e] of existing) {
@@ -1436,11 +1507,15 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
               });
               continue;
             }
-            const set: Partial<typeof contacts.$inferInsert> = {};
+            // The contact was locked above, so `e` is as it is now. Values are written as a patch
+            // (set the given values, remove those given empty), never as the whole object.
+            const set: { displayName?: string; email?: string; attributes?: SQL } = {};
             if (r.name && r.name !== e.displayName) set.displayName = r.name;
             if (r.email && r.email !== e.email) set.email = r.email;
-            const merged = mergeAttributes(e.attributes, r.attributes);
-            if (JSON.stringify(merged) !== JSON.stringify(e.attributes)) set.attributes = merged;
+            const patch = attributePatch(e.attributes, r.attributes);
+            if (patch) {
+              set.attributes = sql`(${contacts.attributes} || ${jsonbText(patch.set)}::jsonb) - ${sql.param(patch.removed)}::text[]`;
+            }
             if (Object.keys(set).length > 0) {
               await tx
                 .update(contacts)

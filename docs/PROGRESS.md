@@ -51,9 +51,18 @@ An independent review found one High and one Medium; both are fixed, with the Lo
   write (Flow answers now read them before locking the contact). Merges copy values unfiltered in
   `app.merge_contacts`, so both merge paths lock every field row first. Integration tests race a
   member's write, a bulk edit and a merge with a deletion, and a deletion with a write holding the
-  field. Not raced: imports, automation steps and Flow answers (their lock order is reviewed). A
-  Flow answer's inbound transaction can already hold its contact from an earlier message, so a
-  deletion of one of its fields can deadlock with it; PostgreSQL detects it and the job retries.
+  field (written in SQL to be held at a known point: it proves the deletion waits for and removes
+  the value, not the order inside the deletion, which the other races cover).
+- **Third review:** an import read existing contacts without locking them and wrote back the whole
+  object, so a field deleted meanwhile came back and a member's concurrent change was lost. It now
+  locks the contacts it changes `FOR UPDATE` in id order up front and writes a patch
+  (`attributes || set - removed`, `attributePatch`, unchanged contacts not rewritten). A deletion
+  locks the contacts holding a value `FOR NO KEY UPDATE` in id order before removing values (not
+  `FOR UPDATE`, which would wait for an automation step's key share lock while that step waits for
+  the field's row), so it cannot cross a bulk edit or an import. More than 50 keys in one change are
+  refused before any lock. Integration tests race an import with a deletion holding the contact and
+  with a member's change of another field, and a bulk edit with a deletion over two contacts. Not
+  raced: automation steps and Flow answers (their lock order is reviewed). A Flow answer is saved in an inbound transaction that may already hold some contact locked by an earlier message of the same webhook change (an earlier form answer, or the name filled in when a new WhatsApp identity joins an existing contact); if that contact has a value of a field being deleted, the two deadlock. PostgreSQL fails one: a failed deletion is reported to the member, who retries; a failed change rolls back whole, its receipt is marked failed and the webhook job retries it with backoff, skipping changes already committed.
 - DEPLOYMENT now says old servers also fail segments, campaigns and API filters naming a choice
   field (500s), including after a rollback. The contact page sends only changed values and shows a
   value its options no longer hold as a disabled option. The W-048 matrix row is `implemented`
@@ -87,7 +96,7 @@ An independent review found one High and one Medium; both are fixed, with the Lo
 | Command                                            | Result                                                               |
 | -------------------------------------------------- | -------------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
-| `pnpm test` (unit)                                 | 1,981 of 1,981 passed (181 files), after the review fixes            |
+| `pnpm test` (unit)                                 | 1,983 of 1,983 passed (181 files), after the third review's fixes    |
 | `pnpm build`                                       | passed                                                               |
 | migration 0320                                     | parses (pglast); not applied here                                    |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: no PostgreSQL or browser on this machine; CI runs them |

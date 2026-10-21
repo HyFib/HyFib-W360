@@ -17811,12 +17811,16 @@ Decision: ADR-385's design, for contacts, through the same functions.
   it shared before reading the fields and before locking a contact (`lockContactFieldValues`), so a
   value is never checked against options being replaced and a change of options counts every value
   committed. Each writer then locks the rows of the fields it writes `FOR SHARE` (only those, so
-  other fields' renames and deletions never wait for it), still before the contact, in the order a
-  field's deletion takes them (ADR-112), so a value written while its field is being deleted is
-  refused once the deletion commits, or removed by it. A merge locks every field row, since
-  `app.merge_contacts` copies the merged contact's values unfiltered. A Flow answer is saved in an
-  inbound transaction that may already hold its contact; a deletion of one of its fields waiting on
-  that contact deadlocks with it, which PostgreSQL detects (the inbound job is retried). Writers: the
+  other fields' renames never wait for it), still before the contact, in the order a field's
+  deletion takes them (ADR-112), so a value written while its field is being deleted is refused once
+  the deletion commits, or removed by it. A deletion then locks the contacts holding a value `FOR NO
+KEY UPDATE` in id order before removing the values, so it waits for any transaction holding one
+  of those contacts; writers wait on each other's contact locks, which bulk edits, imports, the
+  API's calls changing many contacts and deletions all take in id order. An import locks the
+  contacts it changes before writing and writes values as a patch over the locked row, so neither
+  a deleted field's value nor a member's concurrent change is written back from an earlier read. A
+  merge locks every field row, since `app.merge_contacts` copies the merged contact's values
+  unfiltered. A Flow answer is saved in an inbound transaction that may already hold some contact locked by an earlier message of the same webhook change (an earlier form answer, or the name filled in when a new WhatsApp identity joins an existing contact); if that contact has a value of a field being deleted, the two deadlock. PostgreSQL fails one: a failed deletion is reported to the member, who retries; a failed change rolls back whole, its receipt is marked failed and the webhook job retries it with backoff, skipping changes already committed. Writers: the
   contact page and new-contact form, CSV import, bulk field edits (ADR-238), `POST`/`PATCH
 /contacts` and the call that changes many (through `lockFields`), automation steps that set a
   field, Flow answers saved into fields (which now read the fields before locking the contact),
