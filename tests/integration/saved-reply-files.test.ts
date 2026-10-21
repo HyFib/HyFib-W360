@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { systemClock, uuidv7 } from '@w360/core';
+import { isAppError, systemClock, uuidv7 } from '@w360/core';
 import { authorizedTenantScope, sql } from '@w360/db';
 import {
   SAVED_REPLY_FILES_MAX_TOTAL_BYTES,
@@ -340,12 +340,20 @@ describe('the files saved replies carry (ADR-411)', () => {
     expect(
       await replies().openSavedReplyFile(await fx.ctx(other, other.owner), file.fileId),
     ).toBeNull();
-    // The runtime role may not change a stored file.
-    await expect(
-      fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), (tx) =>
+    // The runtime role may not change a stored file: PostgreSQL refuses it, which the database
+    // layer maps to forbidden ("Operation not permitted.") with the reason as its cause.
+    const refusal = await fx.dbs.app
+      .run(authorizedTenantScope(c.tenant.id, null), (tx) =>
         tx.execute(sql`update app.saved_reply_files set filename = 'renamed.png'`),
-      ),
-    ).rejects.toThrow(/permission denied/);
+      )
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(isAppError(refusal) ? refusal.code : refusal).toBe('forbidden');
+    const reasons: string[] = [];
+    for (let e: unknown = refusal; e instanceof Error; e = e.cause) reasons.push(e.message);
+    expect(reasons.join(' | ')).toMatch(/permission denied/);
   });
 
   it('lets members who reply use replies’ files, and only supervisors manage them', async () => {

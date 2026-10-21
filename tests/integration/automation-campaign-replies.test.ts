@@ -139,10 +139,19 @@ async function customer(c: Company, from = waId()) {
 
 async function campaign(c: Company, name: string, status = 'completed') {
   const id = uuidv7();
+  // Past its draft a campaign names its template and audience (campaigns_submitted_complete).
+  const templateId = uuidv7();
   await fx.query(
-    `INSERT INTO app.campaigns (id, tenant_id, name, status, channel_account_id, timezone)
-     VALUES ($1, $2, $3, $4, $5, 'Asia/Kolkata')`,
-    [id, c.tenant.id, name, status, c.channelAccountId],
+    `INSERT INTO app.message_templates (id, tenant_id, whatsapp_account_id, name, language, category,
+       components, status)
+     VALUES ($1, $2, $3, $4, 'en', 'MARKETING', '[]'::jsonb, 'approved')`,
+    [templateId, c.tenant.id, c.whatsappAccountId, `campaign_${id.replaceAll('-', '')}`],
+  );
+  await fx.query(
+    `INSERT INTO app.campaigns (id, tenant_id, name, status, channel_account_id, template_id,
+       audience_used, timezone)
+     VALUES ($1, $2, $3, $4, $5, $6, '{}', 'Asia/Kolkata')`,
+    [id, c.tenant.id, name, status, c.channelAccountId, templateId],
   );
   return id;
 }
@@ -374,7 +383,8 @@ describe('automations started by replies to a campaign (ADR-414)', () => {
       (await runsIn(conversationId)).map((r) => [r.automation_id, r.trigger_type]);
 
     // Queued 71 hours ago: a reply to the campaign.
-    await tap(c, fresh.from, await campaignMessage(c, fresh, diwali, { hoursAgo: 71 }), 'Yes');
+    const freshMessage = await campaignMessage(c, fresh, diwali, { hoursAgo: 71 });
+    await tap(c, fresh.from, freshMessage, 'Yes');
     expect(await startedBy(fresh.conversationId)).toEqual([[follow, 'campaign_reply']]);
     // Queued 73 hours ago: any other message.
     await tap(c, old.from, await campaignMessage(c, old, diwali, { hoursAgo: 73 }), 'Yes');
@@ -387,9 +397,9 @@ describe('automations started by replies to a campaign (ADR-414)', () => {
       await campaignMessage(c, member, diwali, { sender: 'agent' }),
     );
     expect(await startedBy(member.conversationId)).toEqual([[fallback, 'any_message']]);
-    // Another contact's campaign message, named by its WAMID, is not this contact's.
-    const theirs = await campaignMessage(c, fresh, diwali);
-    await tap(c, otherContact.from, theirs, 'Yes');
+    // Another contact's campaign message, named by its WAMID, is not this contact's (a campaign
+    // sends a contact one message, so it is the one `fresh` answered, still inside the hours).
+    await tap(c, otherContact.from, freshMessage, 'Yes');
     expect(await startedBy(otherContact.conversationId)).toEqual([[fallback, 'any_message']]);
     // A WAMID of the company's other number is not found on this one.
     const second = await fx.addNumber(c);
@@ -419,13 +429,15 @@ describe('automations started by replies to a campaign (ADR-414)', () => {
       c.channelAccountId,
     );
     const person = await customer(c);
-    await tap(c, person.from, await campaignMessage(c, person, diwali), 'Yes');
+    const message = await campaignMessage(c, person, diwali);
+    await tap(c, person.from, message, 'Yes');
     const runs = await runsIn(person.conversationId);
     expect(runs.map((r) => r.automation_id)).toEqual([here]);
     expect(runs.map((r) => r.automation_id)).not.toContain(elsewhere);
     expect(await driveRun(c, runs[0]!.id)).toBe('ended');
-    // Within the cooldown a second reply starts nothing.
-    await tap(c, person.from, await campaignMessage(c, person, diwali), 'Yes');
+    // Within the cooldown a second reply to it starts nothing (a campaign sends a contact one
+    // message).
+    await tap(c, person.from, message, 'Yes');
     expect(await runsIn(person.conversationId)).toHaveLength(1);
   });
 

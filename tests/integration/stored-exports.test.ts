@@ -320,7 +320,8 @@ describe('what a company keeps (ADR-415)', () => {
 
     // When it expires, the sweep deletes it; the newer one and another company's stay.
     await fx.query(
-      `UPDATE app.company_exports SET expires_at = now() - interval '1 second' WHERE id = $1`,
+      `UPDATE app.company_exports SET finished_at = now() - interval '1 hour',
+              expires_at = now() - interval '1 second' WHERE id = $1`,
       [first],
     );
     await sweepStoredExports(deps(), 500);

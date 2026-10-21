@@ -4000,10 +4000,19 @@ describe('automation run events (ADR-078)', () => {
     );
     // A campaign message WhatsApp accepted an hour ago, of variant B.
     const campaignId = uuidv7();
+    // A running campaign names its template and audience (campaigns_submitted_complete).
+    const templateId = uuidv7();
     await fx.query(
-      `INSERT INTO app.campaigns (id, tenant_id, name, status, channel_account_id, timezone)
-       VALUES ($1, $2, 'Diwali offers', 'running', $3, 'Asia/Kolkata')`,
-      [campaignId, c.tenant.id, c.channelAccountId],
+      `INSERT INTO app.message_templates (id, tenant_id, whatsapp_account_id, name, language,
+         category, components, status)
+       VALUES ($1, $2, $3, 'diwali_offers', 'en', 'MARKETING', '[]'::jsonb, 'approved')`,
+      [templateId, c.tenant.id, c.whatsappAccountId],
+    );
+    await fx.query(
+      `INSERT INTO app.campaigns (id, tenant_id, name, status, channel_account_id, template_id,
+         audience_used, timezone)
+       VALUES ($1, $2, 'Diwali offers', 'running', $3, $4, '{}', 'Asia/Kolkata')`,
+      [campaignId, c.tenant.id, c.channelAccountId, templateId],
     );
     const wamid = `wamid.out.${randomBytes(6).toString('hex')}`;
     const messageId = uuidv7();

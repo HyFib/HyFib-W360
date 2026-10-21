@@ -202,6 +202,9 @@ streamed export stays as it was (it is now refused while a stored export is bein
   `download` attribute on the link; a failed export sweep no longer skips the rest of the billing
   sweep; grant checks for `ops.company_exports_due` in the isolation suite; the integration test's
   comparison with the streamed export states what writes between the two.
+- **CI's first run (PR #107):** the expiry test moved a ready file's `expires_at` before its
+  `finished_at`, which `company_exports_state` refuses; it now moves both, as the later expiry
+  tests do.
 
 ## 2026-10-21 — Store follow-ups per shipment (P4-06f, ADR-413)
 
@@ -442,6 +445,10 @@ coupon copy-code button, and Meta's sample app shows one only inside a limited-t
   are when the answer comes (kept in a ref the composer updates after each render), keeps the typed
   text before the reply's, and refuses the insertion if the card was filled meanwhile. No automated
   test covers this timing.
+- **CI's first run (PR #107):** the test that the runtime role cannot rename a stored file
+  expected PostgreSQL's message, but the database layer maps a refused privilege to `forbidden`
+  ("Operation not permitted.") with the reason as its cause; it now checks both, as the campaign
+  variant test does. The refusal itself was right.
 
 ### Test commands and results (local, 2026-10-21)
 
@@ -564,6 +571,12 @@ automation built for it.
   DEPLOYMENT and RUNBOOKS cover both files.
 - **Rollback (Low):** DEPLOYMENT says pending run-event deliveries of such runs would be built by
   the older payload code, and to let them drain after the pause (or disable the endpoint).
+- **CI's first run (PR #107):** the tests' campaigns, inserted as completed or running with no
+  template or audience, broke `campaigns_submitted_complete`, so none of the nine tests got past
+  its first campaign, and the webhook test's running campaign failed the same way. Each campaign
+  now has an approved template and an audience, as other tests' campaigns do. Two tests then sent
+  one campaign to the same contact twice, which `campaign_recipients_contact_uq` refuses (a
+  campaign sends a contact one message); they now reuse the first message.
 
 ### Test commands and results (local, 2026-10-21)
 
