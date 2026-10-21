@@ -4,6 +4,7 @@ import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, contactTags, type ApiScope, type Tx } from '@w360/db';
 import {
   apiGetEnrollment,
+  apiListEnrolledContacts,
   apiListEnrollments,
   apiStartEnrollment,
   apiStopEnrollment,
@@ -13,6 +14,7 @@ import {
   createApiKeysService,
   createAutomationEnrollmentService,
   createAutomationService,
+  createContactsService,
   createSegmentsService,
   processEnrollmentBatch,
   type ApiContext,
@@ -28,7 +30,8 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * another company's automation, segment and enrolment are not found; missing scopes are refused; a
  * key revoked mid-way ends the enrolment at its next batch; an Idempotency-Key replays the answer;
  * a key stops any running enrolment; members see keys' enrolments and keys members'; the table's
- * starter check, foreign keys and grants (migration 0315).
+ * starter check, foreign keys and grants (migration 0315); an enrolment's contacts listed with
+ * their outcomes on keyset pages (ADR-408).
  */
 let fx: WhatsAppFixture;
 let keys: ApiKeysService;
@@ -476,6 +479,95 @@ describe('enrolling contacts through the public API (ADR-403)', () => {
     expect(
       await createAutomationEnrollmentService(deps()).getEnrollment(owner, member.id),
     ).toMatchObject({ stoppedByName: null, stoppedByKeyName: 'Stopper' });
+  });
+
+  it('lists an enrolment’s contacts with their outcomes on keyset pages, by outcome, with contacts.read only (ADR-408)', async () => {
+    const a = await fx.company();
+    const b = await fx.company();
+    const ownerA = await fx.ctx(a, a.owner);
+    const ownerB = await fx.ctx(b, b.owner);
+    const automationA = await publish(ownerA, a, 'Listed through the API');
+    const otherA = await publish(ownerA, a, 'Another');
+    const automationB = await publish(ownerB, b, 'B listed');
+    const ids = await contactsOf(a, 55, 'listed');
+    await contactsOf(b, 1, 'listed');
+    const keyA = (await apiKey(a, ENROLLER)).ctx;
+    const keyB = (await apiKey(b, ENROLLER)).ctx;
+    const started = await enrolThroughApi(keyA, automationA, byTag('listed'));
+    // The last contact is erased after the snapshot: refused, and listed without an id.
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(ownerA, {
+      contactId: ids[54]!,
+      suppress: false,
+    });
+    expect(await drain(a, started.data.id)).toEqual(['batch', 'finished']);
+    const runs = new Set((await runsOf(started.data.id)).map((r) => r.id));
+    expect(runs.size).toBe(54);
+
+    const first = await apiListEnrolledContacts(deps(), keyA, automationA, started.data.id, {
+      limit: '50',
+    });
+    expect(first.data.map((c) => c.position)).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
+    expect(first.data.map((c) => c.contactId)).toEqual(ids.slice(0, 50));
+    expect(first.data.every((c) => c.outcome === 'started' && runs.has(c.runId ?? ''))).toBe(true);
+    expect(first.data.every((c) => c.processedAt !== null)).toBe(true);
+    expect(first.nextCursor).toBe('50');
+    const second = await apiListEnrolledContacts(deps(), keyA, automationA, started.data.id, {
+      limit: '50',
+      cursor: first.nextCursor ?? undefined,
+    });
+    expect(second.nextCursor).toBeNull();
+    expect(
+      second.data.map((c) => [c.position, c.contactId, c.contact, c.outcome, c.reason]),
+    ).toEqual([
+      [51, ids[50], 'active', 'started', null],
+      [52, ids[51], 'active', 'started', null],
+      [53, ids[52], 'active', 'started', null],
+      [54, ids[53], 'active', 'started', null],
+      [55, null, 'erased', 'refused', 'contact_erased'],
+    ]);
+    // Ids and outcomes only: no name or number.
+    expect(Object.keys(second.data[0]!).sort()).toEqual(
+      ['contact', 'contactId', 'outcome', 'position', 'processedAt', 'reason', 'runId'].sort(),
+    );
+    const refused = await apiListEnrolledContacts(deps(), keyA, automationA, started.data.id, {
+      outcome: 'refused',
+    });
+    expect(refused.data.map((c) => c.position)).toEqual([55]);
+    expect(
+      (
+        await apiListEnrolledContacts(deps(), keyA, automationA, started.data.id, {
+          outcome: 'pending',
+        })
+      ).data,
+    ).toEqual([]);
+
+    // A key reading enrolments but not contacts is refused; one with both reads a member's too.
+    const noContacts = (await apiKey(a, ['automations.start'], 'Progress only')).ctx;
+    expect(
+      await refusalOf(
+        apiListEnrolledContacts(deps(), noContacts, automationA, started.data.id, {}),
+      ),
+    ).toMatchObject({ code: 'forbidden' });
+    expect(await apiGetEnrollment(deps(), noContacts, automationA, started.data.id)).toMatchObject({
+      total: 55,
+    });
+    const reader = (await apiKey(a, ['automations.start', 'contacts.read'], 'Reader')).ctx;
+    expect(
+      (await apiListEnrolledContacts(deps(), reader, automationA, started.data.id, {})).data,
+    ).toHaveLength(50);
+
+    // Another company's enrolment, and this one under another automation, are not found.
+    const startedB = await enrolThroughApi(keyB, automationB, byTag('listed'));
+    for (const [automation, enrollment] of [
+      [automationB, startedB.data.id],
+      [automationA, startedB.data.id],
+      [otherA, started.data.id],
+    ] as const) {
+      expect(
+        await refusalOf(apiListEnrolledContacts(deps(), keyA, automation, enrollment, {})),
+      ).toMatchObject({ code: 'not_found' });
+    }
+    await drain(b, startedB.data.id);
   });
 
   it('keeps exactly one starter per enrolment, with the new columns’ foreign keys and grants (0315)', async () => {

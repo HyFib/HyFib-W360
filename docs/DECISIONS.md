@@ -17775,3 +17775,68 @@ from eight characters), with the claim that a cut echo reveals at most three cha
 It also found that one to three character secrets drop ordinary values (new ones now need four)
 and nits (the token boundary only on a side where the secret's edge is a letter or digit, one
 matcher per response). All were fixed.
+
+## ADR-408 An enrolment's contacts listed with their outcomes (P4-01) (2026-10-21)
+
+Context: ADR-401 (members) and ADR-403 (API keys) store each enrolled contact in
+`app.automation_enrollment_contacts` with its position, outcome (pending, started with its run,
+refused with a reason, cancelled) and the time it was handled, but the enrolment's page and
+`GET /automations/{id}/enrollments/{enrollmentId}` gave only counts and refusals by reason. A member
+who saw "Refused: 12" could not tell which customers to follow up by hand, and an integration could
+not match runs to the contacts it enrolled. Both ADRs left "an enrolment's contacts listed with
+their outcomes" out, and P4-01's Remaining listed it.
+
+Decision:
+
+- **One reader for both:** `selectEnrolledContacts` (automations/enrollments) reads a page of an
+  enrolment's rows in position order, after a position and of one outcome when asked, with the
+  contact as it is now (a left join, so a contact merged away keeps its row), and
+  `assertEnrollmentOfAutomation` refuses an enrolment that is not the path's automation's.
+  `toEnrolledContact` (enrollment-model, pure) maps a row: the reason only for a refusal (with
+  members' label, falling back to its code), the run only for a start, and the contact's state:
+  `active`, `erased` or `merged`. An erased contact shows no name, number or id (nothing to open)
+  and members' pages call it "Erased contact"; one merged away since the snapshot has no row left
+  and is called "Merged into another contact".
+- **Keyset pages by position:** the snapshot's position never changes, so the cursor is the last
+  position shown (`nextCursor` as text, 1 to 10,000; anything else is refused as an invalid
+  cursor) and pages never skip or repeat a contact, filtered or not. Each page is read when it is
+  asked for, so outcomes can change between pages while the enrolment runs, as campaign recipients'
+  do (ADR-127).
+- **In the app:** the enrolment's page gains a Contacts card: position, the contact (a link to its
+  page while it is active), the outcome ("Refused: <reason>" for refusals, and "Open the run" when
+  one started) and when it was handled, 50 per page with "Next page", filtered by outcome with the
+  counts' words (All, Started, Refused, Not started, Waiting) as links, as the campaign recipients
+  page filters. The page re-renders every 15 seconds while the enrolment runs, the list with it.
+- **Who sees it in the app: `automations.read` and `contacts.read`.** Seeing an enrolment needs
+  `automations.read` (ADR-401); listing its contacts also needs what the Contacts page needs, so
+  the list names no contact a member could not find there: supervisors, marketers, administrators
+  and owners see it; analysts (who see enrolments but not contacts) see the counts only and no
+  Contacts card. The page checks both itself and the service checks them again. Names and numbers
+  come through `shownNumber`, so a role the company masks sees numbers masked as everywhere else
+  (ADR-226). No permission is new and the permission matrix does not change.
+- **Through the API:** `GET /automations/{id}/enrollments/{enrollmentId}/contacts` with `limit`
+  (1 to 200, default 50), `cursor` and `outcome` (`pending`, `started`, `refused`, `cancelled`), the
+  `{ data, nextCursor }` shape and error answers of the API's other lists (422 for an invalid query
+  or cursor, 404 for another company's enrolment, another automation's or an unknown one). Scopes:
+  `automations.start`, which reading the enrolment needs, and `contacts.read`, as the list names
+  contacts (as `GET /campaigns/{id}/recipients` needs it); both read, so the list works while the
+  company is suspended, each within the plan's scopes (ADR-092). Each row gives `position`,
+  `contactId`, `contact` (the state), `outcome`, `reason`, `runId` and `processedAt`: ids only.
+  Names and numbers are left out although `contacts.read` reads them elsewhere: `GET /contacts/{id}`
+  gives them, and an integration that enrolled the contacts has them already. An erased contact's
+  row has no id, as the API lists no erased contact (ADR-127), and keeps its place so the list adds
+  up to the enrolment's total. `runId` is the run's id as the run webhooks give it with
+  `run.enrollmentId`; `GET /automation-runs/{id}` still reads runs keys started only (ADR-077), as
+  ADR-403 left it. Described in the OpenAPI document with the schema `AutomationEnrollmentContact`
+  and an example page, both checked by unit tests against the schema.
+- **No index, no migration:** 0311's unique key `(tenant_id, enrollment_id, position)` serves the
+  page (equality on the first two columns, a range and the order on the third); an outcome is
+  filtered along that index, so a page of a rare outcome reads at most the 10,000 rows of one
+  enrolment, the cap. An index on the outcome would serve only that and cost a write on every
+  outcome recorded. An integration test checks the plan uses the key with and without an outcome.
+- **Reads only:** nothing is written or audited, as reading an enrolment is not; both run in a
+  read-only transaction in the company's scope under row security.
+
+Not built: exporting an enrolment's contacts as CSV; searching them by name or number; stopping or
+re-enrolling the contacts of one outcome; names and numbers in the API's rows; reading an
+enrolment's runs through `GET /automation-runs/{id}`.

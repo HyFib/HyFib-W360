@@ -23,6 +23,7 @@ import {
   createWebhooksService,
   dayOf,
   endEnrollmentForRemovedMember,
+  maskPhoneNumber,
   processEnrollmentBatch,
   type AutomationTrigger,
   type EnqueueOptions,
@@ -39,7 +40,7 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * one transaction with each contact's start steps in a savepoint, refused contacts with their
  * reasons, the plan's runs, resumption after a crash mid-batch without a second run, a duplicate
  * job, stop, the member's authority, isolation between companies, the tables' row security and
- * grants, and the run's record of its enrolment.
+ * grants, the run's record of its enrolment, and its contacts listed with their outcomes (ADR-408).
  */
 let fx: WhatsAppFixture;
 beforeAll(async () => {
@@ -1548,6 +1549,194 @@ describe('enrolments after review: the sweep, pacing, consent, the job’s autho
       expect(plan.rows.map((r) => r['QUERY PLAN']).join('\n')).toContain(
         'automation_runs_enrollment_idx',
       );
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+});
+
+describe('an enrolment’s contacts with their outcomes (ADR-408)', () => {
+  const list = (ctx: TenantContext, automationId: string, id: string, input: unknown = {}) =>
+    enrollments().listEnrolledContacts(ctx, automationId, id, input);
+  async function codeOf(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (isAppError(error)) return error.code;
+      throw error;
+    }
+    throw new Error('expected a refusal');
+  }
+
+  it('lists each contact in position order with its outcome, reason, run and time, by outcome', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const automationId = await publish(owner, c, 'Listed');
+    const [first, second, suppressed, erased] = await contactsOf(c, 4, 'listed');
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).addSuppression(owner, {
+      phone: await phoneOf(suppressed!),
+      reason: 'manual',
+    });
+    const started = await enrol(owner, automationId, byTag('listed'), 4);
+    // Erased after the snapshot: refused as erased, and listed as an erased contact.
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: erased!,
+      suppress: false,
+    });
+    // Before any batch, every contact waits.
+    const waiting = await list(owner, automationId, started.id);
+    expect(waiting.items.map((i) => [i.position, i.outcome, i.processedAt])).toEqual([
+      [1, 'pending', null],
+      [2, 'pending', null],
+      [3, 'pending', null],
+      [4, 'pending', null],
+    ]);
+    expect(await drain(c, started.id)).toEqual(['finished']);
+
+    const stored = await outcomesOf(started.id);
+    const page = await list(owner, automationId, started.id);
+    expect(page.nextCursor).toBeNull();
+    expect(
+      page.items.map((i) => [
+        i.position,
+        i.contactId,
+        i.contact,
+        i.outcome,
+        i.reason,
+        i.runId,
+        i.processedAt instanceof Date,
+      ]),
+    ).toEqual([
+      [1, first, 'active', 'started', null, stored[0]!.run_id, true],
+      [2, second, 'active', 'started', null, stored[1]!.run_id, true],
+      [3, suppressed, 'active', 'refused', 'suppressed', null, true],
+      [4, null, 'erased', 'refused', 'contact_erased', null, true],
+    ]);
+    expect(stored[0]!.run_id).not.toBeNull();
+    expect(page.items[0]).toMatchObject({ name: expect.stringMatching(/^Contact /) });
+    expect(page.items[0]!.phone).toBe(await phoneOf(first!));
+    expect(page.items[3]).toMatchObject({ name: null, phone: null, reasonLabel: 'Erased' });
+    expect(page.items[2]!.reasonLabel).toBe('On the suppression list');
+
+    // By outcome: exactly the contacts the enrolment's counts count.
+    const positions = async (outcome: string) =>
+      (await list(owner, automationId, started.id, { outcome })).items.map((i) => i.position);
+    expect(await positions('started')).toEqual([1, 2]);
+    expect(await positions('refused')).toEqual([3, 4]);
+    expect(await positions('pending')).toEqual([]);
+    expect(await positions('cancelled')).toEqual([]);
+    expect(await enrollments().getEnrollment(owner, started.id)).toMatchObject({
+      started: 2,
+      refused: 2,
+    });
+  });
+
+  it('pages 50 contacts at a time, and filtered pages never skip or repeat one', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const automationId = await publish(owner, c, 'Paged');
+    const ids = await contactsOf(c, 53, 'paged');
+    const started = await enrol(owner, automationId, byTag('paged'), 53);
+    const first = await list(owner, automationId, started.id);
+    expect(first.items.map((i) => i.position)).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
+    expect(first.items.map((i) => i.contactId)).toEqual(ids.slice(0, 50));
+    expect(first.nextCursor).toBe('50');
+    const second = await list(owner, automationId, started.id, { cursor: first.nextCursor });
+    expect(second.items.map((i) => i.position)).toEqual([51, 52, 53]);
+    expect(second.nextCursor).toBeNull();
+    // The first batch handles 50; the 3 after it still wait, on one page of their own.
+    await dueNow(started.id);
+    await processEnrollmentBatch(
+      enrollmentDeps(),
+      authorizedTenantScope(c.tenant.id, c.owner.id),
+      started.id,
+    );
+    const pending = await list(owner, automationId, started.id, { outcome: 'pending' });
+    expect(pending).toMatchObject({ nextCursor: null });
+    expect(pending.items.map((i) => i.position)).toEqual([51, 52, 53]);
+    // Exactly 50 started: one full page and no next one.
+    const startedPage = await list(owner, automationId, started.id, { outcome: 'started' });
+    expect(startedPage.items.map((i) => i.position)).toEqual(
+      Array.from({ length: 50 }, (_, i) => i + 1),
+    );
+    expect(startedPage.nextCursor).toBeNull();
+    // After the 2nd pending contact, only the 3rd.
+    expect(
+      (await list(owner, automationId, started.id, { outcome: 'pending', cursor: '52' })).items.map(
+        (i) => i.position,
+      ),
+    ).toEqual([53]);
+    // Stopping cancels the waiting contacts, listed as not started.
+    await enrollments().stopEnrollment(owner, { id: started.id });
+    expect(
+      (await list(owner, automationId, started.id, { outcome: 'cancelled' })).items.map(
+        (i) => i.position,
+      ),
+    ).toEqual([51, 52, 53]);
+  });
+
+  it('needs contacts.read beside automations.read, masks numbers as elsewhere, and finds no other automation’s or company’s enrolment', async () => {
+    const a = await fx.company();
+    const b = await fx.company();
+    const ownerA = await fx.ctx(a, a.owner);
+    const ownerB = await fx.ctx(b, b.owner);
+    const automationA = await publish(ownerA, a, 'A list');
+    const otherA = await publish(ownerA, a, 'A other');
+    const automationB = await publish(ownerB, b, 'B list');
+    const [contactA] = await contactsOf(a, 1, 'seen');
+    await contactsOf(b, 1, 'seen');
+    const enrolledA = await enrol(ownerA, automationA, byTag('seen'), 1);
+    const enrolledB = await enrol(ownerB, automationB, byTag('seen'), 1);
+
+    // An analyst sees the enrolment, but not its contacts (no contacts.read).
+    const analystUser = await createUser(fx.dbs, { name: 'Analyst' });
+    const analystInvite = await invite(fx.dbs, a.tenant, a.owner, analystUser.email, ['analyst']);
+    await acceptInvitation(fx.dbs, analystUser, analystInvite.token);
+    const analyst = await fx.ctx(a, analystUser);
+    expect(await enrollments().getEnrollment(analyst, enrolledA.id)).toMatchObject({ total: 1 });
+    expect(await codeOf(list(analyst, automationA, enrolledA.id))).toBe('forbidden');
+
+    // A marketer whose role the company masks sees the number masked, as on the Contacts page.
+    const marketerUser = await createUser(fx.dbs, { name: 'Marketer' });
+    const marketerInvite = await invite(fx.dbs, a.tenant, a.owner, marketerUser.email, [
+      'marketer',
+    ]);
+    await acceptInvitation(fx.dbs, marketerUser, marketerInvite.token);
+    await fx.query(`UPDATE app.tenants SET masked_number_roles = '{marketer}' WHERE id = $1`, [
+      a.tenant.id,
+    ]);
+    const marketer = await fx.ctx(a, marketerUser);
+    const [shown] = (await list(marketer, automationA, enrolledA.id)).items;
+    expect(shown).toMatchObject({
+      contactId: contactA,
+      phone: maskPhoneNumber(await phoneOf(contactA!)),
+    });
+
+    // Another company's enrolment, and this company's under another automation, are not found.
+    expect(await codeOf(list(ownerA, automationB, enrolledB.id))).toBe('not_found');
+    expect(await codeOf(list(ownerA, automationA, enrolledB.id))).toBe('not_found');
+    expect(await codeOf(list(ownerA, otherA, enrolledA.id))).toBe('not_found');
+    expect((await list(ownerB, automationB, enrolledB.id)).items).toHaveLength(1);
+    await drain(a, enrolledA.id);
+    await drain(b, enrolledB.id);
+  });
+
+  it('is served by 0311’s unique key on (tenant_id, enrollment_id, position), with or without an outcome', async () => {
+    const client = await fx.dbs.adminPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET LOCAL enable_seqscan = off');
+      for (const outcome of ['', `AND outcome = 'refused'`]) {
+        const plan = await client.query<{ 'QUERY PLAN': string }>(
+          `EXPLAIN SELECT position FROM app.automation_enrollment_contacts
+            WHERE tenant_id = '${uuidv7()}' AND enrollment_id = '${uuidv7()}' ${outcome}
+              AND position > 50 ORDER BY position LIMIT 51`,
+        );
+        expect(plan.rows.map((r) => r['QUERY PLAN']).join('\n')).toContain(
+          'automation_enrollment_contacts_position_uq',
+        );
+      }
     } finally {
       await client.query('ROLLBACK');
       client.release();

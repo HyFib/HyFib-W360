@@ -840,6 +840,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   expired, the API and the scopes in the plan). Keys list (keyset pages), read and stop every
   enrolment of the company (`selectEnrollmentPage`, `readEnrollmentDetail`,
   `stopRunningEnrollment`, shared with members' pages).
+- **An enrolment's contacts** (ADR-408, no migration): `selectEnrolledContacts` pages an
+  enrolment's `app.automation_enrollment_contacts` rows by position (0311's unique key), of one
+  outcome when asked, with each contact as it is now, after `assertEnrollmentOfAutomation`;
+  `toEnrolledContact` maps them (erased and merged contacts without a name, number or id). The
+  enrolment's page lists them 50 per page (`listEnrolledContacts`, `automations.read` and
+  `contacts.read`, numbers masked as elsewhere) and
+  `GET /automations/{id}/enrollments/{enrollmentId}/contacts` gives them by id
+  (`apiListEnrolledContacts`, `automations.start` and `contacts.read`).
 - **Not built yet:** templates with media headers in template steps, usage billing. Form steps
   (ADR-248), runs started through the public API (ADR-077), template steps' website buttons whose
   link ends with a value (ADR-229), products steps (ADR-383), steps that set deal fields

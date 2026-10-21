@@ -271,10 +271,15 @@ verification, app review, Embedded Signup configuration).
   them, scopes `automations.start` and `contacts.read` (`campaigns.read` for a segment), one
   per `Idempotency-Key`; keyset-paged reads and a stop; the enrolment names its key, each batch
   re-checks the key and the plan and ends it with its reason; members' and keys' enrolments are
-  visible to both; contacts' outcomes one by one not listed). **Remaining:** starting runs from
-  campaigns, an enrolment's contacts listed with their outcomes (in the app and the API), a
-  drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox run (release
-  checklist).
+  visible to both; contacts' outcomes one by one not listed). **[An enrolment's contacts listed
+  with their outcomes built; their database and browser tests run only in CI]** (ADR-408, no
+  migration: the enrolment's page lists its contacts in position order with each outcome, the
+  reason of a refusal, the run and when it was handled, 50 per keyset page, filtered by outcome,
+  for members with `automations.read` and `contacts.read`, numbers masked as elsewhere and erased
+  contacts named as erased; `GET /automations/{id}/enrollments/{enrollmentId}/contacts` gives them
+  by id with `automations.start` and `contacts.read`). **Remaining:** starting runs from
+  campaigns, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox
+  run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
   placeholders, headers, JSON body, values saved from the response, success and failure branches);

@@ -515,6 +515,31 @@ test('a member enrols the contacts the Contacts page’s filters match in an aut
   await expect(page.getByText('Every contact was handled.', { exact: false })).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
+  // Its contacts one by one (ADR-408): both started, each with its run; filtered by outcome.
+  const enrolledTable = page.getByRole('table').filter({ hasText: 'Handled' });
+  await expect(enrolledTable.getByRole('link', { name: 'Asha Rao', exact: true })).toBeVisible();
+  await expect(enrolledTable.getByRole('link', { name: 'Bina Das', exact: true })).toBeVisible();
+  await expect(enrolledTable.getByRole('link', { name: 'Chitra Iyer', exact: true })).toHaveCount(
+    0,
+  );
+  await expect(enrolledTable.getByRole('link', { name: 'Open the run', exact: true })).toHaveCount(
+    2,
+  );
+  const outcomeFilter = page.getByRole('navigation', { name: 'Filter contacts by outcome' });
+  await outcomeFilter.getByRole('link', { name: 'Refused', exact: true }).click();
+  await expect(page).toHaveURL(/\?outcome=refused$/);
+  await expect(
+    page.getByRole('heading', { name: 'Enrolment in Festival follow-up' }),
+  ).toBeVisible();
+  await expect(page.getByText('No contact with this outcome.', { exact: true })).toBeVisible();
+  await outcomeFilter.getByRole('link', { name: 'Started', exact: true }).click();
+  await expect(page).toHaveURL(/\?outcome=started$/);
+  await expect(
+    page.getByRole('heading', { name: 'Enrolment in Festival follow-up' }),
+  ).toBeVisible();
+  await expect(enrolledTable.getByRole('link', { name: 'Asha Rao', exact: true })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
   // The automation's page lists the enrolment and marks its runs.
   await page.getByRole('link', { name: 'Open the automation' }).click();
   await expect(page.getByText('2 of 2 started')).toBeVisible();
@@ -555,6 +580,22 @@ test('a member enrols the contacts the Contacts page’s filters match in an aut
     );
     expect(((await read.json()) as { data: { status: string } }).data.status).toBe('completed');
   }).toPass({ timeout: 60_000 });
+  // Its contacts with their outcomes, by id (ADR-408).
+  const enrolledContacts = await request.get(
+    `/api/v1/automations/${automation!.id}/enrollments/${enrollment.id}/contacts`,
+    { headers: auth },
+  );
+  expect(enrolledContacts.status()).toBe(200);
+  const contactsPage = (await enrolledContacts.json()) as {
+    data: { position: number; outcome: string; runId: string | null }[];
+    nextCursor: string | null;
+  };
+  expect(contactsPage.data.map((c) => [c.position, c.outcome])).toEqual([
+    [1, 'started'],
+    [2, 'started'],
+  ]);
+  expect(contactsPage.data.every((c) => c.runId !== null)).toBe(true);
+  expect(contactsPage.nextCursor).toBeNull();
   // Both enrolments, newest first: the key's, then the member's.
   const all = await request.get(`/api/v1/automations/${automation!.id}/enrollments`, {
     headers: auth,

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   AUTOMATION_END_REASONS,
   AUTOMATION_ENROLLMENT_END_REASONS,
+  AUTOMATION_ENROLLMENT_OUTCOMES,
   AUTOMATION_ENROLLMENT_SOURCES,
   AUTOMATION_ENROLLMENT_STATUSES,
   AUTOMATION_RUN_STATUSES,
@@ -1279,6 +1280,46 @@ export const apiAutomationEnrollmentDetailSchema = apiAutomationEnrollmentSchema
     ),
 });
 
+/** One contact of an enrolment with its outcome (ADR-408), as the API gives it: ids only. */
+export const apiEnrolledContactSchema = z.object({
+  position: z
+    .number()
+    .int()
+    .describe('The contact’s place in the snapshot, 1 to the total, in contact id order.'),
+  contactId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The contact (GET /contacts/{id}); null once it was erased (the API lists no erased contact) or merged into another.',
+    ),
+  contact: z
+    .enum(['active', 'erased', 'merged'])
+    .describe(
+      'What became of the contact since the snapshot: active, erased, or merged into another contact (the contact it was merged into is not named).',
+    ),
+  outcome: z
+    .enum(AUTOMATION_ENROLLMENT_OUTCOMES)
+    .describe(
+      'pending: not handled yet; started: a run was started for it; refused: a start refused it (reason says why); cancelled: not started because the enrolment stopped.',
+    ),
+  reason: z
+    .string()
+    .nullable()
+    .describe(
+      'Why a start was refused: suppressed, opted_out, contact_erased, no_marketing_opt_in, conversation_assigned, automation_busy, automation_limit, automation_quota, contact_gone (merged away since) or no_number; null for any other outcome.',
+    ),
+  runId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The run started for the contact, as `run.id` in the automation.run_* webhooks with `run.enrollmentId`; null otherwise, or once retention deleted the run. GET /automation-runs/{id} reads runs keys started only.',
+    ),
+  processedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the enrolment handled the contact; null while it is pending.'),
+});
+
 /** What a start of many runs answers for one number (ADR-161). */
 export const apiAutomationRunStartSchema = z.object({
   to: z.string().describe('The number, in E.164 form.'),
@@ -1995,6 +2036,52 @@ const enrollmentIdParam = {
   schema: { type: 'string', format: 'uuid' },
   description:
     'An enrolment of the automation (GET /automations/{id}/enrollments); another automation’s is not found.',
+};
+
+/**
+ * A page of an enrolment's contacts (ADR-408): one started, one refused, one erased since and one
+ * not handled yet. Exported so a test checks it against the schema.
+ */
+export const ENROLLED_CONTACTS_EXAMPLE = {
+  data: [
+    {
+      position: 1,
+      contactId: '0192a1b2-0000-7000-8000-000000000101',
+      contact: 'active',
+      outcome: 'started',
+      reason: null,
+      runId: '0192a1b2-0000-7000-8000-000000000201',
+      processedAt: '2026-10-21T09:30:02.000Z',
+    },
+    {
+      position: 2,
+      contactId: '0192a1b2-0000-7000-8000-000000000102',
+      contact: 'active',
+      outcome: 'refused',
+      reason: 'opted_out',
+      runId: null,
+      processedAt: '2026-10-21T09:30:02.000Z',
+    },
+    {
+      position: 3,
+      contactId: null,
+      contact: 'erased',
+      outcome: 'refused',
+      reason: 'contact_erased',
+      runId: null,
+      processedAt: '2026-10-21T09:30:02.000Z',
+    },
+    {
+      position: 4,
+      contactId: '0192a1b2-0000-7000-8000-000000000104',
+      contact: 'active',
+      outcome: 'pending',
+      reason: null,
+      runId: null,
+      processedAt: null,
+    },
+  ],
+  nextCursor: '4',
 };
 
 const pageParams = [
@@ -3776,7 +3863,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'getAutomationEnrollment',
           summary: 'An enrolment’s progress',
-          description: `${scopeNote('automations.start')} One enrolment of the automation, a member's or a key's: its status, counts, refusals by reason, who started and stopped it, and whether it has stalled. Its contacts are not listed one by one.`,
+          description: `${scopeNote('automations.start')} One enrolment of the automation, a member's or a key's: its status, counts, refusals by reason, who started and stopped it, and whether it has stalled. GET /automations/{id}/enrollments/{enrollmentId}/contacts lists its contacts one by one.`,
           parameters: [{ $ref: '#/components/parameters/Id' }, enrollmentIdParam],
           responses: {
             '200': {
@@ -3784,6 +3871,39 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('AutomationEnrollmentWithProgress'))),
             },
             ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
+      '/automations/{id}/enrollments/{enrollmentId}/contacts': {
+        get: {
+          operationId: 'listAutomationEnrollmentContacts',
+          summary: 'An enrolment’s contacts and what happened to each',
+          description: [
+            `${scopeNote('automations.start')} Also needs \`contacts.read\`, as the list names contacts. Every contact of one enrolment of the automation, a member's or a key's, in its snapshot's order (\`position\`, which never changes, so pages never skip or repeat one), with its outcome: pending, started (with the run), refused (with the reason, the codes \`refusals\` counts in GET /automations/{id}/enrollments/{enrollmentId}) or cancelled, and when it was handled. \`outcome\` keeps the contacts of one outcome, so it lists as many as that count of the enrolment. Reading works while the company is suspended.`,
+            'Contacts are given by id only (GET /contacts/{id} gives a contact); an erased contact keeps its row with no id (`contact` erased), and so does one merged into another since (`contact` merged), so the list always adds up to the enrolment’s total. Each page is read when it is asked for, so outcomes can change between pages while the enrolment runs.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            enrollmentIdParam,
+            ...pageParams,
+            {
+              name: 'outcome',
+              in: 'query',
+              schema: { type: 'string', enum: [...AUTOMATION_ENROLLMENT_OUTCOMES] },
+              description: 'Only the contacts with this outcome.',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'A page of the enrolment’s contacts.',
+              content: {
+                'application/json': {
+                  ...pageOf('AutomationEnrollmentContact')['application/json'],
+                  example: ENROLLED_CONTACTS_EXAMPLE,
+                },
+              },
+            },
+            ...errors(401, 403, 404, 422, 429, 500),
           },
         },
       },
@@ -5229,6 +5349,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         AutomationRunStart: jsonSchema(apiAutomationRunStartSchema),
         AutomationEnrollment: jsonSchema(apiAutomationEnrollmentSchema),
         AutomationEnrollmentWithProgress: jsonSchema(apiAutomationEnrollmentDetailSchema),
+        AutomationEnrollmentContact: jsonSchema(apiEnrolledContactSchema),
         StartAutomationEnrollment: jsonSchema(apiStartEnrollmentSchema, 'input'),
         WebhookEndpoint: jsonSchema(apiWebhookEndpointSchema),
         WebhookEndpointWithSecret: jsonSchema(apiWebhookEndpointWithSecretSchema),
@@ -5370,6 +5491,7 @@ export const API_ROUTES = [
   ['get', '/automations/{id}/enrollments'],
   ['post', '/automations/{id}/enrollments'],
   ['get', '/automations/{id}/enrollments/{enrollmentId}'],
+  ['get', '/automations/{id}/enrollments/{enrollmentId}/contacts'],
   ['post', '/automations/{id}/enrollments/{enrollmentId}/stop'],
   ['get', '/automation-runs/{id}'],
   ['post', '/automation-runs/{id}/stop'],

@@ -1,5 +1,62 @@
 # Progress
 
+## 2026-10-21 — An enrolment's contacts listed with their outcomes (P4-01, ADR-408)
+
+Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI
+only.** Enrolments (ADR-401, ADR-403) stored each contact's outcome but showed only counts and
+refusals by reason. This closes P4-01's "an enrolment's contacts listed with their outcomes (in the
+app and the API)".
+
+### Completed
+
+- **Domain:** `selectEnrolledContacts` and `assertEnrollmentOfAutomation`
+  (`automations/enrollments.ts`) read a page of an enrolment's rows by position, of one outcome
+  when asked, with each contact as it is now, after checking the enrolment is the path's
+  automation's; `toEnrolledContact`, `enrolledContactLabel`, `enrolledContactsPage` and the
+  position cursor (`automations/enrollment-model.ts`, pure) map and page them. Erased and merged
+  contacts keep their rows without a name, number or id.
+- **App:** the enrolment's page lists its contacts (position, contact, outcome with the refusal's
+  reason and "Open the run", when handled), 50 per keyset page, filtered by outcome, for members
+  with `automations.read` and `contacts.read` (`listEnrolledContacts`, checked by the page and the
+  service); numbers masked as elsewhere (ADR-226); "Erased contact" for an erased one. Analysts
+  see the counts only.
+- **API:** `GET /automations/{id}/enrollments/{enrollmentId}/contacts` (`limit`, `cursor`,
+  `outcome`), scopes `automations.start` and `contacts.read` (read scopes, so also while
+  suspended), ids and outcomes only; another company's or automation's enrolment 404. OpenAPI
+  schema `AutomationEnrollmentContact`, the operation and an example page.
+- **Index:** none needed: 0311's unique key `(tenant_id, enrollment_id, position)` serves the page
+  with or without an outcome (at most 10,000 rows per enrolment); an integration test checks the
+  plan.
+- **Docs:** ADR-408, THREAT-MODEL T357, SECURITY (no permission is new), ARCHITECTURE §6E,
+  RUNBOOKS (enrolments), BACKLOG P4-01, feature matrix H-053.
+
+### Tests
+
+- Unit (`automations/enrollments.test.ts`, 10 new): the mapping of each outcome, erased and merged
+  contacts, labels, the cursor's bounds, the outcome filter, the next page's cursor, members'
+  permissions before any read, the enrolment check with the company and automation, the page's
+  query (limit, outcome, cursor) and masking, the API's scopes (also while suspended), query
+  bounds, rows of exactly the schema's fields, and the OpenAPI operation and example.
+- Integration (CI only): `automation-enrollments.test.ts` (outcomes listed exactly with reasons and
+  runs, an erased contact, the outcome filter, pages of 50 that never skip or repeat, cancelled
+  after a stop, an analyst refused, masking for a masked role, another company's and automation's
+  enrolment not found, the index's plan); `api-automation-enrollments.test.ts` (keyset pages of a
+  key's enrolment of 55, an erased contact without an id, the outcome filter, a key without
+  `contacts.read` refused, isolation).
+- E2E (CI only, `automations.spec.ts`): after a member's enrolment, its page lists both contacts
+  with their runs and filters by outcome; the key's enrolment's contacts read through the API.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                             | Result                                                                                            |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`, prettier on changed files          | clean                                                                                             |
+| `pnpm typecheck`                                                    | clean                                                                                             |
+| `pnpm test` (unit)                                                  | 2,036 of 2,036 passed (181 files)                                                                 |
+| `pnpm build`                                                        | passed                                                                                            |
+| deliberate regressions (permissions, scoping, filters, pages, maps) | 28 of 29 caught by unit tests; the page's own `contacts.read` gate has none (the service refuses) |
+| `pnpm test:integration`, `pnpm test:e2e`                            | not run here: no local PostgreSQL or browser; CI runs them                                        |
+
 ## 2026-10-21 — HTTP steps save response headers, a text body and the status (P4-02, ADR-406)
 
 Status: **Implemented (migration 0319); unit tests run locally, integration and e2e tests in CI

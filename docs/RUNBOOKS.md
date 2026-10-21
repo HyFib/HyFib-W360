@@ -815,8 +815,11 @@ enrolment's page (Automations → the automation → its enrolment) counts conta
 (with the reasons: erased, on the suppression list, opted out, no marketing opt-in, conversation
 assigned to a member, another automation handling the conversation, the hourly limit of 10 runs, no
 runs left in the plan this month, no phone number, merged into another contact), not started and
-waiting. A refused contact is not retried: fix the cause (record consent, unassign the conversation,
-wait an hour) and enrol it again. Runs start in the background, 50 per job; worker log lines
+waiting. Members who may also read contacts see its contacts one by one below the counts (ADR-408):
+in order, each with its outcome, the reason of a refusal, a link to its run and when it was
+handled, 50 per page, filtered by outcome ("Refused" lists whom to follow up); an analyst sees the
+counts only. A refused contact is not retried: fix the cause (record consent, unassign the
+conversation, wait an hour) and enrol it again. Runs start in the background, 50 per job; worker log lines
 "automation enrolment batch" carry the enrolment id, the outcome and the counts. An enrolment that
 stopped by itself says why: the automation was paused or archived, its number is not active, its
 live version takes other inputs, the plan does not include automations, or the member who started it
@@ -860,7 +863,10 @@ key), as a member stops one from its page; the audit log names the key (actor `a
 starts and stops. An integration that gets 409 `enrollment_running` sees the running enrolment's id
 in the message: wait for it (`GET …/enrollments/{enrollmentId}`) or stop it. Runs a key's
 enrolment started reach webhooks with `run.apiKeyId` null and their `run.enrollmentId`; the
-enrolment names the key.
+enrolment names the key. `GET …/enrollments/{enrollmentId}/contacts` (ADR-408, also
+`contacts.read`) lists the contacts by id with their outcomes, reasons and runs, `outcome=refused`
+for those to follow up; a 403 there with GET of the enrolment working means the key lacks
+`contacts.read`.
 
 **Budgets and failed sends.** A run fails, and hands the conversation to people, when it exceeds
 200 steps, enters one step 20 times, sends 50 messages or runs longer than 7 days, or when a

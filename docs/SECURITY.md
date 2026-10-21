@@ -434,6 +434,14 @@ Phase 4 rules (automations, P4-01):
   count, or its failure after three signals) in that company's scope under the row lock, and the
   signal it sends is the member's signed job, verified as any. The runs' webhook payloads now carry
   `run.enrollmentId`. No other function is new or widened, and no permission is new.
+- An enrolment's contacts listed with their outcomes on its page (ADR-408) need
+  `automations.read`, as the page does, and `contacts.read`, as the Contacts page does, so the list
+  names no contact a member could not find there: analysts see the enrolment's counts but not its
+  contacts. The page checks both itself and the service again; the enrolment must be the path's
+  automation's, in the company's scope (another automation's, another company's or an unknown one
+  is not found). Numbers are masked for the roles the company masks (ADR-226), and an erased
+  contact appears as "Erased contact" with no name, number or link. A read in a read-only
+  transaction, not audited, as reading an enrolment is not. No permission is new.
 - Automations start only in unassigned conversations of an active (not suspended) company, never
   after an opt-out keyword, and every bot message re-checks the channel, the 24-hour window and the
   contact's WhatsApp number when queued (a template step checks its template and the contact's
@@ -966,7 +974,11 @@ Phase 5 rules (Public API, P5-08):
   active company) every enrolment of the company, members' included, by id and counts only: never
   a member's name, the inputs or the contacts, and the segment's id only with `campaigns.read`; a stop is audited as the key and names it
   (`stopped_by_api_key_id`). Members with `automations.read` see keys' enrolments on their pages,
-  naming the key, as run pages name a key.
+  naming the key, as run pages name a key. An enrolment's contacts
+  (`GET /automations/{id}/enrollments/{enrollmentId}/contacts`, ADR-408) need `automations.start`
+  and `contacts.read` (both read, so also while suspended, within the plan's scopes) and give ids
+  and outcomes only: never a name or a number, and no id for an erased contact; another
+  automation's or company's enrolment is not found (an integration test, run in CI).
 - Template sends to many numbers (ADR-163, `POST /messages/send-many`) need the scopes one send
   needs and check each number as one send does (erasure, the suppression list, consent for the
   template's category, the marketing frequency cap under the campaign runner's company lock), so a

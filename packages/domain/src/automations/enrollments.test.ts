@@ -8,6 +8,7 @@ import {
   ENROLLMENT_CONDITION_REFUSAL,
   ENROLLMENT_NO_CONDITION_REFUSAL,
   apiGetEnrollment,
+  apiListEnrolledContacts,
   apiListEnrollments,
   apiStartEnrollment,
   apiStartEnrollmentSchema,
@@ -16,16 +17,29 @@ import {
   toApiEnrollment,
 } from '../api/automation-enrollments';
 import type { ApiContext } from '../api/context';
-import { API_ROUTES, buildOpenApiDocument } from '../api/openapi';
+import {
+  API_ROUTES,
+  ENROLLED_CONTACTS_EXAMPLE,
+  apiEnrolledContactSchema,
+  buildOpenApiDocument,
+} from '../api/openapi';
 import type { TenantContext } from '../authz/context';
 import { contactFilterConditionsFor } from '../contacts/service';
 import { RecordingJobQueue } from '../jobs/queue';
 import { JobSigner } from '../jobs/envelope';
 import {
+  ENROLLED_CONTACTS_PAGE,
+  ENROLLED_OUTCOME_LABELS,
   ENROLLMENT_END_REASON_LABELS,
   ENROLLMENT_LIMITS,
   ENROLLMENT_REFUSAL_LABELS,
   apiKeyEnrollmentEnd,
+  enrolledContactLabel,
+  enrolledContactsCursorSchema,
+  enrolledContactsPage,
+  enrolledContactsQuerySchema,
+  toEnrolledContact,
+  type EnrolledContactRow,
   enrollmentKeyMayUse,
   enrollmentKeyScopes,
   assertEnrollableCount,
@@ -2350,5 +2364,393 @@ describe('the Contacts page’s filter fails closed on a tag the app would not k
       code: 'validation_failed',
       publicMessage: 'No contact matches: nobody to enrol.',
     });
+  });
+});
+
+describe('an enrolment’s contacts with their outcomes (ADR-408)', () => {
+  const runOf = (n: number) => contactId(n).replace('-7000-', '-7001-');
+  const phoneOf = (n: number) => `+9198110${String(n).padStart(5, '0')}`;
+  const row = (position: number, over: Partial<EnrolledContactRow> = {}): EnrolledContactRow => ({
+    position,
+    contactId: contactId(position),
+    displayName: `Contact ${position}`,
+    phoneE164: phoneOf(position),
+    erasedAt: null,
+    outcome: 'started',
+    reason: null,
+    runId: runOf(position),
+    processedAt: NOW,
+    ...over,
+  });
+  const whole = (phone: string | null) => phone;
+  const READER = ['automations.read', 'contacts.read', 'contacts.view_numbers'];
+  /** The enrolment check (found unless told otherwise), then the page of rows. */
+  const answers =
+    (s: { found?: boolean; rows?: EnrolledContactRow[] } = {}) =>
+    (step: Step): unknown => {
+      if (step.op === 'select' && step.table === 'automation_enrollments') {
+        return s.found === false ? [] : [{ id: ENROLLMENT }];
+      }
+      if (step.op === 'select' && step.table === 'automation_enrollment_contacts') {
+        return s.rows ?? [];
+      }
+      throw new Error(`unexpected ${step.op} ${step.table}`);
+    };
+  const refusing = { run: () => Promise.reject(new Error('read')) } as unknown as Database;
+  const service = (db: Database) =>
+    createAutomationEnrollmentService({ db, clock, jobs: new RecordingJobQueue(), signer });
+  const apiCtx = (scopes: string[], status = 'active') =>
+    ({
+      tenant: { id: TENANT, status },
+      key: { id: KEY, scopes: new Set(scopes) },
+      planScopes: null,
+      scope: {},
+      requestId: 'req-1',
+    }) as unknown as ApiContext;
+  async function refusal(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return { code: error.code, message: error.publicMessage };
+    }
+    throw new Error('expected a refusal');
+  }
+
+  it('maps each outcome with its reason, its run and when it was handled', () => {
+    expect(toEnrolledContact(row(1), whole)).toEqual({
+      position: 1,
+      contactId: contactId(1),
+      contact: 'active',
+      name: 'Contact 1',
+      phone: phoneOf(1),
+      outcome: 'started',
+      reason: null,
+      reasonLabel: null,
+      runId: runOf(1),
+      processedAt: NOW,
+    });
+    const refused = toEnrolledContact(
+      row(2, { outcome: 'refused', reason: 'opted_out', runId: null }),
+      whole,
+    );
+    expect(refused).toMatchObject({ outcome: 'refused', reason: 'opted_out', runId: null });
+    expect(refused.reasonLabel).toBe(ENROLLMENT_REFUSAL_LABELS.opted_out);
+    // A code without a label (a later release's) is shown as its code.
+    expect(
+      toEnrolledContact(row(3, { outcome: 'refused', reason: 'new_reason', runId: null }), whole)
+        .reasonLabel,
+    ).toBe('new_reason');
+    // Reasons and runs only where their outcome has them.
+    expect(
+      toEnrolledContact(row(4, { outcome: 'pending', reason: 'x', processedAt: null }), whole),
+    ).toMatchObject({ outcome: 'pending', reason: null, reasonLabel: null, runId: null });
+    expect(toEnrolledContact(row(5, { outcome: 'cancelled' }), whole)).toMatchObject({
+      outcome: 'cancelled',
+      runId: null,
+    });
+    expect(ENROLLED_OUTCOME_LABELS).toEqual({
+      pending: 'Waiting',
+      started: 'Started',
+      refused: 'Refused',
+      cancelled: 'Not started',
+    });
+  });
+
+  it('names an erased contact as erased and a merged one as merged, with nothing to open', () => {
+    const erased = toEnrolledContact(
+      row(1, {
+        erasedAt: NOW,
+        displayName: 'Left over',
+        outcome: 'refused',
+        reason: 'contact_erased',
+        runId: null,
+      }),
+      whole,
+    );
+    expect(erased).toMatchObject({ contact: 'erased', contactId: null, name: null, phone: null });
+    expect(enrolledContactLabel(erased)).toBe('Erased contact');
+    const merged = toEnrolledContact(
+      row(2, { contactId: null, displayName: null, phoneE164: null }),
+      whole,
+    );
+    expect(merged).toMatchObject({ contact: 'merged', contactId: null, runId: runOf(2) });
+    expect(enrolledContactLabel(merged)).toBe('Merged into another contact');
+    // The number as the viewer may see it; the name first, then the number.
+    const shown = toEnrolledContact(row(3, { displayName: null }), () => '+919•••••••03');
+    expect(shown.phone).toBe('+919•••••••03');
+    expect(enrolledContactLabel(shown)).toBe('+919•••••••03');
+    expect(enrolledContactLabel(toEnrolledContact(row(4), whole))).toBe('Contact 4');
+    expect(
+      enrolledContactLabel(
+        toEnrolledContact(row(5, { displayName: null, phoneE164: null }), whole),
+      ),
+    ).toBe('Unnamed contact');
+  });
+
+  it('takes a position as the cursor, 1 to the most an enrolment holds, and an outcome', () => {
+    expect(enrolledContactsCursorSchema.parse('1')).toBe(1);
+    expect(enrolledContactsCursorSchema.parse('10000')).toBe(ENROLLMENT_LIMITS.contacts);
+    for (const bad of ['', '0', '01', '-1', '1.5', '1e3', '10001', '99999', 'abc', ' 5']) {
+      expect(enrolledContactsCursorSchema.safeParse(bad).success, bad).toBe(false);
+    }
+    expect(enrolledContactsQuerySchema.parse({ outcome: 'refused', cursor: '50' })).toEqual({
+      outcome: 'refused',
+      cursor: 50,
+    });
+    expect(enrolledContactsQuerySchema.safeParse({ outcome: 'skipped' }).success).toBe(false);
+    expect(enrolledContactsQuerySchema.safeParse({ page: 2 }).success).toBe(false);
+  });
+
+  it('gives the next page’s cursor only when a row beyond the page was read', () => {
+    const rows = [row(3), row(7), row(9)];
+    expect(enrolledContactsPage(rows, 2)).toEqual({ shown: [rows[0], rows[1]], nextCursor: '7' });
+    expect(enrolledContactsPage(rows, 3)).toEqual({ shown: rows, nextCursor: null });
+    expect(enrolledContactsPage([], 3)).toEqual({ shown: [], nextCursor: null });
+  });
+
+  it('refuses members who may not see the enrolment or read contacts, before anything is read', async () => {
+    for (const permissions of [['automations.read'], ['contacts.read'], []]) {
+      expect(
+        await refusal(
+          service(refusing).listEnrolledContacts(
+            memberCtx(permissions),
+            AUTOMATION,
+            ENROLLMENT,
+            {},
+          ),
+        ),
+      ).toMatchObject({ code: 'forbidden' });
+    }
+    expect(
+      await refusal(
+        service(refusing).listEnrolledContacts(memberCtx(READER), AUTOMATION, 'nope', {}),
+      ),
+    ).toMatchObject({ code: 'not_found' });
+    expect(
+      await refusal(
+        service(refusing).listEnrolledContacts(memberCtx(READER), 'nope', ENROLLMENT, {}),
+      ),
+    ).toMatchObject({ code: 'not_found' });
+    expect(
+      await refusal(
+        service(refusing).listEnrolledContacts(memberCtx(READER), AUTOMATION, ENROLLMENT, {
+          cursor: '0',
+        }),
+      ),
+    ).toMatchObject({ code: 'validation_failed' });
+  });
+
+  it('reads the automation’s enrolment of the company only, and nothing when it is another’s', async () => {
+    const recording = recordingDb(answers({ found: false }));
+    expect(
+      await refusal(
+        service(recording.db).listEnrolledContacts(memberCtx(READER), AUTOMATION, ENROLLMENT, {}),
+      ),
+    ).toMatchObject({ code: 'not_found' });
+    const [check] = recording.steps;
+    expect(check?.table).toBe('automation_enrollments');
+    expect(check?.params).toEqual(expect.arrayContaining([TENANT, ENROLLMENT, AUTOMATION]));
+    expect(recording.steps.some((st) => st.table === 'automation_enrollment_contacts')).toBe(false);
+  });
+
+  it('pages 50 contacts in position order after the cursor, by outcome, numbers as the member sees them', async () => {
+    const rows = Array.from({ length: ENROLLED_CONTACTS_PAGE + 1 }, (_, i) =>
+      row(51 + i, { outcome: 'refused', reason: 'suppressed', runId: null }),
+    );
+    const recording = recordingDb(answers({ rows }));
+    const masked = memberCtx(['automations.read', 'contacts.read']);
+    const page = await service(recording.db).listEnrolledContacts(masked, AUTOMATION, ENROLLMENT, {
+      outcome: 'refused',
+      cursor: '50',
+    });
+    const query = recording.steps.find((st) => st.table === 'automation_enrollment_contacts');
+    expect(query?.limit).toBe(ENROLLED_CONTACTS_PAGE + 1);
+    expect(query?.params).toEqual(expect.arrayContaining([TENANT, ENROLLMENT, 'refused', 50]));
+    expect(page.items).toHaveLength(ENROLLED_CONTACTS_PAGE);
+    expect(page.items.map((c) => c.position)).toEqual(rows.slice(0, 50).map((r) => r.position));
+    expect(page.nextCursor).toBe('100');
+    // Masked for a member whose roles hide numbers (ADR-226), whole for one who sees them.
+    expect(page.items[0]?.phone).not.toBe(phoneOf(51));
+    expect(page.items[0]?.phone).toMatch(/^\+919•+51$/);
+    const seen = await service(recordingDb(answers({ rows: [row(1)] })).db).listEnrolledContacts(
+      memberCtx(READER),
+      AUTOMATION,
+      ENROLLMENT,
+      {},
+    );
+    expect(seen).toEqual({
+      items: [expect.objectContaining({ phone: phoneOf(1), name: 'Contact 1' })],
+      nextCursor: null,
+    });
+    // No outcome and no cursor: neither is in the query.
+    const all = recordingDb(answers({ rows: [] }));
+    await service(all.db).listEnrolledContacts(memberCtx(READER), AUTOMATION, ENROLLMENT, {});
+    const unfiltered = all.steps.find((st) => st.table === 'automation_enrollment_contacts');
+    expect(unfiltered?.params).toEqual([TENANT, ENROLLMENT]);
+  });
+
+  it('through the API: needs automations.start and contacts.read, also while suspended', async () => {
+    for (const scopes of [['automations.start'], ['contacts.read'], []]) {
+      expect(
+        await refusal(
+          apiListEnrolledContacts({ db: refusing }, apiCtx(scopes), AUTOMATION, ENROLLMENT, {}),
+        ),
+      ).toMatchObject({ code: 'forbidden' });
+    }
+    const outOfPlan = {
+      ...apiCtx(ENROLLER_KEY_SCOPES),
+      planScopes: new Set(['automations.start']),
+    } as unknown as ApiContext;
+    expect(
+      await refusal(
+        apiListEnrolledContacts({ db: refusing }, outOfPlan, AUTOMATION, ENROLLMENT, {}),
+      ),
+    ).toMatchObject({ code: 'forbidden' });
+    for (const query of [{ limit: '0' }, { limit: '201' }, { cursor: 'x' }, { outcome: 'x' }]) {
+      expect(
+        await refusal(
+          apiListEnrolledContacts(
+            { db: refusing },
+            apiCtx(ENROLLER_KEY_SCOPES),
+            AUTOMATION,
+            ENROLLMENT,
+            query,
+          ),
+        ),
+        JSON.stringify(query),
+      ).toMatchObject({ code: 'validation_failed' });
+    }
+    const recording = recordingDb(answers({ rows: [row(1)] }));
+    const page = await apiListEnrolledContacts(
+      { db: recording.db },
+      apiCtx(ENROLLER_KEY_SCOPES, 'suspended'),
+      AUTOMATION,
+      ENROLLMENT,
+      {},
+    );
+    expect(page.data).toHaveLength(1);
+    const missing = recordingDb(answers({ found: false }));
+    expect(
+      await refusal(
+        apiListEnrolledContacts(
+          { db: missing.db },
+          apiCtx(ENROLLER_KEY_SCOPES),
+          AUTOMATION,
+          ENROLLMENT,
+          {},
+        ),
+      ),
+    ).toMatchObject({ code: 'not_found' });
+    expect(missing.steps[0]?.params).toEqual(
+      expect.arrayContaining([TENANT, ENROLLMENT, AUTOMATION]),
+    );
+  });
+
+  it('through the API: ids and outcomes on keyset pages of the asked size, never a name or a number', async () => {
+    const rows = [
+      row(1),
+      row(2, { outcome: 'refused', reason: 'opted_out', runId: null }),
+      row(3, { erasedAt: NOW, outcome: 'refused', reason: 'contact_erased', runId: null }),
+      row(4, { outcome: 'pending', runId: null, processedAt: null }),
+    ];
+    const recording = recordingDb(answers({ rows }));
+    const page = await apiListEnrolledContacts(
+      { db: recording.db },
+      apiCtx(ENROLLER_KEY_SCOPES),
+      AUTOMATION,
+      ENROLLMENT,
+      { limit: '3', cursor: '7', outcome: 'refused' },
+    );
+    const query = recording.steps.find((st) => st.table === 'automation_enrollment_contacts');
+    expect(query?.limit).toBe(4);
+    expect(query?.params).toEqual(expect.arrayContaining([TENANT, ENROLLMENT, 'refused', 7]));
+    expect(page.nextCursor).toBe('3');
+    expect(page.data).toEqual([
+      {
+        position: 1,
+        contactId: contactId(1),
+        contact: 'active',
+        outcome: 'started',
+        reason: null,
+        runId: runOf(1),
+        processedAt: NOW.toISOString(),
+      },
+      {
+        position: 2,
+        contactId: contactId(2),
+        contact: 'active',
+        outcome: 'refused',
+        reason: 'opted_out',
+        runId: null,
+        processedAt: NOW.toISOString(),
+      },
+      {
+        position: 3,
+        contactId: null,
+        contact: 'erased',
+        outcome: 'refused',
+        reason: 'contact_erased',
+        runId: null,
+        processedAt: NOW.toISOString(),
+      },
+    ]);
+    // Exactly the schema's fields: the OpenAPI document describes what is sent.
+    for (const item of page.data) apiEnrolledContactSchema.strict().parse(item);
+  });
+
+  it('describes the operation, its scopes, filter and pages, with an example that fits the schema', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<
+      string,
+      Record<
+        string,
+        {
+          operationId: string;
+          description: string;
+          parameters: { $ref?: string; name?: string; schema?: { enum?: string[] } }[];
+          responses: Record<string, { content?: Record<string, { example?: unknown }> }>;
+        }
+      >
+    >;
+    const op = paths['/automations/{id}/enrollments/{enrollmentId}/contacts']?.get;
+    expect(op?.operationId).toBe('listAutomationEnrollmentContacts');
+    expect(API_ROUTES).toContainEqual([
+      'get',
+      '/automations/{id}/enrollments/{enrollmentId}/contacts',
+    ]);
+    expect(op?.description).toContain('`automations.start`');
+    expect(op?.description).toContain('`contacts.read`');
+    expect(op?.parameters.map((p) => p.$ref ?? p.name)).toEqual([
+      '#/components/parameters/Id',
+      'enrollmentId',
+      'limit',
+      'cursor',
+      'outcome',
+    ]);
+    expect(op?.parameters.at(-1)?.schema?.enum).toEqual([
+      'pending',
+      'started',
+      'refused',
+      'cancelled',
+    ]);
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '403', '404', '422']),
+    );
+    const content = op?.responses['200']?.content?.['application/json'];
+    expect(JSON.stringify(content)).toContain('#/components/schemas/AutomationEnrollmentContact');
+    expect(content?.example).toBe(ENROLLED_CONTACTS_EXAMPLE);
+    for (const item of ENROLLED_CONTACTS_EXAMPLE.data) {
+      apiEnrolledContactSchema.strict().parse(item);
+    }
+    const schemas = (doc.components as { schemas: Record<string, { properties?: object }> })
+      .schemas;
+    expect(Object.keys(schemas.AutomationEnrollmentContact?.properties ?? {}).sort()).toEqual(
+      ['contact', 'contactId', 'outcome', 'position', 'processedAt', 'reason', 'runId'].sort(),
+    );
+    // The enrolment's own description now points to the list.
+    expect(paths['/automations/{id}/enrollments/{enrollmentId}']?.get?.description).toContain(
+      '/contacts lists its contacts',
+    );
   });
 });

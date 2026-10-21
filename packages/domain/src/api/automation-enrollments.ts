@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AppError, isAppError, notFound, uuidv7 } from '@w360/core';
 import {
+  AUTOMATION_ENROLLMENT_OUTCOMES,
   and,
   automationEnrollments,
   automations,
@@ -8,6 +9,7 @@ import {
   sql,
   tenants,
   type AutomationEnrollmentEndReason,
+  type AutomationEnrollmentOutcome,
   type AutomationEnrollmentSource,
   type AutomationEnrollmentStatus,
   type SQL,
@@ -19,12 +21,19 @@ import { normalizeTag } from '../contacts/fields';
 import { contactFilterConditionsFor, type contactFilterSchema } from '../contacts/service';
 import {
   assertEnrollableCount,
+  enrolledContactsCursorSchema,
+  enrolledContactsPage,
   enrollmentKeyScopes,
   ENROLLMENT_LIMITS,
+  toEnrolledContact,
+  type EnrolledContact,
+  type EnrolledContactState,
 } from '../automations/enrollment-model';
 import {
   ENROLLMENT_RUNNING_MESSAGE,
+  assertEnrollmentOfAutomation,
   enrollmentRunningConflict,
+  selectEnrolledContacts,
   loadEnrollmentSegment,
   matchingContactIds,
   readEnrollmentDetail,
@@ -118,6 +127,22 @@ export const apiEnrollmentListQuerySchema = z
   .object({
     limit: z.coerce.number().int().min(1).max(API_LIMITS.pageSize).default(50),
     cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
+  })
+  .strict();
+
+/** `GET /automations/{id}/enrollments/{enrollmentId}/contacts` (ADR-408). */
+export const apiEnrolledContactQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(API_LIMITS.pageSize).default(50),
+    cursor: enrolledContactsCursorSchema
+      .optional()
+      .describe('`nextCursor` from the previous page.'),
+    outcome: z
+      .enum(AUTOMATION_ENROLLMENT_OUTCOMES)
+      .optional()
+      .describe(
+        'Only the contacts with this outcome: pending (not handled yet), started, refused or cancelled (not started because the enrolment stopped).',
+      ),
   })
   .strict();
 
@@ -471,6 +496,72 @@ export async function apiGetEnrollment(
     },
     { accessMode: 'read only' },
   );
+}
+
+/**
+ * One enrolled contact as the API gives it (ADR-408): ids and the outcome, never a name or a number
+ * (`GET /contacts/{id}` gives the contact), and no id for an erased contact, as the API lists no
+ * erased contact.
+ */
+export interface ApiEnrolledContact {
+  position: number;
+  contactId: string | null;
+  contact: EnrolledContactState;
+  outcome: AutomationEnrollmentOutcome;
+  reason: string | null;
+  runId: string | null;
+  processedAt: string | null;
+}
+
+export function toApiEnrolledContact(c: EnrolledContact): ApiEnrolledContact {
+  return {
+    position: c.position,
+    contactId: c.contactId,
+    contact: c.contact,
+    outcome: c.outcome,
+    reason: c.reason,
+    runId: c.runId,
+    processedAt: c.processedAt?.toISOString() ?? null,
+  };
+}
+
+/**
+ * An enrolment's contacts in position order with their outcomes, on keyset pages, of one outcome
+ * when asked (ADR-408): the scope reading the enrolment needs (`automations.start`) and
+ * `contacts.read`, as the list names contacts; both read, so also while the company is suspended.
+ * Another automation's or company's enrolment is not found.
+ */
+export async function apiListEnrolledContacts(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  automationId: string,
+  enrollmentId: string,
+  query: unknown,
+): Promise<{ data: ApiEnrolledContact[]; nextCursor: string | null }> {
+  assertAnyScope(ctx, ['automations.start']);
+  assertAnyScope(ctx, ['contacts.read']);
+  if (!z.uuid().safeParse(automationId).success || !z.uuid().safeParse(enrollmentId).success) {
+    throw notFound('Enrolment');
+  }
+  const q = parseInput(apiEnrolledContactQuerySchema, query);
+  const rows = await deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      await assertEnrollmentOfAutomation(tx, ctx.tenant.id, automationId, enrollmentId);
+      return selectEnrolledContacts(tx, ctx.tenant.id, enrollmentId, {
+        ...(q.outcome ? { outcome: q.outcome } : {}),
+        ...(q.cursor ? { after: q.cursor } : {}),
+        limit: q.limit + 1,
+      });
+    },
+    { accessMode: 'read only' },
+  );
+  const { shown, nextCursor } = enrolledContactsPage(rows, q.limit);
+  // No number is shown: the mapping never asks for one.
+  return {
+    data: shown.map((r) => toApiEnrolledContact(toEnrolledContact(r, () => null))),
+    nextCursor,
+  };
 }
 
 /**
