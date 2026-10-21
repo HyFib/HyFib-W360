@@ -405,6 +405,21 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   // The order list shows it fulfilled.
   await openTab(page, 'Orders');
   await expect(page.getByRole('cell', { name: 'Fulfilled' })).toBeVisible();
+
+  // The order report counts it this week by status, total and product (ADR-409).
+  await page.getByRole('link', { name: 'Order report', exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/commerce/orders/report$`));
+  await expect(page.getByRole('heading', { name: 'Order report', exact: true })).toBeVisible();
+  const rowWith = (cell: string) =>
+    page.getByRole('row').filter({ has: page.getByRole('cell', { name: cell, exact: true }) });
+  const fulfilledRow = rowWith('Fulfilled');
+  await expect(fulfilledRow.getByRole('cell', { name: '₹320.50', exact: true })).toBeVisible();
+  const chai = rowWith('chai-1');
+  await expect(chai.getByRole('cell', { name: 'Masala chai', exact: true })).toBeVisible();
+  await expect(chai.getByRole('cell', { name: '₹240.00', exact: true })).toBeVisible();
+  const biscuits = rowWith('chai-2');
+  await expect(biscuits.getByRole('cell', { name: '₹80.50', exact: true })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 });
 
 test('catalog products are listed on a deal with quantities and prices, and their total becomes its value (ADR-375)', async ({

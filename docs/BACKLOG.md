@@ -516,10 +516,14 @@ verification, app review, Embedded Signup configuration).
   notifications, paid and fulfilled). **[Order exports built; their database test runs only in CI]**
   (ADR-235: the orders a member can see as CSV, filtered by status, with `commerce.read` and
   `contacts.export`, numbers masked as for the member, erased contacts blanked, audited; no
-  migration). **Remaining:** checks on an approved sandbox number and with a company's Razorpay test
+  migration). **[Order reports built; their database and browser tests run only in CI]** (ADR-409:
+  Commerce → Orders → Order report, for a period of whole company days as Reports choose them, the
+  orders per day and status, exact subtotals per currency, items by product and unreadable items
+  apart, over the orders the member's list shows, with `commerce.read`; totals only; no migration).
+  **Remaining:** checks on an approved sandbox number and with a company's Razorpay test
   keys (release checklist), product enquiries (`referred_product`), payments inside WhatsApp
   (`order_details`, needs Meta payment configuration), writing to catalogs and stock, refunds from
-  HyFib, order reports, sending products from automations.
+  HyFib, sending products from automations.
 - **P4-06b Store connectors** — _implemented and locally verified (2026-09-27) against the Shopify
   and WooCommerce stand-ins; no live store traffic yet_: companies connect Shopify stores through
   HyFib's Shopify app (a signed callback bound to the member who started it, `read_orders` and

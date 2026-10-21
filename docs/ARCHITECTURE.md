@@ -1029,6 +1029,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `commerce/orders.ts`) in the same transaction as their message. Companies' Razorpay accounts
   notify `/api/webhooks/razorpay-links/<address id>` (256 KB limit) → `commerce/webhook.ts`, which
   verifies the company's signature, records the event id and signals a fetch of the link.
+- **Order reports** (ADR-409, `commerce/order-report.ts`): `orderReport` reads, for a period from
+  Reports' `resolvePeriod`, the orders per company day, status and currency, their subtotals summed
+  in SQL as numeric and carried as `bigint`, and the items by product (the 200 most ordered), over
+  the order list's visibility, in one repeatable-read, read-only snapshot bounded by the period on
+  `commerce_orders_list_idx`; `/c/{slug}/commerce/orders/report` shows them as tables.
 - **Web** (`/c/{slug}/commerce`): orders with status filters and paging; an order page with items,
   total, note, status buttons, Payment Links (status, address, not-sent reason) and the request and
   cancel actions; catalogs per WhatsApp account with the read state and a "Read from Meta" button;
@@ -1038,7 +1043,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Erasure** (`app.erase_contact`, replaced in 0018): clears the customer's note on their orders
   and requests cancellation of their open links; orders and amounts stay as business records.
 - **Not built yet:** writing to catalogs, stock updates, product enquiries (`referred_product`,
-  M-171), payments inside WhatsApp (`order_details`, M-174), refunds from HyFib, and order reports.
+  M-171), payments inside WhatsApp (`order_details`, M-174), and refunds from HyFib.
   Shopify and WooCommerce stores are §6J.
 
 ## 6J. Store connectors **[built — verified against the local Shopify and WooCommerce stand-ins only; no live store traffic]**

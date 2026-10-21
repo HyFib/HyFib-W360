@@ -17842,3 +17842,57 @@ Decision:
 Not built: exporting an enrolment's contacts as CSV; searching them by name or number; stopping or
 re-enrolling the contacts of one outcome; names and numbers in the API's rows; reading an
 enrolment's runs through `GET /automation-runs/{id}`.
+
+## ADR-409 WhatsApp order reports: totals by day and by product (P4-06a) (2026-10-21)
+
+Context: Commerce → Orders lists the carts customers send from the company's WhatsApp catalog and
+exports them as CSV (ADR-235), but a company that wanted to know how many orders arrived each day,
+what they came to in each currency or which products sold had to export the orders and count them
+elsewhere. ADR-235 listed "order reports (totals by day or product)" as not built.
+
+Decision:
+
+- **On Commerce → Orders, not in Reports.** The report is a page of its own,
+  `/c/{slug}/commerce/orders/report`, linked from the order list ("Order report"). Reports'
+  numbers are the company's, read with `reports.read` by members who may not see a single
+  conversation (analysts, marketers), and are the same in report emails and `GET /reports`
+  (ADR-297); an order's visibility is the inbox's, member by member (ADR-235), so order totals
+  would have been the only figures on that page to change with who reads them, and an analyst
+  (no `commerce.read`) would have read orders through them. So no metric definition is added and
+  no migration: the order report reuses what Reports decided rather than their registry: periods
+  from `resolvePeriod` (a preset or custom whole days in the company's time zone, at most 92 days,
+  not after today; the same form and wording) and one repeatable-read, read-only snapshot
+  (ADR-026) under the company's scope.
+- **What it counts:** the orders received in the period (by `received_at`, the order list's
+  time), per day of the company and per status (the order's status now, as the list shows it);
+  their subtotals per currency, only for orders whose subtotal HyFib knows (every item read with a
+  price in one currency, ADR-046), the others counted as "orders without a known total", never
+  estimated; the totals by status; and the cart items HyFib could not read
+  (`dropped_items`), counted apart, with the orders that had any. By product: each retailer id
+  with the name HyFib's copy of the catalog gave on the latest order that had one ("Not in HyFib's
+  copy of the catalog" otherwise), the quantity, the number of orders and, per currency, quantity
+  × unit price for the items whose price HyFib read (the quantity without a readable price is
+  shown apart), whether or not the order as a whole has a total. The 200 most ordered products
+  are listed and the page says how many there were.
+- **Money exact.** Sums are taken in SQL as numeric over the bigint minor units (quantity ×
+  price as numeric, so no product overflows) and returned as text; `exactMinor` refuses anything
+  but whole digits and carries them as `bigint`; `formatOrderTotal` writes them in the currency's
+  major unit from that decimal text (`minorToMajorText`) and lets `Intl` format the text itself,
+  so a total beyond 2^53 minor units keeps every digit. No total passes through a float.
+- **Who and what:** `commerce.read`, over exactly the orders the member's list shows
+  (`orderVisibility`: every order with `inbox.read_all`; those of their own conversations and the
+  unassigned queue with `inbox.read_assigned`; none otherwise, so a marketer's report is empty as
+  their list is). Totals carry no customer data: no names, numbers, notes or references, so
+  neither `contacts.read` nor `contacts.export` is needed and the permission matrix is unchanged.
+  Viewing is not audited, as viewing the list is not.
+- **Bounded:** three queries per page (orders grouped by day, status and currency; products;
+  their priced subtotals for the listed products), each bounded by the period on
+  `commerce_orders_list_idx (tenant_id, received_at DESC, id DESC)` and reaching items through
+  `commerce_order_items_position_uq (tenant_id, order_id, position)`, under the pool's 15-second
+  statement timeout as Reports are. Both indexes exist since 0018, so no migration (no 0322).
+- **Tables only**, as the Reports page has no charts.
+
+Not built: a CSV of the totals and the report through the public API (both would repeat the page's
+numbers; the CSV of the orders stays ADR-235's), a choice of statuses or numbers, totals by
+customer, totals by the status an order had on a given day (statuses are today's), and store
+orders (P4-06b), which have their own copy.

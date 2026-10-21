@@ -1,5 +1,64 @@
 # Progress
 
+## 2026-10-21 — WhatsApp order reports by day and product (P4-06a, ADR-409)
+
+Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI only;
+no live Meta traffic.** Commerce → Orders listed and exported the carts customers send from the
+catalog, but totals per day or per product took an export and a spreadsheet. This closes P4-06a's
+"order reports".
+
+### Completed
+
+- **Placement:** a page of its own, Commerce → Orders → Order report
+  (`/c/{slug}/commerce/orders/report`), linked from the order list, rather than a Reports section:
+  order visibility follows the inbox member by member, while Reports' numbers are the company's
+  (also in report emails and `GET /reports`) and read by roles that see no conversation. Periods
+  and the snapshot are Reports' own (`resolvePeriod`, whole company days, at most 92, not after
+  today; one repeatable-read, read-only transaction).
+- **Figures:** orders per day and status (today's status), subtotals per currency for the orders
+  whose total HyFib knows, orders without a known total counted apart, unreadable cart items and
+  the orders that had them, totals by status; by product, the retailer id with the catalog's name,
+  quantity, orders, quantity × price per currency where the price was read and the quantity without
+  a price (the 200 most ordered listed, the count given). Tables only, as on Reports.
+- **Money:** sums as numeric in SQL, carried as `bigint` (`exactMinor`), formatted from decimal
+  text (`minorToMajorText`, `formatOrderTotal`), so nothing passes through a float.
+- **Access:** `commerce.read` over the order list's visibility (`orderVisibility`); no customer data,
+  so no contacts permission and no audit; the permission matrix is unchanged. Three queries bounded
+  by the period on the existing `(tenant_id, received_at)` index and the items' `(tenant_id,
+order_id, position)` key, so no migration (0322 unused).
+- **Docs:** ADR-409, ARCHITECTURE §6 commerce, SECURITY (Phase 4 commerce rules), THREAT-MODEL
+  T358, BACKLOG P4-06a (order reports built; ADR-235's "Not built" line left as history), feature
+  matrix W-113 evidence. No CSV of the totals and no API (not built, in the ADR).
+
+### Tests
+
+- Unit (`commerce/order-report.test.ts`, 13 tests): aggregation into every day of the period, per
+  status and currency, orders without a total and unreadable items apart, rows outside the period
+  or without a currency refused; exact major-unit text and display beyond 2^53 minor units (INR,
+  USD, JPY, BHD); period bounds at Kolkata's midnight and the 92-day and "after today" refusals;
+  every statement checked for the company, the period's bounds, the time zone, the visibility
+  condition, the currency grouping and the numeric product. Deliberate regressions: 21 of 21 in
+  `order-report.ts` caught; 2 in the service (visibility not passed, period in UTC) survive the unit
+  tests and are what the integration tests check.
+- Integration (CI only, `commerce.test.ts`, "order report (ADR-409)"): exact totals across
+  Kolkata's day boundaries (23:59:59 and midnight, before and after the period) and again in UTC,
+  INR and USD, an unreadable item and an unreadable price, mixed currencies, product names and an
+  unknown product; an agent sees only their own and unassigned conversations' orders, a marketer
+  none, another company's orders never count; an analyst is refused; period refusals.
+- E2E (CI only, `commerce.spec.ts`): after the stand-in's order is paid and fulfilled, the order
+  report shows it under Fulfilled with ₹320.50 and its products with exact subtotals.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                | Result                                                                              |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `eslint . --max-warnings=0`, prettier on changed files | clean                                                                               |
+| `pnpm typecheck`                                       | clean                                                                               |
+| `pnpm test` (unit)                                     | 2,039 of 2,039 passed (182 files)                                                   |
+| `pnpm build`                                           | passed                                                                              |
+| deliberate regressions                                 | 21 of 21 caught in `order-report.ts`; 2 service-level left to the integration tests |
+| `pnpm test:integration`, `pnpm test:e2e`               | not run here: no local PostgreSQL or browser; CI runs them                          |
+
 ## 2026-10-21 — An enrolment's contacts listed with their outcomes (P4-01, ADR-408)
 
 Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI

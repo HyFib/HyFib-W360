@@ -808,6 +808,247 @@ describe('orders', () => {
   });
 });
 
+describe('order report (ADR-409)', () => {
+  // A fixed clock after the period, so the period never ends "after today" whenever CI runs.
+  const reportClock: Clock = { now: () => new Date('2026-10-21T06:00:00Z') };
+  const PERIOD = { preset: 'custom', from: '2026-10-01', to: '2026-10-03' };
+
+  async function orderAt(
+    c: Company,
+    catalogId: string,
+    items: { retailerId: string; quantity: number; price: number; currency?: string }[],
+    receivedAt: string,
+  ) {
+    const customer = waId();
+    await fx.deliver(orderMessage(c, customer, catalogId, items));
+    const conv = await conversationOf(c, customer);
+    const order = await orderOf(conv.id);
+    await fx.query(`UPDATE app.commerce_orders SET received_at = $1 WHERE id = $2`, [
+      receivedAt,
+      order.id,
+    ]);
+    return { id: order.id as string, conversationId: conv.id };
+  }
+
+  it('totals orders per company day, status, currency and product, exactly', async () => {
+    const c = await fx.company();
+    await fx.query(`UPDATE app.tenants SET timezone = 'Asia/Kolkata' WHERE id = $1`, [c.tenant.id]);
+    const owner = await fx.ctx(c, c.owner);
+    await syncedCatalog(c, owner, '5550031', 3);
+    const svc = service(reportClock);
+
+    // 23:59:59 on 1 October in Kolkata (UTC+05:30): the period's first day.
+    const a = await orderAt(
+      c,
+      '5550031',
+      [
+        { retailerId: 'sku-1', quantity: 2, price: 19.99 },
+        { retailerId: 'sku-2', quantity: 1, price: 250 },
+      ],
+      '2026-10-01T18:29:59Z',
+    );
+    // Midnight in Kolkata: already 2 October.
+    await orderAt(
+      c,
+      '5550031',
+      [{ retailerId: 'sku-1', quantity: 1, price: 10, currency: 'USD' }],
+      '2026-10-01T18:30:00Z',
+    );
+    // An unreadable item and an unreadable price: no total; the readable items still count.
+    const cart = await orderAt(
+      c,
+      '5550031',
+      [
+        { retailerId: 'sku-1', quantity: 3, price: 10 },
+        { retailerId: 'sku-3', quantity: 2, price: 19.999 },
+        { retailerId: '', quantity: 1, price: 500 },
+      ],
+      '2026-10-02T10:00:00Z',
+    );
+    // Items in two currencies: no total; each item's price still counts by product.
+    await orderAt(
+      c,
+      '5550031',
+      [
+        { retailerId: 'sku-3', quantity: 1, price: 5 },
+        { retailerId: 'sku-2', quantity: 1, price: 7, currency: 'USD' },
+        { retailerId: 'unknown-sku', quantity: 1, price: 1 },
+      ],
+      '2026-10-03T18:29:59.999Z',
+    );
+    // Just before and just after the period, in the company's days.
+    for (const at of ['2026-09-30T18:29:59Z', '2026-10-03T18:30:00Z']) {
+      await orderAt(c, '5550031', [{ retailerId: 'sku-1', quantity: 100, price: 1 }], at);
+    }
+    await svc.setOrderStatus(owner, { id: a.id, expectedVersion: 1, status: 'confirmed' });
+    await svc.setOrderStatus(owner, { id: cart.id, expectedVersion: 1, status: 'cancelled' });
+
+    const report = await svc.orderReport(owner, PERIOD);
+    expect(report.period.start.toISOString()).toBe('2026-09-30T18:30:00.000Z');
+    expect(report.period.end.toISOString()).toBe('2026-10-03T18:30:00.000Z');
+    expect(report.totals).toMatchObject({
+      orders: 4,
+      byStatus: { received: 2, confirmed: 1, cancelled: 1, paid: 0 },
+      subtotals: [
+        { currency: 'INR', count: 1, minor: 28998n },
+        { currency: 'USD', count: 1, minor: 1000n },
+      ],
+      withoutSubtotal: 2,
+      unreadableItems: 1,
+      ordersWithUnreadableItems: 1,
+    });
+    expect(report.days.map((d) => [d.day, d.orders, d.withoutSubtotal, d.unreadableItems])).toEqual(
+      [
+        ['2026-10-01', 1, 0, 0],
+        ['2026-10-02', 2, 1, 1],
+        ['2026-10-03', 1, 1, 0],
+      ],
+    );
+    expect(report.days[0]?.subtotals).toMatchObject([{ currency: 'INR', minor: 28998n }]);
+    expect(report.days[1]?.subtotals).toMatchObject([{ currency: 'USD', minor: 1000n }]);
+    expect(report.days[1]?.byStatus).toMatchObject({ received: 1, cancelled: 1 });
+    expect(report.statuses.find((s) => s.status === 'confirmed')).toMatchObject({
+      orders: 1,
+      subtotals: [{ currency: 'INR', minor: 28998n }],
+      withoutSubtotal: 0,
+    });
+
+    // Products: the readable items, most ordered first, priced where the price was read.
+    expect(report.productCount).toBe(4);
+    expect(report.products.map((p) => [p.retailerId, p.name, p.quantity, p.orders])).toEqual([
+      ['sku-1', 'Product 001', 6, 3],
+      ['sku-3', 'Product 003', 3, 2],
+      ['sku-2', 'Product 002', 2, 2],
+      ['unknown-sku', null, 1, 1],
+    ]);
+    const product = (id: string) => report.products.find((p) => p.retailerId === id);
+    expect(product('sku-1')).toMatchObject({
+      unpricedQuantity: 0,
+      subtotals: [
+        { currency: 'INR', count: 2, minor: 6998n },
+        { currency: 'USD', count: 1, minor: 1000n },
+      ],
+    });
+    expect(product('sku-3')).toMatchObject({
+      unpricedQuantity: 2,
+      subtotals: [{ currency: 'INR', count: 1, minor: 500n }],
+    });
+    expect(product('sku-2')).toMatchObject({
+      subtotals: [
+        { currency: 'INR', minor: 25000n },
+        { currency: 'USD', minor: 700n },
+      ],
+    });
+    expect(product('unknown-sku')?.subtotals).toMatchObject([{ currency: 'INR', minor: 100n }]);
+
+    // The company's days follow its time zone: in UTC the second order is still on 1 October,
+    // and the order at Kolkata's midnight after the period falls on 3 October.
+    await fx.query(`UPDATE app.tenants SET timezone = 'UTC' WHERE id = $1`, [c.tenant.id]);
+    const utc = await svc.orderReport(await fx.ctx(c, c.owner), PERIOD);
+    expect(utc.days.map((d) => d.orders)).toEqual([2, 1, 2]);
+    expect(utc.totals.orders).toBe(5);
+  });
+
+  it('counts only the orders a member sees in the list, never another company’s', async () => {
+    const c = await fx.company();
+    await fx.query(`UPDATE app.tenants SET timezone = 'Asia/Kolkata' WHERE id = $1`, [c.tenant.id]);
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const marketer = await fx.ctx(c, c.marketer);
+    await syncedCatalog(c, owner, '5550032', 2);
+    const svc = service(reportClock);
+    const mine = await orderAt(
+      c,
+      '5550032',
+      [{ retailerId: 'sku-1', quantity: 1, price: 100 }],
+      '2026-10-02T06:00:00Z',
+    );
+    const owners = await orderAt(
+      c,
+      '5550032',
+      [{ retailerId: 'sku-2', quantity: 5, price: 20 }],
+      '2026-10-02T07:00:00Z',
+    );
+    const queue = await orderAt(
+      c,
+      '5550032',
+      [{ retailerId: 'sku-1', quantity: 2, price: 100 }],
+      '2026-10-02T08:00:00Z',
+    );
+    await fx.query(`UPDATE app.conversations SET assigned_membership_id = $1 WHERE id = $2`, [
+      agent.membership.id,
+      mine.conversationId,
+    ]);
+    await fx.query(`UPDATE app.conversations SET assigned_membership_id = $1 WHERE id = $2`, [
+      owner.membership.id,
+      owners.conversationId,
+    ]);
+
+    // Another company's order in the same period, with the same retailer ids, is never counted.
+    const other = await fx.company();
+    const otherOwner = await fx.ctx(other, other.owner);
+    await syncedCatalog(other, otherOwner, '5550033', 2);
+    await orderAt(
+      other,
+      '5550033',
+      [{ retailerId: 'sku-1', quantity: 9, price: 1000 }],
+      '2026-10-02T06:00:00Z',
+    );
+
+    const all = await svc.orderReport(owner, PERIOD);
+    expect(all.totals.orders).toBe(3);
+    expect(all.totals.subtotals).toMatchObject([{ currency: 'INR', count: 3, minor: 40000n }]);
+    expect(all.products.map((p) => [p.retailerId, p.quantity])).toEqual([
+      ['sku-2', 5],
+      ['sku-1', 3],
+    ]);
+
+    // An agent sees their own conversations and the unassigned queue, as in the list.
+    const theirs = await svc.orderReport(agent, PERIOD);
+    expect((await svc.orders(agent)).orders.map((o) => o.id).sort()).toEqual(
+      [mine.id, queue.id].sort(),
+    );
+    expect(theirs.totals.orders).toBe(2);
+    expect(theirs.totals.subtotals).toMatchObject([{ currency: 'INR', count: 2, minor: 30000n }]);
+    expect(theirs.products.map((p) => [p.retailerId, p.quantity, p.orders])).toEqual([
+      ['sku-1', 3, 2],
+    ]);
+    expect(theirs.productCount).toBe(1);
+    // Marketers read commerce but see no conversations: nothing is counted for them.
+    const none = await svc.orderReport(marketer, PERIOD);
+    expect(none.totals.orders).toBe(0);
+    expect(none.products).toHaveLength(0);
+    expect(none.productCount).toBe(0);
+
+    const theirsAll = await svc.orderReport(otherOwner, PERIOD);
+    expect(theirsAll.totals.orders).toBe(1);
+    expect(theirsAll.totals.subtotals).toMatchObject([{ currency: 'INR', minor: 900000n }]);
+  });
+
+  it('needs commerce.read and a period Reports would accept', async () => {
+    const c = await fx.company();
+    const svc = service(reportClock);
+    const analyst = await fx.ctx(c, await member(c, 'analyst'));
+    await expectAppError(svc.orderReport(analyst, PERIOD), 'forbidden');
+    const owner = await fx.ctx(c, c.owner);
+    await expectAppError(
+      svc.orderReport(owner, { preset: 'custom', from: '2026-01-01', to: '2026-10-01' }),
+      'validation_failed',
+      /at most 92 days/,
+    );
+    await expectAppError(
+      svc.orderReport(owner, { preset: 'custom', from: '2026-10-20', to: '2026-10-22' }),
+      'validation_failed',
+      /after today/,
+    );
+    // A preset reads up to today in the company's time zone.
+    const week = await svc.orderReport(owner, {});
+    expect(week.period.days).toHaveLength(7);
+    expect(week.period.to).toBe(dayOf(reportClock.now(), owner.tenant.timezone));
+    expect(week.totals.orders).toBe(0);
+  });
+});
+
 describe('payment links', () => {
   it('creates one link per request, records payment only from Razorpay, and handles cancel and expiry', async () => {
     const c = await fx.company();

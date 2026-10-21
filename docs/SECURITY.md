@@ -647,6 +647,12 @@ Phase 4 rules (Commerce, P4-06a):
   of conversations the member can see, with customers' names, numbers (masked as for the member,
   ADR-226) and notes, formula-neutralised; an erased contact's orders carry neither number nor note.
   Each export is audited (`commerce.orders_exported`, with the status filter).
+- The order report (ADR-409) needs `commerce.read` only and totals exactly the orders the member's
+  list shows (the inbox's visibility: none for roles that see no conversation), inside the
+  company's scope; it carries counts and amounts by day, status, currency and product (retailer id
+  and catalog name), never a customer's name, number, note or an order reference, so it needs no
+  contacts permission and is not audited, as viewing the list is not. The period is resolved as
+  Reports resolve it (whole company days, at most 92, not after today).
 - The company's key secret and webhook secret are sent once, stored as keyring ciphertexts bound to
   the company and account (`commerce-payments:<company>:<account>:<key|webhook>`), never returned
   to the browser or logged, and used only by the worker (keys) and the merchant webhook route
