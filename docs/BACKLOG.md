@@ -127,8 +127,11 @@ verification, app review, Embedded Signup configuration).
   company's marketing opt-out keyword as a button; no migration). **Remaining:** creating media
   headers (Resumable Upload + media storage) and sending them outside the API (which sends them with
   a link since ADR-201), named parameters, authentication/OTP, carousel, LTO, copy-code and catalog
-  templates, editing approved templates (`POST /{template-id}`), starters in other languages, and a
-  sandbox run with a real WABA.
+  templates, changing a template's category in an edit, starters in other languages, and a sandbox
+  run with a real WABA. **[Editing a template Meta has built; its database and browser tests run
+  only in CI]** (ADR-404: `POST /{template-id}` from the Templates page and the API, written ahead,
+  paced, re-read from Meta, lost answers settled by the sync; name, language and category stay;
+  refused while a campaign using it is sending; migration 0316).
 - **P3-04 Campaigns** — _implemented (2026-09-26), sends verified against the Graph stand-in
   only_: saved segments (incl. campaign-response retargeting), drafts with a review panel,
   audience snapshots re-checked when queued and before dispatch, optional four-eyes approval,
@@ -154,9 +157,15 @@ verification, app review, Embedded Signup configuration).
   Meta last reported it (ADR-398), against the contacts the campaign may reach, an upper bound; a
   warning only above a tier's figure from research M-058, "limit unknown" for `TIER_50`, `UNTIERED`,
   an unlisted value, none reported or a number never read; a notice that never blocks; the API's
-  draft review gives it as `messagingLimit`). **Remaining:** the 10k run in staging with real
-  dispatch, per-recipient time zones, A/B variants, media-header templates (only the API sends
-  them, ADR-201).
+  draft review gives it as `messagingLimit`). **[A/B template variants built; their database and
+  browser tests run only in CI]** (ADR-405, migrations 0317 and 0318: a draft may add variant B, a
+  second template of the same number's account with its own variables, for 10% to 90% of the
+  recipients in steps of 5; each recipient's variant comes from a stable hash of the campaign and
+  the contact, recorded once with the snapshot; every check, estimate and the approval runs per
+  variant; results per variant side by side, descriptive only; the API creates, reviews and reads
+  variants and names each recipient's, as does `campaign.recipient_skipped`). **Remaining:** the
+  10k run in staging with real dispatch, per-recipient time zones, more than two variants (the
+  table takes them), media-header templates (only the API sends them, ADR-201).
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and
@@ -256,9 +265,16 @@ verification, app review, Embedded Signup configuration).
   automation started by a member or through the API, with its inputs given once; a signed
   `automation.enroll` job starts them 50 per transaction with the API's start steps, each refusal
   recorded with its reason, resumable without a second run; one running enrolment per automation;
-  stop leaves started runs going). **Remaining:** starting runs from campaigns, enrolling through
-  the public API, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real
-  sandbox run (release checklist).
+  stop leaves started runs going). **[Enrolling through the public API built; its database and
+  browser tests run only in CI]** (ADR-403, migration 0315: `POST /automations/{id}/enrollments`
+  with a saved segment or a tag and marketing consent written as `POST /contacts/search` writes
+  them, scopes `automations.start` and `contacts.read` (`campaigns.read` for a segment), one
+  per `Idempotency-Key`; keyset-paged reads and a stop; the enrolment names its key, each batch
+  re-checks the key and the plan and ends it with its reason; members' and keys' enrolments are
+  visible to both; contacts' outcomes one by one not listed). **Remaining:** starting runs from
+  campaigns, an enrolment's contacts listed with their outcomes (in the app and the API), a
+  drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox run (release
+  checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
   placeholders, headers, JSON body, values saved from the response, success and failure branches);

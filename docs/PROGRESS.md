@@ -1,5 +1,302 @@
 # Progress
 
+## 2026-10-21 — A/B template variants for campaigns (P3-04, ADR-405)
+
+Status: **Implemented (migrations 0317 and 0318); unit tests run locally, integration and e2e tests
+in CI only; no live Meta traffic.** A campaign sent one template to its whole audience; comparing
+two messages took two campaigns over hand-split audiences. This closes P3-04's "A/B variants".
+
+### Completed
+
+- **Data model:** `app.campaign_variants` (variant B: template, mapping, share of 10% to 90% in
+  steps of 5; labels B to Z so more variants need no new table) and
+  `app.campaign_recipients.variant` (`NOT NULL DEFAULT 'A'`, never updated: no grant); 0318
+  validates its check. Every tenant-table rule, the export spec and deletion step 705.
+- **Assignment:** each recipient's variant from the MD5 of "campaign:contact" modulo 100, in SQL
+  when the audience is taken and in TypeScript for tests; recorded once, so retries, restarts,
+  pauses, resumes and resubmissions keep it. For 10,000 deterministic contacts the observed share
+  differs from the chosen one by at most 0.89 percentage points.
+- **Checks per variant:** template, approval, account, mapping, consent and opt-in by category,
+  frequency cap for marketing variants, a variant nobody can receive; problems name their variant
+  ("Variant B: …"); without B the wording is unchanged. Costs per variant at its category's rate,
+  summed once (no wallet reservation exists for campaigns, ADR-023). Approval and resuming check
+  both templates; the approval email names both and the split; the messaging-limit notice counts
+  all recipients.
+- **Runner:** sends each recipient its recorded variant's template and variables; pauses when the
+  template of a variant that still has pending recipients can no longer be sent (a finished
+  variant, or a B that got no recipients, is never checked; resuming and approving follow the same
+  rule). Test sends take a variant.
+- **Review fixes (before merge):** exact integration assertions updated for the new fields (six);
+  the finished-variant rule above; the top-level template fields described as variant A's; the
+  `campaign.submitted` audit records each variant's category and share; 0317 alters the recipients
+  before creating the table that locks the campaigns; the e2e checks each variant's exact cell.
+- **CI's first run (PR #105, 2026-10-21):** the test that the runtime role cannot change a
+  recorded variant expected PostgreSQL's message itself, but the database layer maps a refused
+  privilege to `forbidden` ("Operation not permitted.") with the reason as its cause; it now
+  checks both, as the API's guarded-column tests do. The refusal itself was right. The e2e's
+  first full run (Chromium) found its "Handed to WhatsApp" term ambiguous with the "How these
+  numbers are counted" term "Handed to WhatsApp (campaign.queued v1)"; it now matches the term's
+  exact text.
+- **Codex review (PR #105):** the campaign page now reads the campaign, each variant's results
+  and the totals in one repeatable-read snapshot, as the API's detail does, so the variants add up
+  to the results while recipients are being sent.
+- **Results:** a Variants card side by side with the results' denominators, descriptive only (no
+  winner, no significance); the recipients page and CSV name each recipient's variant.
+- **API and webhooks (additive):** `variantB` on draft create/edit and in settings, `variants` on
+  `GET /campaigns/{id}` and the draft review, `variant` on each recipient and in
+  `campaign.recipient_skipped`; OpenAPI with schema tests.
+- **Docs:** ADR-405, ARCHITECTURE §6B, SECURITY, DATA-RETENTION, DEPLOYMENT (0317, 0318), RUNBOOKS
+  §10A, BACKLOG P3-04, feature matrix W-052. No threat-model row: another company's template is the
+  existing tenant-isolation threat, closed by the composite foreign key and the scoped read.
+
+### Tests
+
+- Unit (`campaigns/variants.test.ts`, `api/api.test.ts`, `webhooks/webhooks.test.ts`): the split
+  (deterministic, nested shares, within 1.5 points at 10,000), checks per variant, costs per
+  variant, the approval email, the review's sums, the API's schemas and mapping, the webhook's
+  variant. Hand mutation of 16 key branches: 15 caught by unit tests; the 16th (the API recipient's
+  variant) is caught only by the integration test, which did not run here.
+- Integration (CI only, `campaigns.test.ts`, `api-campaigns.test.ts`): a two-variant campaign
+  assigns (SQL equal to TypeScript), prices, sends and reports per variant; a campaign without B is
+  unchanged; another company's template is refused as B; a marketing B without opt-in skips only
+  its own recipients; assignments survive a resubmission, pause, resume and ticks, and the runtime
+  role cannot update them; a finished variant whose template Meta paused never pauses the other, while one still sending does (and a resume names it); a B that got no recipients is ignored; the API creates, edits, reviews and reads variants.
+- E2E (CI only, `campaigns.spec.ts`): an A/B campaign drafted in the editor, reviewed with its
+  Variants table, submitted by a key, approved by the owner from the approval email, sent per
+  variant and reported per variant.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                            | Result                                                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                |
+| `pnpm test` (unit)                                 | 1,976 of 1,976 passed (180 files)                                                    |
+| `pnpm build`                                       | passed                                                                               |
+| migration parse check (pglast, 0317 onward)        | 0317 and 0318 parse                                                                  |
+| hand mutation of 16 key branches                   | 15 caught by unit tests; the API recipient's variant is left to the integration test |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: no local PostgreSQL or browser; CI runs them                           |
+
+## 2026-10-21 — Editing a template Meta already has (P3-03, ADR-404)
+
+Status: **Implemented (migration 0316); unit tests run locally, integration and e2e tests in CI
+only; no live Meta traffic.** A template could change only while Meta did not have it. This closes
+P3-03's "editing approved templates (`POST /{template-id}`)".
+
+### Completed
+
+- **Graph client:** `editTemplate` (`POST /{template-id}`, a typed `EditTemplateRequest` with the
+  unchanged category and the components only; `success: true` is the only answer read as done) and
+  `getTemplate` (`GET /{template-id}`, Meta's default fields), from Meta's OpenAPI description
+  (research M-201, quoted there and in ADR-404).
+- **Domain:** `templates/edit-model.ts` (the request, `templateEditRefusal`, `sameTemplateContent`,
+  `editReconciliation`, `editRefusalText`) and `templates/edit.ts` (`templateUsage`,
+  `writeEditTemplate`, the `processTemplateEdit` worker, the sync's `reconcileTemplateEdit`); shared
+  template writes moved to `templates/shared.ts` without change. The service gains `editTemplate`
+  and `templateUsage` (`templates.submit`); deleting waits for an edit's answer.
+- **Worker:** a `template.edit` queue (5 retries of a connection that failed before sending), its
+  handler, and its pause deferral (ADR-399).
+- **Web:** on a template Meta has, members who submit templates get the editor with the category
+  fixed and a "Send edit to Meta" confirmation listing unfinished campaigns, published automations
+  and store messages that use it; the page shows an edit waiting for Meta, or Meta's refusal with its
+  code, and the history labels `Edit sent to Meta`, `Edited`, `Edit failed`.
+- **Public API:** `POST /api/v1/message-templates/{id}/edit` (`templates.submit`, optional
+  `Idempotency-Key`, OpenAPI described); templates give `edit`, and history `source` may be `edit`.
+- **Migration 0316:** the edit columns, the `edit` source, `ops.template_sync_due` syncing accounts
+  with an edit sending every 5 minutes.
+- **Graph stand-in (tests only):** template edit (accept, refuse, apply then drop, drop) and read by
+  id, with an e2e control.
+- **Docs:** ADR-404, research M-201 (and item 22 of the unconfirmed list), ARCHITECTURE, SECURITY,
+  RUNBOOKS (what to tell a member when Meta refuses or an edit waits), DEPLOYMENT (0316), BACKLOG,
+  feature matrix (W-059). No THREAT-MODEL row: the edit reaches Meta only through the existing
+  permission, paced job and audit trail, and adds no new input from outside the company.
+
+### Tests
+
+- Unit: `templates/edit-model.test.ts` (request builder and Graph calls, every refusal, content
+  comparison, the window and deferral, the refusal text), `api/message-template-drafts.test.ts`
+  (scope, id and body refusals before reading, the written-ahead transaction, refusals that write
+  nothing, deletion while an edit is sending, the OpenAPI text), `api/message-templates.test.ts`
+  (`edit` in a template), the worker's deferral queues.
+- Integration (`tests/integration/template-edits.test.ts`, CI only): an edit sent once and the
+  template stored as Meta reports it; the status kept and a sync requested when the read fails; a
+  lost answer confirmed, and another unconfirmed after the window, with the due list including the
+  account; Meta's refusal with its code; the category kept and no change refused; the usage list and
+  the refusal while a campaign is sending; a draft refused; another company's template not found
+  (service and worker); an agent refused, a marketer allowed.
+- E2E (`tests/e2e/templates.spec.ts`, CI only): a template submitted and approved, edited after the
+  usage confirmation and read back; Meta's refusal shown with its code and the editor starting from
+  the content sent.
+- Hand mutations of key branches: 18/18 caught by the unit tests (refusals, window and deferral,
+  confirmation by content, the request's category and fields, `success: true` only, the member and
+  job key written ahead, validation before reads, deletion while sending, the refusal text).
+
+### Review fixes (before merge)
+
+An independent review found no High issue; its three Mediums and the rest are fixed (ADR-404's
+review section): an edit is sent at most once (`edit_id` in the job's reference, an attempt
+committed before the request, a run after it only asks for a sync); a failed edit Meta applied late
+is confirmed by the sync, and the job sends only with a minute of the window left; an edit that
+changes the template's variables or buttons is refused while an unfinished campaign, a published
+automation or a store rule uses it; scheduled campaigns are refused too, read under a share lock; a
+settle compares with the status stored then (no duplicate change); the window is on the database's
+clock; 0316's grants have a test; unconfirmed points (leaving out `name` and `language`, the
+listing before approval) are stated as such; DEPLOYMENT says how to clear edits left sending after
+a rollback; SECURITY states, and a unit test pins, why the usage list may name what uses a
+template. No existing exact assertion needed changing: the integration and e2e tests that read API
+templates, template history, template pages or template webhooks use `toMatchObject`, pick fields,
+or read objects the slice did not extend. Hand mutations of the new branches: 14/14 caught (13/14
+first; the survivor, refusing only with two or more users, led to a test with one).
+
+### Second review fixes (before merge)
+
+A second review found no High issue and four Mediums, all fixed (ADR-404's second review
+section): a stale refusal text in the integration test (the only other refusal texts tests match
+were checked); a 5xx or transient answer that paused the account keeps the edit's attempt (only a
+rate limit clears it, and a rate limit that paused nothing is retried); a shape-change refusal
+masks names as the usage list does, for members and keys; automations with runs in progress on any
+version that sends the template count as users; the deferral is stored on the database's clock;
+failed edits keep their account synced every 5 minutes for an hour; DEPLOYMENT's rollback statement
+works under forced row security. Documented rather than refused: launching, publishing or saving
+something that uses the template while a shape-changing edit is sending; the shape check being
+broader than each sender needs; the credit of a late confirmation. Hand mutations of the new
+branches: 10/11 caught by the unit tests; the eleventh (the refusal's masking inside
+`writeEditTemplate`) is covered only by a new integration test, run in CI.
+
+### Third review fixes (before merge)
+
+The production code was found sound. Fixed (ADR-404's third review): the pinned-version runs
+integration test (a customer message with a WhatsApp id, and the run's `next_step_at` per the
+table's checks; every raw insert and update in the new tests was re-read against the checks and
+NOT NULL columns); the failed edit's fast sync counts from the failure (`edit_failed_at`); the
+runs query tests each version's graph once; `isRateLimited` requires a retryable answer; masked
+usage drops ids; DEPLOYMENT's rollback reaches `w360_definer` through `SET ROLE`; the worker's
+comment and `memberVisibility`'s place. The rate-limit integration test now answers HTTP 429 with
+a pausing header.
+
+### CI's first run (PR #105, 2026-10-21)
+
+CodeQL reported a polynomial regular expression on data from the new exported template functions
+(`js/polynomial-redos`, `templates/definition.ts`): `VARIABLE_RE`, `\s*` around a lazy group,
+backtracked on an unclosed `{{` followed by much whitespace (old: 32 ms for 400 tabs; new: 1 ms
+for 200,000). It is now `\{\{([^{}]*)\}\}` with the inner text trimmed by its two callers: the
+same matches, captures and replacements (33,678 random placeholder matches compared, none
+different), and a unit test for the trimming and the unclosed case.
+
+Codex's review of the same PR found that the edit's campaign checks (campaigns scheduled or
+sending, and the usage behind the variables refusal and the confirmation) matched a campaign's own
+template only, missing campaigns that send the template as variant B (ADR-405); both queries now
+also match `app.campaign_variants`. An integration test (CI only) refuses an edit while such a
+campaign is running or scheduled, lists it, and refuses a change of variables it relies on.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                        | Result                                                                        |
+| ---------------------------------------------- | ----------------------------------------------------------------------------- |
+| `eslint`, `prettier --check`, `pnpm typecheck` | clean                                                                         |
+| `pnpm test` (unit)                             | 1,985 of 1,985 passed (180 files)                                             |
+| `pnpm build`                                   | passed                                                                        |
+| migration parse (pglast)                       | 0316 parses                                                                   |
+| `pnpm test:integration`, `pnpm test:e2e`       | not run here: the local PostgreSQL and browsers are unavailable; CI runs them |
+
+## 2026-10-21 — Review fixes in API enrolments (P4-01, ADR-403)
+
+Status: **Fixed; unit tests run locally, integration and e2e tests in CI only.** The independent
+review of ADR-403 found no High or Medium issue; these are its Low findings and nits.
+
+### Completed
+
+- **L1:** the run payload's `trigger`, `apiKeyId` and `enrollmentId`, the `automation.run_started`
+  description, `runTriggers` and every `runApiKeyIds` description (OpenAPI, endpoint fields) say an
+  enrolment is by a member or an API key and that a key's enrolment's runs carry no key. The
+  Settings label "API or a member's enrolment" is kept.
+- **L2:** `contacts.conditions` needs at least one condition (none: 422 pointing to a segment), and
+  an optional `expectedCount` is checked against the snapshot as a member's count is (409).
+- **L3:** the Contacts page's tag filter (`contactFilterConditionsFor`) adds `false` for a tag the
+  app would not keep, so the page, bulk edits, the export and members' enrolments find nobody
+  instead of everyone.
+- **L4:** DEPLOYMENT says enrolments ended with the new reasons stay and show blank on the older
+  page; the enrolment page now shows a reason without a label as its code.
+- **Nits:** scopes before conditions (403 before 422); `segmentId` only with `campaigns.read`; key
+  names quoted alike on the run, enrolment and automation pages; the worker sweep comment and a long
+  doc comment; DEPLOYMENT notes the foreign keys' brief lock on `app.api_keys`.
+- Cherry-picked PR #104's e2e label fix (5acc435) first.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                               | Result                                                               |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `eslint`, `prettier --check`, `pnpm typecheck`                        | clean                                                                |
+| `pnpm test` (unit)                                                    | 1,981 of 1,981 passed (179 files)                                    |
+| `pnpm build`                                                          | passed                                                               |
+| manual mutations of the new branches                                  | 5/5 caught by `enrollments.test.ts`                                  |
+| exact assertions in integration and e2e tests on the extended objects | none break: they use `toMatchObject` or pick fields                  |
+| `pnpm test:integration`, `pnpm test:e2e`                              | not run here: no PostgreSQL or browser on this machine; CI runs them |
+
+## 2026-10-21 — API keys enrol contacts or a segment in an automation (P4-01, ADR-403)
+
+Status: **Implemented (migration 0315); unit tests run locally, integration and e2e tests in CI
+only.** P4-01's Remaining listed "enrolling through the public API": keys started runs one contact
+at a time or 50 per call, without ADR-401's snapshot, one-running rule, pacing or sweep.
+
+### Completed
+
+- **Endpoints** (`api/automation-enrollments.ts`): `POST /api/v1/automations/{id}/enrollments`
+  (a `segmentId`, or `contacts.conditions` as `POST /contacts/search` writes them, limited to one
+  `tag` `has` and one marketing `consent` condition and mapped onto ADR-401's
+  `contactFilterSchema`; the inputs; `Idempotency-Key` required; 201 with the enrolment),
+  `GET …/enrollments` (newest first, keyset pages), `GET …/enrollments/{enrollmentId}` and
+  `POST …/{enrollmentId}/stop`. Scopes `automations.start` and `contacts.read`, `campaigns.read`
+  for a segment (with its conversation and order scopes), `messages.send_marketing` for marketing,
+  within the plan. 409 `enrollment_running` names the running enrolment; 409 `enrollment_ended` for
+  a stop of an ended one. OpenAPI: four operations, three schemas, the two new reasons.
+- **Shared with members' enrolments** (`automations/enrollments.ts`): the snapshot and first job,
+  the contacts' match, the segment, the stop, the list page and the detail moved into exported
+  steps both use; members' behaviour unchanged.
+- **Who started it** (migration 0315): `created_by_api_key_id` and `stopped_by_api_key_id` with
+  composite foreign keys and partial indexes, exactly one of member and key (a check), the stopper
+  check now also holding running rows, five new end reasons, `UPDATE` on the stopper only; export
+  spec lists the columns. Jobs of a key's enrolment are signed with no user.
+- **Each batch re-checks the key** in place of the member (`apiKeyEnrollmentEnd`): revoked or
+  gone, expired by the database's now, the API and every needed scope in the plan, the marketing
+  scope; a failure ends the enrolment with its reason.
+- **Pages:** the automation's and the enrolment's pages say "Started through the API with key
+  <name>" (and name a key that stopped it); a run page says "an enrolment through the API with key".
+- **Webhooks:** unchanged; runs of a key's enrolment carry `run.enrollmentId` and `apiKeyId: null`
+  (documented in ADR-403 and the OpenAPI description).
+- **Docs:** ADR-403, SECURITY, THREAT-MODEL T354, DATA-RETENTION, DEPLOYMENT (0315), RUNBOOKS,
+  ARCHITECTURE, BACKLOG P4-01, feature matrix H-054.
+
+### Tests
+
+- Unit (`automations/enrollments.test.ts`, 17 new): the key's re-check and every end reason, the
+  scopes, the marketing scope, the condition mapping and its refusals, the request schema, scopes
+  refused before any read, the 409s, a start and a stop as the key and a key's batch against the
+  recording database, and the OpenAPI document. Manual mutations of the key branches: 22/22 caught.
+- Integration (`tests/integration/api-automation-enrollments.test.ts`, CI only): a key's
+  enrolment in batches acting for the company with members and keys seeing each other's, a segment
+  with an idempotent replay and a reused key, missing scopes, another company's automation, segment
+  and enrolment not found, a key revoked mid-way, stop as a key, the starter check, foreign keys and
+  grants.
+- E2E (`tests/e2e/automations.spec.ts`, CI only): ADR-401's enrolment test goes on with a key's
+  enrolment through the API and checks both member pages name the key.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                        | Result                                                               |
+| ---------------------------------------------- | -------------------------------------------------------------------- |
+| `eslint`, `prettier --check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                             | 1,975 of 1,975 passed (179 files)                                    |
+| `pnpm build`                                   | passed                                                               |
+| migration parse check (pglast, 0311 to 0315)   | every file parsed                                                    |
+| manual mutations of the key branches           | 22/22 caught by `enrollments.test.ts`                                |
+| `pnpm test:integration`, `pnpm test:e2e`       | not run here: no PostgreSQL or browser on this machine; CI runs them |
+
+### Not done
+
+An enrolment's contacts listed with their outcomes (left for later: their runs are not readable
+through the API); enrolling contacts by id; other search conditions (save a segment);
+`expectedCount`; moving a rotated key's enrolments to its successor.
+
 ## 2026-10-21 — CI: the dependency audit cleared again (vite, GHSA-587h-7wmj-h5pm)
 
 Status: **Fixed and locally verified; CI to confirm.** PR #102's "Dependency audit and secret

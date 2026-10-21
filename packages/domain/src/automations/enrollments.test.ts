@@ -1,15 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { getTableName, type SQL, type Table } from 'drizzle-orm';
+import { getTableName, sql, type SQL, type Table } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { QUEUES } from '@w360/contracts';
 import { AppError, isAppError } from '@w360/core';
-import type { Database, TenantScope } from '@w360/db';
+import { AUTOMATION_ENROLLMENT_END_REASONS, type Database, type TenantScope } from '@w360/db';
+import {
+  ENROLLMENT_CONDITION_REFUSAL,
+  ENROLLMENT_NO_CONDITION_REFUSAL,
+  apiGetEnrollment,
+  apiListEnrollments,
+  apiStartEnrollment,
+  apiStartEnrollmentSchema,
+  apiStopEnrollment,
+  enrollmentFilterOf,
+  toApiEnrollment,
+} from '../api/automation-enrollments';
+import type { ApiContext } from '../api/context';
+import { API_ROUTES, buildOpenApiDocument } from '../api/openapi';
 import type { TenantContext } from '../authz/context';
+import { contactFilterConditionsFor } from '../contacts/service';
 import { RecordingJobQueue } from '../jobs/queue';
 import { JobSigner } from '../jobs/envelope';
 import {
+  ENROLLMENT_END_REASON_LABELS,
   ENROLLMENT_LIMITS,
   ENROLLMENT_REFUSAL_LABELS,
+  apiKeyEnrollmentEnd,
+  enrollmentKeyMayUse,
+  enrollmentKeyScopes,
   assertEnrollableCount,
   enrollmentBatchDelayMs,
   enrollmentBatchDue,
@@ -427,7 +445,16 @@ interface Scenario {
   updatedRows?: number;
   nextBatchAt?: Date | null;
   resignalCount?: number;
+  /** An enrolment an API key started (ADR-403): the key as its batch reads it, or null when gone. */
+  key?: { revokedAt?: Date | null; expiresAt?: Date | null; scopes?: string[] } | null;
+  source?: 'contacts' | 'segment';
+  /** The plan's monthly API requests (default 1,000) and the scopes it includes (default all). */
+  apiRequests?: number | null;
+  apiScopes?: string[] | null;
 }
+
+const KEY = '0192a1b2-0000-7000-8000-0000000000e9';
+const ENROLLER_KEY_SCOPES = ['automations.start', 'contacts.read'];
 
 /** The database's now, as the transaction reads it (the workers' clocks may differ from it). */
 const DB_NOW_SQL = 'extract(epoch from now())';
@@ -455,10 +482,10 @@ function scenarioAnswers(s: Scenario) {
               teams: 1,
               live_automations: 5,
               automation_runs: s.runsLeft === undefined ? null : 1_000,
-              api_requests: 1_000,
+              api_requests: s.apiRequests === undefined ? 1_000 : s.apiRequests,
               modules: s.modules ?? ['automations'],
               usage_anchor: '2026-10-01T00:00:00.000Z',
-              api_scopes: null,
+              api_scopes: s.apiScopes ?? null,
             },
           ],
         };
@@ -491,7 +518,7 @@ function scenarioAnswers(s: Scenario) {
                 id: ENROLLMENT,
                 tenantId: TENANT,
                 automationId: AUTOMATION,
-                source: 'contacts',
+                source: s.source ?? 'contacts',
                 segmentId: null,
                 inputs: s.inputs ?? { patient: 'Asha' },
                 status: s.status ?? 'running',
@@ -503,14 +530,26 @@ function scenarioAnswers(s: Scenario) {
                 cursorPosition: s.cursor ?? 0,
                 nextBatchAt: s.nextBatchAt ?? null,
                 resignalCount: s.resignalCount ?? 0,
-                createdByMembershipId: MEMBER,
-                createdByUserId: USER,
+                createdByMembershipId: s.key === undefined ? MEMBER : null,
+                createdByUserId: s.key === undefined ? USER : null,
+                createdByApiKeyId: s.key === undefined ? null : KEY,
                 stoppedByMembershipId: null,
+                stoppedByApiKeyId: null,
                 createdAt: NOW,
                 updatedAt: NOW,
                 endedAt: null,
               },
             ];
+      case 'api_keys':
+        return s.key
+          ? [
+              {
+                revokedAt: s.key.revokedAt ?? null,
+                expiresAt: s.key.expiresAt ?? null,
+                scopes: s.key.scopes ?? ENROLLER_KEY_SCOPES,
+              },
+            ]
+          : [];
       case 'memberships':
         return [{ roles: s.roles ?? ['admin'] }];
       case 'automations':
@@ -994,6 +1033,8 @@ describe('startEnrollment and stopEnrollment (ADR-401)', () => {
       nextBatchAt: expect.anything(),
       createdByMembershipId: MEMBER,
       createdByUserId: USER,
+      // A member's enrolment names no key (ADR-403).
+      createdByApiKeyId: null,
     });
     const rows = recording.steps.find(
       (st) => st.op === 'execute' && st.sql?.includes('automation_enrollment_contacts'),
@@ -1465,7 +1506,9 @@ describe('pacing per enrolment and the sweep’s cap (ADR-401 second review)', (
         resignalCount: 0,
         createdByMembershipId: MEMBER,
         createdByUserId: USER,
+        createdByApiKeyId: null,
         stoppedByMembershipId: null,
+        stoppedByApiKeyId: null,
         createdAt: minutes(-60),
         updatedAt: NOW,
         endedAt: null,
@@ -1567,5 +1610,745 @@ describe('pacing by the database’s clock (ADR-401 third review)', () => {
         ).toEqual({ resignalCount: 1, nextBatchAt: NOW });
       }
     }
+  });
+});
+
+// Enrolling through the public API (ADR-403) ------------------------------------------------------
+
+describe('re-checking the key that started an enrolment (ADR-403)', () => {
+  const key = (
+    over: Partial<{ revokedAt: Date | null; expiresAt: Date | null; scopes: string[] }> = {},
+  ) => ({
+    revokedAt: null,
+    expiresAt: null,
+    scopes: ['automations.start', 'contacts.read', 'campaigns.read'],
+    ...over,
+  });
+  const plan = (
+    over: Partial<{ apiRequests: number | null; apiScopes: Set<never> | null }> = {},
+  ) => ({
+    apiRequests: 1_000,
+    apiScopes: null,
+    ...over,
+  });
+  const end = (input: Partial<Parameters<typeof apiKeyEnrollmentEnd>[0]>) =>
+    apiKeyEnrollmentEnd({ key: key(), plan: plan(), source: 'contacts', now: NOW, ...input });
+
+  it('needs the scopes of starts and of reading contacts, and of reading segments for a segment', () => {
+    expect(enrollmentKeyScopes('contacts')).toEqual(['automations.start', 'contacts.read']);
+    expect(enrollmentKeyScopes('segment')).toEqual([
+      'automations.start',
+      'contacts.read',
+      'campaigns.read',
+    ]);
+  });
+
+  it('lets a key go on while a fresh request with it would be accepted', () => {
+    expect(end({})).toBeNull();
+    expect(end({ key: key({ expiresAt: new Date(NOW.getTime() + 1) }) })).toBeNull();
+    expect(end({ plan: plan({ apiRequests: null }) })).toBeNull();
+    // Batches are not requests: a month's requests used up does not end it (only a plan of 0 does).
+    expect(end({ plan: plan({ apiRequests: 1 }) })).toBeNull();
+  });
+
+  it('ends it when the key was revoked or is gone, expired, or the plan leaves the API or a scope out', () => {
+    expect(end({ key: null })).toBe('api_key_revoked');
+    expect(end({ key: key({ revokedAt: NOW }) })).toBe('api_key_revoked');
+    // Expired at the database's now exactly, as ops.api_key_authenticate refuses it.
+    expect(end({ key: key({ expiresAt: NOW }) })).toBe('api_key_expired');
+    // Revocation is named before expiry.
+    expect(end({ key: key({ revokedAt: NOW, expiresAt: NOW }) })).toBe('api_key_revoked');
+    expect(end({ plan: plan({ apiRequests: 0 }) })).toBe('api_not_in_plan');
+    expect(end({ key: key({ scopes: ['automations.start'] }) })).toBe('api_scope_missing');
+    const withoutContacts = new Set([
+      'automations.start',
+      'campaigns.read',
+    ]) as unknown as Set<never>;
+    expect(end({ plan: plan({ apiScopes: withoutContacts }) })).toBe('api_scope_missing');
+    // A segment also needs campaigns.read, from the key and the plan.
+    expect(
+      end({ source: 'segment', key: key({ scopes: ['automations.start', 'contacts.read'] }) }),
+    ).toBe('api_scope_missing');
+    expect(
+      end({ source: 'contacts', key: key({ scopes: ['automations.start', 'contacts.read'] }) }),
+    ).toBeNull();
+  });
+
+  it('allows marketing only when the key holds the marketing scope and the plan includes it', () => {
+    const marketer = key({ scopes: ['messages.send_marketing'] });
+    expect(enrollmentKeyMayUse(marketer, plan(), 'messages.send_marketing')).toBe(true);
+    expect(enrollmentKeyMayUse(key(), plan(), 'messages.send_marketing')).toBe(false);
+    expect(
+      enrollmentKeyMayUse(marketer, plan({ apiScopes: new Set() }), 'messages.send_marketing'),
+    ).toBe(false);
+  });
+
+  it('labels every end reason for members’ pages', () => {
+    expect(Object.keys(ENROLLMENT_END_REASON_LABELS).sort()).toEqual(
+      [...AUTOMATION_ENROLLMENT_END_REASONS].sort(),
+    );
+  });
+});
+
+describe('processEnrollmentBatch for a key’s enrolment (ADR-403)', () => {
+  it('starts each contact once the key is checked, acting for the company, and queues no member', async () => {
+    const contacts = Array.from({ length: 60 }, (_, i) => ({ n: i + 1 }));
+    const { result, steps, jobs } = await batchOf({ contacts, pendingRows: 51, key: {} });
+    expect(result).toMatchObject({ outcome: 'batch', started: 50, refused: 0 });
+    // The key and the plan were read; no member was.
+    expect(steps.some((st) => st.table === 'api_keys')).toBe(true);
+    expect(steps.some((st) => st.sql?.includes('tenant_entitlements'))).toBe(true);
+    expect(steps.some((st) => st.table === 'memberships')).toBe(false);
+    // Runs name the enrolment, never the key (the enrolment names it, ADR-403).
+    const runs = steps.filter((st) => st.op === 'insert' && st.table === 'automation_runs');
+    expect(runs.map((r) => [r.values?.apiKeyId, r.values?.enrollmentId])).toEqual(
+      Array.from({ length: 50 }, () => [null, ENROLLMENT]),
+    );
+    const next = jobs.find((j) => j.queue === QUEUES.automationEnroll.name);
+    expect(next?.envelope).toMatchObject({ kind: 'automation.enroll', actorUserId: null });
+    expect(next?.options.singletonKey).toBe(enrollmentJobKey(ENROLLMENT, 50));
+  });
+
+  it('ends a key’s enrolment, starting nobody, when the key or the plan no longer allows it', async () => {
+    const cases: [Partial<Scenario>, string][] = [
+      [{ key: null }, 'api_key_revoked'],
+      [{ key: { revokedAt: NOW } }, 'api_key_revoked'],
+      [{ key: { expiresAt: new Date(NOW.getTime() - 1) } }, 'api_key_expired'],
+      [{ key: {}, apiRequests: 0 }, 'api_not_in_plan'],
+      [{ key: { scopes: ['automations.start'] } }, 'api_scope_missing'],
+      [{ key: {}, apiScopes: ['automations.start'] }, 'api_scope_missing'],
+      [{ key: {}, source: 'segment' }, 'api_scope_missing'],
+      // Marketing templates need the key's marketing scope, as a start does.
+      [{ key: {}, marketingTemplate: true }, 'marketing_not_allowed'],
+    ];
+    for (const [scenario, reason] of cases) {
+      const { result, steps } = await batchOf({ contacts: [{ n: 1 }, { n: 2 }], ...scenario });
+      expect(result, reason).toMatchObject({ outcome: 'finished', status: 'stopped', reason });
+      expect(steps.some((st) => st.op === 'insert' && st.table === 'automation_runs')).toBe(false);
+      expect(endOf(steps)).toMatchObject({ status: 'stopped', endReason: reason, inputs: {} });
+    }
+    // With the marketing scope, from the key and the plan, it goes on.
+    const { result } = await batchOf({
+      contacts: [{ n: 1, marketing: 'opted_in' }],
+      key: { scopes: ['automations.start', 'contacts.read', 'messages.send_marketing'] },
+      marketingTemplate: true,
+    });
+    expect(result).toMatchObject({ outcome: 'finished', status: 'completed', started: 1 });
+  });
+});
+
+describe('enrolling through the public API (ADR-403)', () => {
+  const apiCtx = (scopes: string[], status = 'active') =>
+    ({
+      tenant: { id: TENANT, status },
+      key: { id: KEY, scopes: new Set(scopes) },
+      planScopes: null,
+      scope: {},
+      requestId: 'req-1',
+    }) as unknown as ApiContext;
+  const idem = { key: 'enrol-1', requestHash: 'h'.repeat(64) };
+  const body = (over: Record<string, unknown> = {}) => ({
+    contacts: { conditions: [{ type: 'tag', op: 'has', tag: 'VIP' }] },
+    inputs: { patient: 'Asha' },
+    ...over,
+  });
+  async function refusal(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return {
+        code: error.code,
+        reason: error.details?.apiReason,
+        message: error.publicMessage,
+        issues: error.issues,
+      };
+    }
+    throw new Error('expected a refusal');
+  }
+
+  /** The start's reads: the idempotency claim, the automation, nothing running, the contacts. */
+  function apiAnswers(s: { running?: boolean; contacts?: number; marketingTemplate?: boolean }) {
+    const base = scenarioAnswers({
+      contacts: Array.from({ length: s.contacts ?? 2 }, (_, i) => ({ n: i + 1 })),
+      key: {},
+      ...(s.marketingTemplate ? { marketingTemplate: true } : {}),
+    });
+    return (step: Step): unknown => {
+      if (step.table === 'api_idempotency_keys')
+        return step.op === 'insert' ? [{ id: 'claim' }] : [];
+      if (step.op === 'select' && step.table === 'automation_enrollments') {
+        if (step.fields.length === 1 && step.fields[0] === 'id') {
+          return s.running ? [{ id: ENROLLMENT }] : [];
+        }
+        if (step.fields.length === 0) return base(step);
+        const [row] = base(step) as Record<string, unknown>[];
+        return [{ e: row, automationName: 'Reminders', segmentName: null }];
+      }
+      if (step.op === 'select' && step.table === 'api_keys' && step.fields.includes('name')) {
+        return [{ id: KEY, name: 'Booking system' }];
+      }
+      if (step.op === 'select' && step.table === 'automation_enrollment_contacts') {
+        return step.fields.includes('at') ? [{ at: null }] : [];
+      }
+      return base(step);
+    };
+  }
+  const deps = (db: Database, jobs = new RecordingJobQueue()) => ({ db, clock, jobs, signer });
+
+  it('takes a segment, or conditions as POST /contacts/search writes them, with the inputs', () => {
+    expect(
+      apiStartEnrollmentSchema.parse({ segmentId: SEGMENT, inputs: { patient: 'Asha' } }),
+    ).toEqual({ segmentId: SEGMENT, inputs: { patient: 'Asha' } });
+    expect(apiStartEnrollmentSchema.parse({ contacts: {} })).toEqual({
+      contacts: { conditions: [] },
+      inputs: {},
+    });
+    for (const bad of [
+      {},
+      { segmentId: 'nope' },
+      { segmentId: SEGMENT, contacts: {} },
+      { contacts: { conditions: [], q: 'asha' } },
+      { contacts: {}, inputs: { patient: 3 } },
+      { contacts: {}, expectedCount: 0 },
+      {
+        contacts: {
+          conditions: [
+            { type: 'tag', op: 'has', tag: 'a' },
+            { type: 'tag', op: 'has', tag: 'b' },
+            { type: 'tag', op: 'has', tag: 'c' },
+          ],
+        },
+      },
+    ]) {
+      expect(apiStartEnrollmentSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('maps conditions onto the Contacts page’s filter and refuses any other, naming its place', () => {
+    expect(
+      enrollmentFilterOf([
+        { type: 'tag', op: 'has', tag: '  VIP ' },
+        { type: 'consent', purpose: 'marketing', status: 'opted_in' },
+      ]),
+    ).toEqual({ tag: 'vip', consent: 'marketing_opted_in' });
+    expect(
+      enrollmentFilterOf([{ type: 'consent', purpose: 'marketing', status: 'opted_out' }]),
+    ).toEqual({
+      consent: 'marketing_opted_out',
+    });
+    expect(
+      enrollmentFilterOf([{ type: 'consent', purpose: 'marketing', status: 'not_recorded' }]),
+    ).toEqual({ consent: 'marketing_unknown' });
+    const refused = (conditions: unknown[]) => {
+      try {
+        enrollmentFilterOf(conditions as never);
+      } catch (error) {
+        if (!isAppError(error)) throw error;
+        return [error.code, error.issues?.[0]?.path, error.publicMessage];
+      }
+      return null;
+    };
+    expect(refused([{ type: 'tag', op: 'not_has', tag: 'vip' }])).toEqual([
+      'validation_failed',
+      'contacts.conditions.0',
+      ENROLLMENT_CONDITION_REFUSAL,
+    ]);
+    expect(
+      refused([
+        { type: 'tag', op: 'has', tag: 'vip' },
+        { type: 'tag', op: 'has', tag: 'gold' },
+      ]),
+    ).toEqual(['validation_failed', 'contacts.conditions.1', ENROLLMENT_CONDITION_REFUSAL]);
+    expect(refused([{ type: 'consent', purpose: 'utility', status: 'opted_in' }])?.[1]).toBe(
+      'contacts.conditions.0',
+    );
+    expect(refused([{ type: 'source', source: 'api' }])?.[1]).toBe('contacts.conditions.0');
+    // A tag the app would not keep is refused, never dropped (which would take every contact).
+    expect(refused([{ type: 'tag', op: 'has', tag: 'a,b' }])?.[1]).toBe('contacts.conditions.0');
+  });
+
+  it('refuses keys without the scopes, before anything is read', async () => {
+    const db = { run: () => Promise.reject(new Error('read')) } as unknown as Database;
+    const start = (scopes: string[], over: Record<string, unknown> = {}, status = 'active') =>
+      refusal(apiStartEnrollment(deps(db), apiCtx(scopes, status), AUTOMATION, body(over), idem));
+    expect(await start(['contacts.read'])).toMatchObject({ code: 'forbidden' });
+    expect(await start(['automations.start'])).toMatchObject({
+      code: 'forbidden',
+      message: 'This API key does not have the contacts.read scope.',
+    });
+    expect(
+      await refusal(
+        apiStartEnrollment(
+          deps(db),
+          apiCtx(['automations.start', 'contacts.read']),
+          AUTOMATION,
+          { segmentId: SEGMENT, inputs: { patient: 'Asha' } },
+          idem,
+        ),
+      ),
+    ).toMatchObject({
+      code: 'forbidden',
+      message: 'This API key does not have the campaigns.read scope.',
+    });
+    expect(await start(ENROLLER_KEY_SCOPES, {}, 'suspended')).toMatchObject({
+      code: 'tenant_suspended',
+    });
+    // The plan leaving a scope out answers not_in_plan (ADR-092).
+    const outOfPlan = {
+      ...apiCtx(ENROLLER_KEY_SCOPES),
+      planScopes: new Set(['automations.start']),
+    } as unknown as ApiContext;
+    expect(
+      await refusal(apiStartEnrollment(deps(db), outOfPlan, AUTOMATION, body(), idem)),
+    ).toMatchObject({ code: 'forbidden', reason: 'not_in_plan' });
+    expect(await start(ENROLLER_KEY_SCOPES, { inputs: { patient: 7 } })).toMatchObject({
+      code: 'validation_failed',
+    });
+    expect(
+      await refusal(apiStartEnrollment(deps(db), apiCtx(ENROLLER_KEY_SCOPES), 'x', body(), idem)),
+    ).toMatchObject({ code: 'not_found' });
+    // Reads need automations.start; a stop also an active company.
+    for (const read of [
+      apiListEnrollments({ db }, apiCtx(['contacts.read']), AUTOMATION, {}),
+      apiGetEnrollment({ db }, apiCtx(['contacts.read']), AUTOMATION, ENROLLMENT),
+      apiStopEnrollment({ db, clock }, apiCtx(['contacts.read']), AUTOMATION, ENROLLMENT),
+    ]) {
+      expect(await refusal(read)).toMatchObject({ code: 'forbidden' });
+    }
+    expect(
+      await refusal(
+        apiStopEnrollment(
+          { db, clock },
+          apiCtx(['automations.start'], 'suspended'),
+          AUTOMATION,
+          ENROLLMENT,
+        ),
+      ),
+    ).toMatchObject({ code: 'tenant_suspended' });
+  });
+
+  it('snapshots the contacts, names the key, audits as the key and queues the first batch for the company', async () => {
+    const recording = recordingDb(apiAnswers({ contacts: 2 }));
+    const jobs = new RecordingJobQueue();
+    const res = await apiStartEnrollment(
+      deps(recording.db, jobs),
+      apiCtx(ENROLLER_KEY_SCOPES),
+      AUTOMATION,
+      body(),
+      idem,
+    );
+    expect(res.status).toBe(201);
+    const inserted = recording.steps.find(
+      (st) => st.op === 'insert' && st.table === 'automation_enrollments',
+    );
+    expect(inserted?.values).toMatchObject({
+      tenantId: TENANT,
+      automationId: AUTOMATION,
+      source: 'contacts',
+      segmentId: null,
+      inputs: { patient: 'Asha' },
+      total: 2,
+      createdByMembershipId: null,
+      createdByUserId: null,
+      createdByApiKeyId: KEY,
+    });
+    // The tag condition became the Contacts page's tag filter, lower-cased.
+    const snapshot = recording.steps.find((st) => st.op === 'select' && st.table === 'contacts');
+    expect(snapshot?.params).toContain('vip');
+    expect(snapshot?.limit).toBe(ENROLLMENT_LIMITS.contacts + 1);
+    const audit = recording.steps.find((st) => st.op === 'insert' && st.table === 'audit_events');
+    expect(audit?.values).toMatchObject({
+      action: 'automation.enrollment_started',
+      actorType: 'api_key',
+      actorId: KEY,
+      metadata: {
+        source: 'contacts',
+        filter: { q: false, tag: 'vip', consent: 'any' },
+        contacts: 2,
+      },
+    });
+    expect(JSON.stringify(audit?.values)).not.toContain('Asha');
+    expect(jobs.jobs.map((j) => [j.queue, j.envelope.actorUserId, j.options.singletonKey])).toEqual(
+      [[QUEUES.automationEnroll.name, null, `${String(inserted?.values?.id)}:0`]],
+    );
+    // The answer is kept with the Idempotency-Key, for a retry to get it again.
+    const stored = recording.steps.find(
+      (st) => st.op === 'update' && st.table === 'api_idempotency_keys',
+    );
+    expect(stored?.set).toMatchObject({ statusCode: 201 });
+    expect((res.body as { data: Record<string, unknown> }).data).toMatchObject({
+      startedBy: 'api',
+      apiKeyId: KEY,
+      stoppedBy: null,
+    });
+  });
+
+  it('refuses an enrolment of contacts without a condition, naming the place and saying to use a segment (review L2)', async () => {
+    const db = { run: () => Promise.reject(new Error('read')) } as unknown as Database;
+    for (const contacts of [{}, { conditions: [] }]) {
+      expect(
+        await refusal(
+          apiStartEnrollment(
+            deps(db),
+            apiCtx(ENROLLER_KEY_SCOPES),
+            AUTOMATION,
+            body({ contacts }),
+            idem,
+          ),
+        ),
+      ).toMatchObject({
+        code: 'validation_failed',
+        message: ENROLLMENT_NO_CONDITION_REFUSAL,
+        issues: [{ path: 'contacts.conditions', message: ENROLLMENT_NO_CONDITION_REFUSAL }],
+      });
+    }
+    expect(ENROLLMENT_NO_CONDITION_REFUSAL).toContain('enrol a segment');
+  });
+
+  it('checks an expected count against the snapshot as a member’s enrolment does (review L2)', async () => {
+    const shown = recordingDb(apiAnswers({ contacts: 2 }));
+    const res = await apiStartEnrollment(
+      deps(shown.db),
+      apiCtx(ENROLLER_KEY_SCOPES),
+      AUTOMATION,
+      body({ expectedCount: 2 }),
+      idem,
+    );
+    expect(res.status).toBe(201);
+    const changed = recordingDb(apiAnswers({ contacts: 3 }));
+    expect(
+      await refusal(
+        apiStartEnrollment(
+          deps(changed.db),
+          apiCtx(ENROLLER_KEY_SCOPES),
+          AUTOMATION,
+          body({ expectedCount: 2 }),
+          idem,
+        ),
+      ),
+    ).toMatchObject({
+      code: 'conflict',
+      message: 'These contacts now number 3, not 2. Review them and try again.',
+    });
+    expect(
+      changed.steps.some((st) => st.op === 'insert' && st.table === 'automation_enrollments'),
+    ).toBe(false);
+    for (const bad of [0, 10_001, 1.5, '2']) {
+      expect(
+        apiStartEnrollmentSchema.safeParse({ segmentId: SEGMENT, expectedCount: bad }).success,
+        String(bad),
+      ).toBe(false);
+    }
+  });
+
+  it('refuses a key without the scopes with 403 before its conditions are read (review N1)', async () => {
+    const db = { run: () => Promise.reject(new Error('read')) } as unknown as Database;
+    expect(
+      await refusal(
+        apiStartEnrollment(
+          deps(db),
+          apiCtx(['automations.start']),
+          AUTOMATION,
+          body({ contacts: { conditions: [{ type: 'source', source: 'api' }] } }),
+          idem,
+        ),
+      ),
+    ).toMatchObject({ code: 'forbidden' });
+  });
+
+  it('gives the segment’s id only to a key that reads segments (review N2)', async () => {
+    const summary = {
+      id: ENROLLMENT,
+      automationId: AUTOMATION,
+      source: 'segment' as const,
+      segmentId: SEGMENT,
+      segmentName: 'VIPs',
+      status: 'running' as const,
+      endReason: null,
+      total: 3,
+      started: 1,
+      refused: 0,
+      cancelled: 0,
+      startedBy: 'member' as const,
+      createdByName: 'Asha',
+      createdByApiKeyId: null,
+      createdByKeyName: null,
+      stoppedBy: null,
+      stoppedByApiKeyId: null,
+      createdAt: NOW,
+      endedAt: null,
+    };
+    expect(toApiEnrollment(summary, true).segmentId).toBe(SEGMENT);
+    expect(toApiEnrollment(summary, false)).toMatchObject({ segmentId: null, pending: 2 });
+    expect(JSON.stringify(toApiEnrollment(summary, true))).not.toContain('Asha');
+  });
+
+  it('answers 409 naming the running enrolment, and 409 when the index refuses a second at once', async () => {
+    const recording = recordingDb(apiAnswers({ running: true }));
+    expect(
+      await refusal(
+        apiStartEnrollment(
+          deps(recording.db),
+          apiCtx(ENROLLER_KEY_SCOPES),
+          AUTOMATION,
+          body(),
+          idem,
+        ),
+      ),
+    ).toMatchObject({
+      code: 'conflict',
+      reason: 'enrollment_running',
+      message: expect.stringContaining(`Enrolment ${ENROLLMENT} runs.`),
+    });
+    expect(writes(recording.steps).filter((w) => w.includes('automation_enrollment'))).toEqual([]);
+    const duplicate = Object.assign(new Error('duplicate key'), {
+      code: '23505',
+      constraint: 'automation_enrollments_running_uq',
+    });
+    const racing = { run: () => Promise.reject(duplicate) } as unknown as Database;
+    expect(
+      await refusal(
+        apiStartEnrollment(deps(racing), apiCtx(ENROLLER_KEY_SCOPES), AUTOMATION, body(), idem),
+      ),
+    ).toMatchObject({ code: 'conflict', reason: 'enrollment_running' });
+  });
+
+  it('refuses nobody to enrol and inputs the automation does not take, enrolling nothing', async () => {
+    const empty = recordingDb(apiAnswers({ contacts: 0 }));
+    expect(
+      await refusal(
+        apiStartEnrollment(deps(empty.db), apiCtx(ENROLLER_KEY_SCOPES), AUTOMATION, body(), idem),
+      ),
+    ).toMatchObject({ code: 'validation_failed', message: 'No contact matches: nobody to enrol.' });
+    const wrong = recordingDb(apiAnswers({}));
+    expect(
+      await refusal(
+        apiStartEnrollment(
+          deps(wrong.db),
+          apiCtx(ENROLLER_KEY_SCOPES),
+          AUTOMATION,
+          body({ inputs: { other: 'x' } }),
+          idem,
+        ),
+      ),
+    ).toMatchObject({ code: 'validation_failed' });
+    for (const r of [empty, wrong]) {
+      expect(
+        r.steps.some((st) => st.op === 'insert' && st.table === 'automation_enrollments'),
+      ).toBe(false);
+    }
+  });
+
+  it('refuses an automation that sends marketing to a key without the marketing scope', async () => {
+    const recording = recordingDb(apiAnswers({ marketingTemplate: true }));
+    expect(
+      await refusal(
+        apiStartEnrollment(
+          deps(recording.db),
+          apiCtx(ENROLLER_KEY_SCOPES),
+          AUTOMATION,
+          body(),
+          idem,
+        ),
+      ),
+    ).toMatchObject({
+      code: 'forbidden',
+      message:
+        'This automation sends marketing templates, which needs the messages.send_marketing scope.',
+    });
+  });
+
+  it('stops a running enrolment as the key: not-handled contacts cancelled, audited, another automation’s not found', async () => {
+    const recording = recordingDb(apiAnswers({}));
+    const stopped = await apiStopEnrollment(
+      { db: recording.db, clock },
+      apiCtx(['automations.start']),
+      AUTOMATION,
+      ENROLLMENT,
+    );
+    expect(stopped.id).toBe(ENROLLMENT);
+    expect(endOf(recording.steps)).toMatchObject({
+      status: 'stopped',
+      endReason: 'stopped_by_api',
+      stoppedByApiKeyId: KEY,
+      stoppedByMembershipId: null,
+      inputs: {},
+    });
+    const lock = recording.steps.find(
+      (st) => st.table === 'automation_enrollments' && st.lock === 'update',
+    );
+    // Locked within the automation the path names.
+    expect(lock?.params).toEqual(expect.arrayContaining([TENANT, ENROLLMENT, AUTOMATION]));
+    const audit = recording.steps.find((st) => st.op === 'insert' && st.table === 'audit_events');
+    expect(audit?.values).toMatchObject({
+      action: 'automation.enrollment_stopped',
+      actorType: 'api_key',
+      actorId: KEY,
+    });
+    // An ended one is refused with 409, as members' stops are.
+    const ended = recordingDb(scenarioAnswers({ contacts: [], status: 'completed' }));
+    expect(
+      await refusal(
+        apiStopEnrollment(
+          { db: ended.db, clock },
+          apiCtx(['automations.start']),
+          AUTOMATION,
+          ENROLLMENT,
+        ),
+      ),
+    ).toMatchObject({ code: 'conflict', reason: 'enrollment_ended' });
+    // One not in the company (or of another automation) is not found.
+    const missing = recordingDb(scenarioAnswers({ contacts: [], missing: true }));
+    expect(
+      await refusal(
+        apiStopEnrollment(
+          { db: missing.db, clock },
+          apiCtx(['automations.start']),
+          AUTOMATION,
+          ENROLLMENT,
+        ),
+      ),
+    ).toMatchObject({ code: 'not_found' });
+  });
+});
+
+describe('the OpenAPI document of enrolments (ADR-403)', () => {
+  const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+  type Op = {
+    operationId: string;
+    description: string;
+    parameters?: { $ref?: string; name?: string }[];
+    requestBody?: unknown;
+    responses: Record<string, unknown>;
+  };
+  const paths = doc.paths as unknown as Record<string, Record<string, Op>>;
+  const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> }).schemas;
+
+  it('describes the four operations, the scopes, the idempotency key and the 409s', () => {
+    const list = paths['/automations/{id}/enrollments']?.get;
+    const start = paths['/automations/{id}/enrollments']?.post;
+    const read = paths['/automations/{id}/enrollments/{enrollmentId}']?.get;
+    const stop = paths['/automations/{id}/enrollments/{enrollmentId}/stop']?.post;
+    expect([list, start, read, stop].map((op) => op?.operationId)).toEqual([
+      'listAutomationEnrollments',
+      'startAutomationEnrollment',
+      'getAutomationEnrollment',
+      'stopAutomationEnrollment',
+    ]);
+    expect(API_ROUTES).toEqual(
+      expect.arrayContaining([
+        ['get', '/automations/{id}/enrollments'],
+        ['post', '/automations/{id}/enrollments'],
+        ['get', '/automations/{id}/enrollments/{enrollmentId}'],
+        ['post', '/automations/{id}/enrollments/{enrollmentId}/stop'],
+      ]),
+    );
+    expect(start?.parameters).toContainEqual({ $ref: '#/components/parameters/IdempotencyKey' });
+    for (const scope of [
+      'automations.start',
+      'contacts.read',
+      'campaigns.read',
+      'messages.send_marketing',
+    ]) {
+      expect(start?.description).toContain(`\`${scope}\``);
+    }
+    expect(start?.description).toContain('enrollment_running');
+    expect(start?.description).toContain('batches count none');
+    expect(Object.keys(start?.responses ?? {})).toEqual(expect.arrayContaining(['201', '409']));
+    expect(Object.keys(stop?.responses ?? {})).toEqual(expect.arrayContaining(['200', '409']));
+    expect(stop?.description).toContain('enrollment_ended');
+    expect(read?.parameters?.map((p) => p.$ref ?? p.name)).toEqual([
+      '#/components/parameters/Id',
+      'enrollmentId',
+    ]);
+    expect(JSON.stringify(list?.responses['200'])).toContain('AutomationEnrollment');
+  });
+
+  it('gives an enrolment’s starter and stopper by id only, never members or the inputs', () => {
+    const properties = Object.keys(schemas.AutomationEnrollmentWithProgress?.properties as object);
+    expect(properties.sort()).toEqual(
+      [
+        'apiKeyId',
+        'automationId',
+        'cancelled',
+        'createdAt',
+        'endReason',
+        'endedAt',
+        'id',
+        'pending',
+        'refusals',
+        'refused',
+        'segmentId',
+        'source',
+        'stalledSince',
+        'started',
+        'startedBy',
+        'status',
+        'stoppedBy',
+        'stoppedByApiKeyId',
+        'total',
+      ].sort(),
+    );
+    expect(JSON.stringify(schemas.StartAutomationEnrollment)).toContain('segmentId');
+    expect(JSON.stringify(schemas.StartAutomationEnrollment)).toContain('conditions');
+  });
+});
+
+describe('the Contacts page’s filter fails closed on a tag the app would not keep (ADR-403 review L3)', () => {
+  const where = (tag: string | undefined) =>
+    dialect.sqlToQuery(
+      sql.join(
+        contactFilterConditionsFor(
+          TENANT,
+          { consent: 'any', ...(tag === undefined ? {} : { tag }) },
+          {
+            seesNumbers: true,
+          },
+        ),
+        sql` and `,
+      ),
+    );
+
+  it('matches nobody for an invalid tag, the tag for a valid one, and leaves no tag unfiltered', () => {
+    const invalid = where('a,b');
+    expect(invalid.sql).toContain('false');
+    expect(invalid.sql).not.toContain('contact_tags');
+    const valid = where(' VIP ');
+    expect(valid.sql).toContain('contact_tags');
+    expect(valid.sql).not.toMatch(/\bfalse\b/);
+    expect(valid.params).toContain('vip');
+    const none = where(undefined);
+    expect(none.sql).not.toContain('contact_tags');
+    expect(none.sql).not.toMatch(/\bfalse\b/);
+  });
+
+  it('enrols nobody for a member’s filter with an invalid tag (refused: no contact matches)', async () => {
+    const recording = recordingDb((step) => {
+      if (step.op === 'select' && step.table === 'contacts') {
+        // The database answers the filter: `false` matches no row.
+        return dialect.sqlToQuery(step.where as SQL).sql.includes('false')
+          ? []
+          : [{ id: contactId(1) }];
+      }
+      return startAnswers({ contacts: 1 })(step);
+    });
+    const ctx = memberCtx(ENROLLER);
+    await expect(
+      createAutomationEnrollmentService({
+        db: recording.db,
+        clock,
+        jobs: new RecordingJobQueue(),
+        signer,
+      }).startEnrollment(ctx, {
+        automationId: AUTOMATION,
+        audience: { kind: 'contacts', filter: { tag: 'a,b' } },
+        inputs: { patient: 'Asha' },
+        expectedCount: 1,
+      }),
+    ).rejects.toMatchObject({
+      code: 'validation_failed',
+      publicMessage: 'No contact matches: nobody to enrol.',
+    });
   });
 });

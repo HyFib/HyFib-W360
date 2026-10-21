@@ -1891,6 +1891,85 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `DROP INDEX CONCURRENTLY IF EXISTS app.automation_runs_enrollment_idx;` and the migrations again
    (RUNBOOKS).
 
+   Migration 0315 (ADR-403) lets API keys start and stop enrolments: on
+   `app.automation_enrollments` it makes the member columns nullable, adds `created_by_api_key_id`
+   and `stopped_by_api_key_id` (composite foreign keys to `app.api_keys`, each with a partial index
+   for company deletion's key step), a check that exactly one of member and key started it, and
+   replaces the end check (five new reasons: `stopped_by_api`, `api_key_revoked`,
+   `api_key_expired`, `api_not_in_plan`, `api_scope_missing`) and the stopper check (now also
+   holding a running enrolment to naming nobody, `IS NOT DISTINCT FROM`). The table is small (one
+   running enrolment per automation), so its checks are validated in place under a brief lock. The
+   runtime role gets `UPDATE` on `stopped_by_api_key_id` only; nothing else changes (deletion steps,
+   the due list and the export already cover the table; the export lists the new columns). Roll out
+   workers before web: a worker of the release before would read a key's enrolment as one whose
+   member left and end it (`member_removed`), and only a web server of this release starts one. To
+   roll the application back past this release, stop the running enrolments keys started first
+   (`SELECT id FROM app.automation_enrollments WHERE status = 'running' AND created_by_api_key_id
+IS NOT NULL`); the columns and checks can stay.
+   Enrolments that already ended with the new reasons (`stopped_by_api`, `api_key_revoked`,
+   `api_key_expired`, `api_not_in_plan`, `api_scope_missing`) stay as they are, and the older
+   release's enrolment page shows their reason blank or as "undefined"; this release's page shows
+   a reason it has no label for as its code. Adding the two foreign keys briefly takes
+   `SHARE ROW EXCLUSIVE` on `app.api_keys`, which holds key authentication's `last_used_at` update
+   (and so API requests) until the migration commits; it reads only the small enrolments table.
+
+   Migration 0316 (ADR-404) adds eight nullable columns for an edit of a template Meta has to
+   `app.message_templates` (`edit_id`, `edit_state`, `edit_components`, `edit_error`,
+   `edit_requested_at`, `edit_requested_by_user_id`, `edit_attempted_at`, `edit_failed_at`) with
+   their checks, `UPDATE` on them for the runtime role and `SELECT` on `edit_state` and
+   `edit_failed_at` for the definer; replaces `template_status_events`' source check to also take
+   `edit` (validated in the migration, a short scan of an append-only table under the lock the
+   replacement takes); and recreates `ops.template_sync_due` so an account with an edit sending is
+   synced every 5 minutes (and one whose edit failed, for an hour after it failed). Expand only and
+   backward compatible: nothing is rewritten, and the release before never names the columns. The
+   migration runner declares the new `template.edit` queue. Roll out workers before web as usual: a web server of this release queues `template.edit` jobs, which
+   only a worker of this release consumes (a job queued before then waits for it, and an edit whose
+   job waits more than 10 minutes is called unconfirmed by the sync and can be sent again). Rolling
+   back leaves the columns unused; an edit left `sending` stays so until a worker of this release
+   returns, and meanwhile keeps its account due for a template sync every 5 minutes (the recreated
+   `ops.template_sync_due` stays), spending Meta's management allowance. To stop that after a
+   rollback, settle such edits as failed. The table has forced row security and the owner role has
+   no policy on it, so an `UPDATE` as the owner changes nothing. `w360_definer` cannot log in:
+   connected as `w360_owner`, run `SET ROLE w360_definer;` and list the companies with
+   `SELECT DISTINCT tenant_id FROM app.message_templates WHERE edit_state = 'sending';` (the definer
+   reads those columns under its read policy), then `RESET ROLE;`. Then, connected with the runtime
+   role's own credentials (`w360_app`, as the web app connects), run for each company in its own
+   transaction:
+
+   ```sql
+   BEGIN;
+   SELECT set_config('app.tenant_id', '<company id>', true);
+   UPDATE app.message_templates
+      SET edit_state = 'failed', edit_failed_at = now(),
+          edit_error = 'Not sent: HyFib was rolled back. Send the edit again.'
+    WHERE edit_state = 'sending';
+   COMMIT;
+   ```
+
+   Members can send them again once the release returns.
+
+   Migration 0317 (ADR-405) first adds the column `app.campaign_recipients.variant` (`NOT NULL
+DEFAULT 'A'`, a constant default, so nothing is rewritten) with its check added `NOT VALID`, so
+   the recipients table is not read under the migration's lock, then creates
+   `app.campaign_variants` (forced row security, `UNIQUE (tenant_id, id)`, composite foreign keys to
+   the company's campaigns and templates, grants to the runtime role, deletion step 705). The
+   recipients are altered before the new table's foreign key locks the campaigns, the order in which
+   a runner tick takes them. The runtime role gets no `UPDATE` on the column. Expand only and
+   backward compatible: web servers and workers of the release before never name the table or the
+   column, and their snapshots write `A` by default. Roll out workers before web as usual, and let
+   members use variants only after the web rollout completes: an older worker still running would
+   send every recipient of a campaign with variant B variant A's template, and an older web server
+   that submits a draft with variant B gives every recipient variant A. Such a campaign cannot get
+   stuck: a variant with no pending recipients is never checked (so a B that got none is ignored),
+   and it simply sends A to everyone. Rolling an image back after campaigns with variant B were
+   submitted would send A's template to those still sending: pause them first. The table and
+   column can stay.
+
+   Migration 0318 (ADR-405) validates the check 0317 added `NOT VALID`, as 0312 validated 0311's.
+   Validation reads `app.campaign_recipients` without blocking writes; every row written since 0317
+   was checked when written and older rows hold the default, so it cannot fail on them. It runs in
+   the same deployment, after 0317.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

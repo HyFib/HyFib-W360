@@ -82,7 +82,7 @@ export const API_SCOPE_INFO: Record<
   'templates.submit': {
     label: 'Submit templates',
     description:
-      'Submit template drafts to Meta for review and, with the scope that writes templates, delete templates Meta has, which can then no longer be sent, as members who submit templates do on the Templates page, in the audit log as done by the key.',
+      'Submit template drafts to Meta for review, edit templates Meta has and, with the scope that writes templates, delete templates Meta has, which can then no longer be sent, as members who submit templates do on the Templates page, in the audit log as done by the key.',
     permission: 'templates.submit',
     writes: true,
   },
@@ -201,7 +201,7 @@ export const API_SCOPE_INFO: Record<
   'automations.start': {
     label: 'Start automations',
     description:
-      'Start published automations made to start through the API, for one contact at a time with the inputs they need, and read and stop the runs keys started. They message contacts who have not written first, with templates.',
+      'Start published automations made to start through the API, for one contact at a time with the inputs they need, and read and stop the runs keys started. With the scope that reads contacts, also enrol the contacts a tag and marketing consent find, or with the one that reads campaigns a saved segment’s members (up to 10,000 at once), and read and stop every enrolment of the company. They message contacts who have not written first, with templates.',
     permission: 'automations.publish',
     writes: true,
   },

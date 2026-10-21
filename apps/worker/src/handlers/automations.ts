@@ -74,6 +74,7 @@ const ENROLLMENT_DEFER_MINUTES = 5;
  * its contacts' outcomes with their runs and queues the next batch in the same transaction, so a
  * duplicate or retried job starts nothing twice. The job is signed with the member who started the
  * enrolment: a member who left ends it; a suspended company's enrolment waits and is looked at again.
+ * A key's enrolment (ADR-403) is signed with no user: each batch re-checks the key instead.
  */
 export function automationEnrollHandler(rt: WorkerRuntime) {
   return async ([job]: Job<unknown>[]): Promise<void> => {
@@ -196,7 +197,7 @@ export async function sweepAutomationRuns(rt: WorkerRuntime): Promise<{ signalle
   if (retention.cleared + retention.deleted > 0) {
     rt.logger.info(retention, 'automation retention applied');
   }
-  // Members' enrolments whose next batch is 10 minutes overdue: a lost job, or one that ran out of
+  // Enrolments (members' and API keys') whose next batch is 10 minutes overdue: a lost job, or one that ran out of
   // retries (ADR-401). Tenant ids come from the definer due list. Last and on its own, so a failure
   // here holds up none of the sweep's other work; it is logged as an error and the next minute's
   // sweep tries again.

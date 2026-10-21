@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import { SKIP_REASONS, sql, type SkipReason, type Tx } from '@w360/db';
+import { SKIP_REASONS, sql, type SkipReason, type SQL, type Tx } from '@w360/db';
 import { ATTRIBUTION_WINDOW_HOURS } from './attribution';
 import { RECIPIENT_OUTCOME_SQL } from './outcomes';
+import { VARIANT_LABELS, type VariantLabel } from './variants';
 
 /**
  * A campaign's results as members' campaign page counts them, as `GET /campaigns/{id}` answers them
@@ -39,8 +40,11 @@ export async function campaignAnalytics(
   tx: Tx,
   tenantId: string,
   campaignId: string,
+  /** Only the recipients given this variant (ADR-405); every recipient when left out. */
+  variant?: VariantLabel,
 ): Promise<CampaignAnalytics> {
   const o = RECIPIENT_OUTCOME_SQL;
+  const only = (alias: SQL) => (variant ? sql` and ${alias}.variant = ${variant}` : sql``);
   const res = await tx.execute<Record<string, unknown>>(sql`
     select count(*)::int as audience,
       (count(*) filter (where ${o.pending}))::int as pending,
@@ -63,7 +67,7 @@ export async function campaignAnalytics(
          from (select sr.skip_reason as reason, count(*)::int as count
                  from app.campaign_recipients sr
                 where sr.tenant_id = ${tenantId} and sr.campaign_id = ${campaignId}
-                  and sr.state = 'skipped' and sr.skip_reason is not null
+                  and sr.state = 'skipped' and sr.skip_reason is not null${only(sql`sr`)}
                 group by sr.skip_reason) s) as skip_reasons,
       (select coalesce(json_agg(json_build_object('code', coalesce(f.code, 'unknown'), 'count', f.count)
                                 order by f.count desc, f.code nulls last), '[]'::json)
@@ -71,13 +75,13 @@ export async function campaignAnalytics(
                  from app.campaign_recipients fr
                  join app.messages fm on fm.tenant_id = fr.tenant_id and fm.id = fr.message_id
                 where fr.tenant_id = ${tenantId} and fr.campaign_id = ${campaignId}
-                  and fm.status = 'failed'
+                  and fm.status = 'failed'${only(sql`fr`)}
                 group by fm.error_code
                 order by count(*) desc, fm.error_code nulls last
                 limit 10) f) as failure_codes
     from app.campaign_recipients r
     left join app.messages m on m.tenant_id = r.tenant_id and m.id = r.message_id
-    where r.tenant_id = ${tenantId} and r.campaign_id = ${campaignId}`);
+    where r.tenant_id = ${tenantId} and r.campaign_id = ${campaignId}${only(sql`r`)}`);
   const row = res.rows[0] ?? {};
   const n = (k: string) => Number(row[k] ?? 0);
   const listOf = <T>(k: string): T[] => {
@@ -163,3 +167,47 @@ export function toCampaignResults(counted: CampaignAnalytics): CampaignResults {
     failureCodes: counted.failureCodes,
   };
 }
+
+/** One variant's results (ADR-405), counted as the campaign's are, over its recipients only. */
+export interface CampaignVariantAnalytics {
+  variant: VariantLabel;
+  analytics: CampaignAnalytics;
+}
+
+/**
+ * Each variant's results side by side (ADR-405), in one repeatable snapshot only when the caller's
+ * transaction gives one: each is `campaignAnalytics` over the recipients given that variant, so the
+ * variants' counts add up to the campaign's. Descriptive counts: no winner, no significance.
+ */
+export async function campaignVariantAnalytics(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+): Promise<CampaignVariantAnalytics[]> {
+  const out: CampaignVariantAnalytics[] = [];
+  for (const variant of VARIANT_LABELS) {
+    out.push({ variant, analytics: await campaignAnalytics(tx, tenantId, campaignId, variant) });
+  }
+  return out;
+}
+
+/** One variant's results in the API's words (ADR-405), as `GET /campaigns/{id}` gives them. */
+export const campaignVariantResultsSchema = z.object({
+  variant: z
+    .enum(VARIANT_LABELS)
+    .describe('A: the campaign’s own template (templateId); B: its second template.'),
+  templateId: z.uuid().nullable(),
+  templateName: z.string().nullable(),
+  sharePercent: z
+    .number()
+    .int()
+    .min(10)
+    .max(90)
+    .describe(
+      'The share of the audience the variant was given, in percent: each recipient’s variant comes from a stable hash of the campaign and the contact, so the counts are close to it but rarely equal.',
+    ),
+  results: campaignResultsSchema.describe(
+    'Counted as the campaign’s results are, over the recipients given this variant only, so the two variants’ counts add up to the campaign’s. Descriptive counts: HyFib picks no winner and computes no significance.',
+  ),
+});
+export type CampaignVariantResults = z.infer<typeof campaignVariantResultsSchema>;

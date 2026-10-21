@@ -603,3 +603,194 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   });
   expect(launchCanceled.status()).toBe(200);
 });
+
+test('an A/B campaign is drafted with two templates, reviewed by its approver and reported per variant (ADR-405)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(300_000);
+  const email = uniqueEmail('campaign-ab');
+  const slug = `cab-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Abe Variants', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Variant Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // Two approved utility templates (no consent needed, so every contact can receive either).
+  for (const [name, body] of [
+    ['order_news', 'Hello {{1}}, your order has news.'],
+    ['order_news_short', 'Your order has news.'],
+  ] as const) {
+    await page.goto(`/c/${slug}/templates/new`);
+    await page.getByLabel('Name').fill(name);
+    await page.getByLabel('Language code').fill('en');
+    await page.getByLabel('Category').selectOption('UTILITY');
+    await page.getByLabel('Body').fill(body);
+    if (body.includes('{{1}}')) await page.getByLabel('{{1}}').fill('Asha');
+    await page.getByRole('button', { name: 'Save draft' }).click();
+    await expect(page.getByRole('heading', { name, level: 1 })).toBeVisible();
+    await page.getByRole('button', { name: 'Submit to Meta' }).click();
+    await page.getByRole('button', { name: 'Submit for review' }).click();
+    await expect(page.getByRole('button', { name: /^Submit/ })).toHaveCount(0);
+    await expect(async () => {
+      await page.reload();
+      await expect(page.getByText('In review', { exact: true }).first()).toBeVisible({
+        timeout: 1_000,
+      });
+    }).toPass({ timeout: 30_000 });
+    const approved = await request.post(`${standIn}/__stand-in/template-status`, {
+      data: { wabaId, name, status: 'APPROVED' },
+    });
+    expect(approved.status()).toBe(200);
+  }
+  await page.goto(`/c/${slug}/templates`);
+  await page.getByRole('button', { name: 'Refresh from Meta' }).click();
+  await expect(page.getByText(/Refresh requested/)).toBeVisible();
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByText('In review', { exact: true })).toHaveCount(0, { timeout: 1_000 });
+    await expect(page.getByText('Approved', { exact: true }).first()).toBeVisible({
+      timeout: 1_000,
+    });
+  }).toPass({ timeout: 30_000 });
+
+  // A key that adds contacts and submits drafts: twenty tagged contacts, so both variants get some.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('A/B drafts');
+  await page.getByRole('checkbox', { name: /Read campaigns/ }).check();
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page
+    .getByRole('checkbox', { name: /Create and change contacts and record consent/ })
+    .check();
+  await page.getByRole('checkbox', { name: /Create, edit and submit campaign drafts/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const tokenField = page.getByLabel('API key', { exact: true });
+  await expect(tokenField).toBeVisible();
+  const auth = { Authorization: `Bearer ${await tokenField.inputValue()}` };
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const digits = String(Date.now()).slice(-5);
+  for (let i = 0; i < 20; i += 1) {
+    const created = await request.post('/api/v1/contacts', {
+      headers: auth,
+      data: { phone: `+9197${String(i).padStart(3, '0')}${digits}`, name: `Ab ${i}`, tags: ['ab'] },
+    });
+    expect(created.status()).toBe(201);
+  }
+
+  // The draft: variant A is order_news, variant B order_news_short for 40% of the recipients.
+  await page.goto(`/c/${slug}/campaigns`);
+  await page.getByRole('link', { name: 'New campaign' }).click();
+  await page.getByLabel('Campaign name').fill('Order news test');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Order news test', level: 1 })).toBeVisible();
+  await page.getByLabel('Send from').selectOption({ index: 1 });
+  await page
+    .getByLabel('Template', { exact: true })
+    .selectOption({ label: 'order_news (en, utility)' });
+  await page.getByLabel('Body variable {{1}}', { exact: true }).selectOption('name');
+  await page
+    .getByLabel('Add variant B: a second approved message for part of the audience')
+    .check();
+  await page
+    .getByLabel('Variant B template')
+    .selectOption({ label: 'order_news_short (en, utility)' });
+  await page.getByLabel('Share of recipients for variant B').selectOption('40');
+  await expect(page.getByText('Variant A gets the other 60%.')).toBeVisible();
+  await expect(page.getByLabel('Variant B message preview')).toContainText('Your order has news.');
+  await page.getByLabel('Tag', { exact: true }).fill('ab');
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved. The review below is updated.')).toBeVisible();
+  await expect(page.getByText(/of 20 contacts in the audience can receive it now/)).toContainText(
+    '20',
+  );
+  // The review lists each variant with its template and share.
+  const variantsTable = page.getByRole('table').filter({ hasText: 'Can receive it now' });
+  await expect(
+    variantsTable.getByRole('row').filter({ hasText: 'order_news_short' }),
+  ).toContainText('40%');
+  await expect(variantsTable.getByRole('row').filter({ hasText: '60%' })).toContainText(
+    'order_news (utility)',
+  );
+
+  // The key submits it (ADR-202), so it waits for a member's approval: the four-eyes review.
+  const campaignId = new URL(page.url()).pathname.split('/').pop()!;
+  const detail = await request.get(`/api/v1/campaigns/${campaignId}`, { headers: auth });
+  const draft = (
+    (await detail.json()) as {
+      data: { version: number; settings: { variantB: { sharePercent: number } | null } };
+    }
+  ).data;
+  expect(draft.settings.variantB).toMatchObject({ sharePercent: 40 });
+  const submitted = await request.post(`/api/v1/campaigns/${campaignId}/submit`, {
+    headers: auth,
+    data: { expectedVersion: draft.version },
+  });
+  expect(submitted.status()).toBe(200);
+  // The approval email names both templates and the split.
+  const approvalMail = await waitForEmailContaining(
+    email,
+    'Campaign “Order news test” waits for your approval',
+    'It tests 2 templates side by side',
+    60_000,
+  );
+  expect(approvalMail).toContain('A “order_news” (60% of the audience)');
+  expect(approvalMail).toContain('B “order_news_short” (40% of the audience)');
+  await page.goto(firstLink(approvalMail));
+  // The approver sees both variants and the split before approving.
+  await expect(page.getByText(/Variant A \(60% of the audience\) sends order_news;/)).toBeVisible();
+  await expect(page.getByText(/variant B \(\s*40%\) sends order_news_short\./)).toBeVisible();
+  await expect(page.getByText(/HyFib picks no winner and computes no significance/)).toBeVisible();
+  await page.getByRole('button', { name: 'Approve' }).click();
+
+  // The runner sends each recipient its variant's template.
+  await expect(async () => {
+    await page.reload();
+    // The results' own figure (a term of exactly this text), not the variants table's row or the
+    // "How these numbers are counted" term "Handed to WhatsApp (campaign.queued v1)".
+    await expect(
+      page
+        .locator('dt')
+        .filter({ hasText: /^Handed to WhatsApp$/ })
+        .locator('..'),
+    ).toContainText('20', { timeout: 1_000 });
+  }).toPass({ timeout: 60_000 });
+  let names: string[] = [];
+  await expect(async () => {
+    names = (await standInRequests(request))
+      .filter((r) => r.path === `/v26.0/${phoneNumberId}/messages` && r.wamid)
+      .map((r) => (r.body as { template: { name: string } }).template.name);
+    expect(names).toHaveLength(20);
+  }).toPass({ timeout: 60_000 });
+  const sentB = names.filter((n) => n === 'order_news_short').length;
+  expect(sentB).toBeGreaterThan(0);
+  expect(names.filter((n) => n === 'order_news')).toHaveLength(20 - sentB);
+
+  // Results per variant, side by side, with the API's per-recipient variants matching.
+  const results = await request.get(`/api/v1/campaigns/${campaignId}`, { headers: auth });
+  const variants = (
+    (await results.json()) as {
+      data: { variants: { variant: string; results: { audience: number } }[] };
+    }
+  ).data.variants;
+  expect(variants.map((v) => v.variant)).toEqual(['A', 'B']);
+  expect(variants[1]!.results.audience).toBe(sentB);
+  const recipients = await request.get(`/api/v1/campaigns/${campaignId}/recipients`, {
+    headers: auth,
+  });
+  const listed = ((await recipients.json()) as { data: { variant: string }[] }).data;
+  expect(listed.filter((r) => r.variant === 'B')).toHaveLength(sentB);
+  await page.reload();
+  const countsTable = page.getByRole('table').filter({ hasText: 'Variant B' });
+  // The columns are Count, Variant A and Variant B: each variant's exact cell.
+  await expect(countsTable.getByRole('columnheader').nth(2)).toHaveText('Variant B');
+  const recipientsRow = countsTable.getByRole('row').filter({ hasText: 'Recipients' });
+  await expect(recipientsRow.getByRole('cell').nth(1)).toHaveText(String(20 - sentB));
+  await expect(recipientsRow.getByRole('cell').nth(2)).toHaveText(String(sentB));
+  await page.getByRole('link', { name: 'Recipients' }).click();
+  // The recipients page itself: the results' headers "Variant A" and "Variant B" also contain the
+  // word, and stay on screen until the navigation ends.
+  await expect(page).toHaveURL(new RegExp(`/campaigns/${campaignId}/recipients$`));
+  await expect(page.getByRole('columnheader', { name: 'Variant', exact: true })).toBeVisible();
+});

@@ -193,3 +193,86 @@ export function formatUnitPrice(micros: number, currency: string): string {
   const decimals = fraction.padEnd(minorDigits(currency), '0');
   return decimals ? `${whole}.${decimals} ${currency}` : `${whole} ${currency}`;
 }
+
+/**
+ * A campaign's estimated Meta charges (ADR-023): an upper bound for the numbers given, each at its
+ * market's list price for the category, with those in markets the card has no price for counted.
+ */
+export interface CostEstimate {
+  currency: string;
+  totalMicros: number;
+  pricedCount: number;
+  unpricedCount: number;
+  byMarket: { market: string; count: number; micros: number }[];
+}
+
+/** The estimate for `phones` sent a template of `category`, from one rate table. */
+export function estimateFromTable(
+  table: RateTable,
+  category: TemplateCategory,
+  phones: readonly string[],
+): CostEstimate {
+  const rateCategory = rateCategoryFor(category);
+  const markets = new Map<string, { count: number; micros: number }>();
+  let unpriced = 0;
+  let total = 0;
+  for (const phone of phones) {
+    const market = marketFor(table, phone);
+    const price = priceFor(table, market, rateCategory);
+    if (market === null || price === null) {
+      unpriced += 1;
+      continue;
+    }
+    total += price;
+    const entry = markets.get(market) ?? { count: 0, micros: 0 };
+    entry.count += 1;
+    entry.micros += price;
+    markets.set(market, entry);
+  }
+  return {
+    currency: table.currency,
+    totalMicros: total,
+    pricedCount: phones.length - unpriced,
+    unpricedCount: unpriced,
+    byMarket: sortedMarkets(markets),
+  };
+}
+
+function sortedMarkets(markets: Map<string, { count: number; micros: number }>) {
+  return [...markets.entries()]
+    .map(([market, v]) => ({ market, ...v }))
+    .sort((a, b) => b.micros - a.micros);
+}
+
+/**
+ * The estimates of a campaign's variants added up (ADR-405): each variant's recipients were priced
+ * once, at its own template's category, so the sum counts every recipient once. All in one
+ * currency (one rate table).
+ */
+export function combineEstimates(estimates: readonly CostEstimate[]): CostEstimate | null {
+  const first = estimates[0];
+  if (!first) return null;
+  const markets = new Map<string, { count: number; micros: number }>();
+  let total = 0;
+  let priced = 0;
+  let unpriced = 0;
+  for (const e of estimates) {
+    if (e.currency !== first.currency) throw new Error('Estimates in different currencies');
+    total += e.totalMicros;
+    priced += e.pricedCount;
+    unpriced += e.unpricedCount;
+    for (const m of e.byMarket) {
+      const entry = markets.get(m.market) ?? { count: 0, micros: 0 };
+      entry.count += m.count;
+      entry.micros += m.micros;
+      markets.set(m.market, entry);
+    }
+  }
+  return {
+    currency: first.currency,
+    totalMicros: total,
+    pricedCount: priced,
+    unpricedCount: unpriced,
+    byMarket: sortedMarkets(markets),
+  };
+}

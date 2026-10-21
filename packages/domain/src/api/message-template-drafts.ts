@@ -5,6 +5,7 @@ import { recordSystemAudit } from '../audit';
 import { canonicalJson } from '../automations/graph';
 import type { OutboundDeps } from '../messaging/outbound';
 import { templateDefinitionSchema, toMetaComponents } from '../templates/definition';
+import { writeEditTemplate, type UsageVisibility } from '../templates/edit';
 import {
   assertValidDefinition,
   isEditableDraft,
@@ -20,7 +21,7 @@ import {
   writeUpdateTemplateDraft,
 } from '../templates/service';
 import { parseInput } from '../validation';
-import { apiActor, assertScope, type ApiContext } from './context';
+import { apiActor, assertScope, hasScope, type ApiContext } from './context';
 import {
   claimIdempotencyKey,
   storeIdempotentResponse,
@@ -60,6 +61,23 @@ export const apiUpdateMessageTemplateSchema = z
       .describe('The `version` read; another answers 409 instead of changing it.'),
   })
   .strict();
+
+/** What `POST /message-templates/{id}/edit` takes: the whole new content of a template Meta has. */
+export const apiEditMessageTemplateSchema = z
+  .object({
+    definition: templateDefinitionSchema.describe(
+      'Its whole new content, checked as the template editor checks it. The category stays the template’s.',
+    ),
+  })
+  .strict();
+
+/**
+ * The usage names a key may read in a refusal (ADR-404): campaigns with `campaigns.read`; never
+ * automations or stores, which no scope reads.
+ */
+export function apiUsageVisibility(ctx: ApiContext): UsageVisibility {
+  return { campaigns: hasScope(ctx, 'campaigns.read'), automations: false, stores: false };
+}
 
 const isUuid = (id: string) => z.uuid().safeParse(id).success;
 
@@ -264,6 +282,82 @@ export async function apiSubmitMessageTemplate(
 }
 
 /**
+ * Sends Meta an edit of a template it has, as members do on the Templates page (ADR-404): its whole
+ * new content, checked as the editor checks drafts (422), refused for a template Meta does not have,
+ * one whose edit is still on its way, content HyFib cannot represent, the content Meta has already,
+ * or a campaign sending it (412), one deleted or being deleted (409), a category change (422), and
+ * while Meta limits management requests (503). The edit is `sending` until the queued request has
+ * Meta's answer. Answers the template; once per `Idempotency-Key` when one is given.
+ */
+export async function apiEditMessageTemplate(
+  deps: Pick<OutboundDeps, 'db' | 'jobs' | 'signer' | 'clock'>,
+  ctx: ApiContext,
+  id: string,
+  input: unknown,
+  idempotency: IdempotencyInput | null,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'templates.submit');
+  if (!isUuid(id)) throw notFound('Template');
+  const data = parseInput(apiEditMessageTemplateSchema, input);
+  const now = deps.clock.now();
+  return deps.db.run(ctx.scope, async (tx) => {
+    // Claimed in the edit's transaction, so a refused one leaves the key unused.
+    let claimed: string | null = null;
+    if (idempotency) {
+      const claim = await claimIdempotencyKey(tx, ctx, idempotency, now);
+      if ('replay' in claim) return claim.replay;
+      claimed = claim.claimed;
+    }
+    const [row] = await tx
+      .select({
+        id: messageTemplates.id,
+        status: messageTemplates.status,
+        providerTemplateId: messageTemplates.providerTemplateId,
+        category: messageTemplates.category,
+        components: messageTemplates.components,
+        whatsappAccountId: messageTemplates.whatsappAccountId,
+        editState: messageTemplates.editState,
+        name: messageTemplates.name,
+        language: messageTemplates.language,
+      })
+      .from(messageTemplates)
+      .where(and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, id)))
+      .for('update');
+    if (!row) throw notFound('Template');
+    await writeEditTemplate(
+      tx,
+      deps,
+      ctx.tenant.id,
+      row,
+      data.definition,
+      null,
+      now,
+      apiUsageVisibility(ctx),
+    );
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'template.edit_requested',
+        subjectType: 'template',
+        subjectId: id,
+        correlationId: ctx.requestId,
+        metadata: {
+          name: row.name,
+          language: row.language,
+          category: row.category,
+          source: 'api',
+        },
+      },
+      apiActor(ctx),
+    );
+    const response = { status: 200, body: { data: await readDetail(tx, ctx.tenant.id, id) } };
+    if (claimed) await storeIdempotentResponse(tx, ctx, claimed, response);
+    return { ...response, replayed: false };
+  });
+}
+
+/**
  * Deletes a template as members do on the Templates page: a draft Meta never received at once, and
  * one Meta has, with `templates.submit` too (ADR-296), through a request to Meta it waits for as
  * `pending_deletion`. One being submitted answers 412; one already deleted, or being deleted, 409.
@@ -280,6 +374,7 @@ export async function apiDeleteMessageTemplate(
       .select({
         status: messageTemplates.status,
         providerTemplateId: messageTemplates.providerTemplateId,
+        editState: messageTemplates.editState,
         name: messageTemplates.name,
         language: messageTemplates.language,
         whatsappAccountId: messageTemplates.whatsappAccountId,

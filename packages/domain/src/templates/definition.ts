@@ -61,7 +61,11 @@ export const COMMON_TEMPLATE_LANGUAGES = [
   'id',
 ] as const;
 
-const VARIABLE_RE = /\{\{\s*([^{}]*?)\s*\}\}/g;
+/**
+ * A placeholder and its inner text, which callers trim: `\s*` around a lazy group would match the
+ * same text, but backtracks polynomially on an unclosed `{{` followed by much whitespace.
+ */
+const VARIABLE_RE = /\{\{([^{}]*)\}\}/g;
 
 export type TemplateButton =
   | { type: 'QUICK_REPLY'; text: string }
@@ -233,7 +237,7 @@ export function positionalVariables(
 ): { ok: true; numbers: number[] } | { ok: false; message: string } {
   const numbers: number[] = [];
   for (const match of text.matchAll(VARIABLE_RE)) {
-    const inner = match[1] ?? '';
+    const inner = (match[1] ?? '').trim();
     if (!/^[1-9][0-9]?$/.test(inner)) {
       return { ok: false, message: 'Use numbered variables such as {{1}} and {{2}}.' };
     }
@@ -604,7 +608,10 @@ export function linkValuesProblem(
 }
 
 function substitute(text: string, values: readonly string[]): string {
-  return text.replace(VARIABLE_RE, (_, n: string) => values[Number(n) - 1] ?? `{{${n}}}`);
+  return text.replace(VARIABLE_RE, (_, inner: string) => {
+    const n = inner.trim();
+    return values[Number(n) - 1] ?? `{{${n}}}`;
+  });
 }
 
 /**

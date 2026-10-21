@@ -32,6 +32,13 @@ export const TEMPLATE_STATUSES = [
 ] as const;
 export type TemplateStatus = (typeof TEMPLATE_STATUSES)[number];
 
+export const TEMPLATE_EDIT_STATES = ['sending', 'failed'] as const;
+export type TemplateEditState = (typeof TEMPLATE_EDIT_STATES)[number];
+
+/** Where a template's status change came from (`edit`: an edit of a template Meta has, 0316). */
+export const TEMPLATE_EVENT_SOURCES = ['submit', 'sync', 'send', 'delete', 'edit'] as const;
+export type TemplateEventSource = (typeof TEMPLATE_EVENT_SOURCES)[number];
+
 export const messageTemplates = appSchema.table('message_templates', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),
@@ -60,6 +67,22 @@ export const messageTemplates = appSchema.table('message_templates', {
    * the request and this time, so time spent deferred for a pause is never counted against it.
    */
   managementDeferredUntil: tz('management_deferred_until'),
+  /**
+   * An edit of a template Meta has (ADR-404, migration 0316): `sending` from the request until
+   * Meta's answer (written ahead), `failed` when Meta refused it or never confirmed it; null when
+   * none is open. The content sent, when and by which member (null for an API key) it was asked.
+   */
+  /** The open edit's id, which its job carries (a job for an older edit does nothing). */
+  editId: uuid('edit_id'),
+  editState: text('edit_state', { enum: TEMPLATE_EDIT_STATES }),
+  editComponents: jsonb('edit_components').$type<unknown[]>(),
+  editError: text('edit_error'),
+  editRequestedAt: tz('edit_requested_at'),
+  editRequestedByUserId: text('edit_requested_by_user_id'),
+  /** When the job committed its one attempt to send the edit (the database's time). */
+  editAttemptedAt: tz('edit_attempted_at'),
+  /** When the edit failed (the database's time); the sweep keeps syncing it for an hour. */
+  editFailedAt: tz('edit_failed_at'),
   lastSyncedAt: tz('last_synced_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
@@ -71,7 +94,7 @@ export const templateStatusEvents = appSchema.table('template_status_events', {
   templateId: uuid('template_id').notNull(),
   status: text('status').notNull(),
   reason: text('reason'),
-  source: text('source', { enum: ['submit', 'sync', 'send', 'delete'] }).notNull(),
+  source: text('source', { enum: TEMPLATE_EVENT_SOURCES }).notNull(),
   actorUserId: text('actor_user_id'),
   occurredAt: tz('occurred_at').notNull().defaultNow(),
 });

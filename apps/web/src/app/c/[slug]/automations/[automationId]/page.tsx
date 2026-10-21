@@ -202,6 +202,11 @@ export default async function AutomationPage({
                             {e.started.toLocaleString('en-IN')} of {e.total.toLocaleString('en-IN')}{' '}
                             started
                           </span>
+                          {e.startedBy === 'api' ? (
+                            <span className="text-xs text-muted-foreground">
+                              Started through the API with key “{e.createdByKeyName ?? 'a key'}”
+                            </span>
+                          ) : null}
                         </li>
                       );
                     })}

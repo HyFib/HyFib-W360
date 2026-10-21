@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import {
   AUTOMATION_END_REASONS,
+  AUTOMATION_ENROLLMENT_END_REASONS,
+  AUTOMATION_ENROLLMENT_SOURCES,
+  AUTOMATION_ENROLLMENT_STATUSES,
   AUTOMATION_RUN_STATUSES,
   CAMPAIGN_STATUSES,
   CHANNEL_STATUSES,
@@ -110,6 +113,7 @@ import { TEMPLATE_HEADER_MEDIA } from '../templates/definition';
 import {
   apiCreateMessageTemplateSchema,
   apiUpdateMessageTemplateSchema,
+  apiEditMessageTemplateSchema,
 } from './message-template-drafts';
 import { MESSAGE_TEMPLATE_HISTORY } from './message-templates';
 import {
@@ -117,6 +121,8 @@ import {
   apiStartManyAutomationRunsSchema,
   apiStopManyAutomationRunsSchema,
 } from './automations';
+import { apiStartEnrollmentSchema } from './automation-enrollments';
+import { ENROLLMENT_LIMITS } from '../automations/enrollment-model';
 import {
   apiCampaignRecipientSchema,
   apiCampaignDetailSchema,
@@ -958,6 +964,28 @@ export const apiMessageTemplateSchema = z.object({
   definition: apiTemplateDefinitionSchema
     .nullable()
     .describe('Its content as HyFib represents it; null when HyFib cannot (`unsupportedReason`).'),
+  edit: z
+    .object({
+      state: z
+        .enum(['sending', 'failed'])
+        .describe(
+          '`sending`: sent, or about to be sent, to Meta, waiting for its answer; `failed`: Meta refused it (`error` gives Meta’s code and message) or never confirmed it.',
+        ),
+      definition: apiTemplateDefinitionSchema
+        .nullable()
+        .describe(
+          'The content the edit sends; `definition` stays what Meta has until Meta takes it.',
+        ),
+      error: z
+        .string()
+        .nullable()
+        .describe('Why it failed, or that HyFib waits for Meta’s answer.'),
+      requestedAt: z.iso.datetime(),
+    })
+    .nullable()
+    .describe(
+      'An edit of a template Meta has, while it is sending or once it failed; null when none is open. Once Meta takes it, it is null and the template gives the status, category and content Meta reports.',
+    ),
   headerMedia: z
     .enum(TEMPLATE_HEADER_MEDIA)
     .nullable()
@@ -979,9 +1007,9 @@ export const apiMessageTemplateDetailSchema = apiMessageTemplateSchema.extend({
         status: z.string(),
         reason: z.string().nullable().describe('Meta’s reason, or HyFib’s, when one was given.'),
         source: z
-          .enum(['submit', 'sync', 'send', 'delete'])
+          .enum(['submit', 'sync', 'send', 'delete', 'edit'])
           .describe(
-            '`submit`: sent for review; `sync`: read from Meta; `send`: refused by Meta on a send; `delete`.',
+            '`submit`: sent for review; `sync`: read from Meta; `send`: refused by Meta on a send; `delete`; `edit`: an edit sent to Meta (`edit_requested`, `edited`, `edit_failed`, and the status Meta reported after it).',
           ),
         occurredAt: z.iso.datetime(),
       }),
@@ -1192,6 +1220,63 @@ export const apiAutomationRunSchema = z.object({
     .describe('Why the run ended; null while it works.'),
   startedAt: z.iso.datetime(),
   endedAt: z.iso.datetime().nullable(),
+});
+
+/** An enrolment of contacts in an automation (ADR-401, ADR-403), as the API gives it. */
+export const apiAutomationEnrollmentSchema = z.object({
+  id: z.uuid(),
+  automationId: z.uuid(),
+  source: z
+    .enum(AUTOMATION_ENROLLMENT_SOURCES)
+    .describe('contacts: the contacts filters found; segment: a saved segment’s members.'),
+  segmentId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The segment, for a segment’s members, given only to a key that reads segments (`campaigns.read`); null otherwise.',
+    ),
+  status: z
+    .enum(AUTOMATION_ENROLLMENT_STATUSES)
+    .describe(
+      'running while its batches start runs; completed once every contact was handled; stopped (endReason says why) or failed (stalled) otherwise.',
+    ),
+  endReason: z
+    .enum(AUTOMATION_ENROLLMENT_END_REASONS)
+    .nullable()
+    .describe(
+      'Why it stopped before every contact was handled; null while it runs or once completed. stopped_by_member, stopped_by_api; member_removed (its member left or may no longer publish automations); api_key_revoked, api_key_expired, api_not_in_plan, api_scope_missing (its key may no longer enrol); automation_paused, automation_unavailable, channel_unavailable, not_in_plan, inputs_changed, marketing_not_allowed; stalled (failed).',
+    ),
+  total: z.number().int().describe('The contacts snapshotted when it started, 1 to 10,000.'),
+  started: z.number().int().describe('Contacts a run was started for.'),
+  refused: z.number().int().describe('Contacts a start refused (refusals gives the reasons).'),
+  cancelled: z.number().int().describe('Contacts not started because it stopped.'),
+  pending: z.number().int().describe('Contacts not handled yet.'),
+  startedBy: z
+    .enum(['member', 'api'])
+    .describe('Who started it: a member in the app (never which member) or an API key.'),
+  apiKeyId: z.uuid().nullable().describe('The key that started it; null for a member’s.'),
+  stoppedBy: z
+    .enum(['member', 'api'])
+    .nullable()
+    .describe('Who stopped it: a member, an API key, or null when nobody did.'),
+  stoppedByApiKeyId: z.uuid().nullable().describe('The key that stopped it, if one did.'),
+  createdAt: z.iso.datetime(),
+  endedAt: z.iso.datetime().nullable(),
+});
+
+/** One enrolment with its refusals by reason and whether it has stalled. */
+export const apiAutomationEnrollmentDetailSchema = apiAutomationEnrollmentSchema.extend({
+  refusals: z
+    .array(z.object({ reason: z.string(), count: z.number().int() }))
+    .describe(
+      'Refused contacts by reason, most frequent first: suppressed, opted_out, contact_erased, no_marketing_opt_in, conversation_assigned, automation_busy, automation_limit, automation_quota, contact_gone (merged away since) or no_number.',
+    ),
+  stalledSince: z.iso
+    .datetime()
+    .nullable()
+    .describe(
+      'While it runs without progress (its next batch 10 minutes overdue, or tried again since), when it last handled a contact; HyFib tries again and fails it after 3 tries. null otherwise.',
+    ),
 });
 
 /** What a start of many runs answers for one number (ADR-161). */
@@ -1494,13 +1579,13 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.enum(WEBHOOK_RUN_TRIGGERS))
     .nullable()
     .describe(
-      'What started the runs whose events (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.trigger names it; null receives every run. api takes both the runs API keys started and the runs members’ enrolments started (run.apiKeyId or run.enrollmentId says which); runApiKeyIds narrows to keys’ runs.',
+      'What started the runs whose events (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.trigger names it; null receives every run. api takes both the runs API keys started and the runs enrolments started, by a member or an API key (run.apiKeyId or run.enrollmentId says which); runApiKeyIds narrows to the runs keys started one by one.',
     ),
   runApiKeyIds: z
     .array(z.uuid())
     .nullable()
     .describe(
-      'The API keys whose runs (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.apiKeyId names them: the runs one of them started through the API, or a key one of them was rotated from or into. A run started otherwise is not received. null receives every run.',
+      'The API keys whose runs (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.apiKeyId names them: the runs one of them started through the API, or a key one of them was rotated from or into. A run started otherwise is not received. A run an enrolment started, a key’s enrolment included, carries no key (run.apiKeyId null, run.enrollmentId set), so a list of keys never matches it. null receives every run.',
     ),
   consentChanges: z
     .array(z.enum(WEBHOOK_CONSENT_CHANGES))
@@ -1835,7 +1920,7 @@ export const apiErrorSchema = z.object({
       .string()
       .optional()
       .describe(
-        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, contact_merged, conversation_assigned, idempotency_key_reused, idempotency_response_too_large, ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed.',
+        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, contact_merged, conversation_assigned, enrollment_ended, enrollment_running, idempotency_key_reused, idempotency_response_too_large, ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed.',
       ),
     mergedInto: z
       .uuid()
@@ -1876,7 +1961,7 @@ const errors = (...statuses: number[]) =>
             401: 'No valid API key: missing, unknown, revoked or expired.',
             403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one, the CRM for pipelines, deals and tasks, or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
-            409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason.',
+            409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason. Enrolling contacts in an automation: another enrolment of it is running (reason enrollment_running, the message naming it); stopping an enrolment: it has ended (enrollment_ended).',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
             415: 'The body must be JSON (Content-Type: application/json).',
             422: 'The request body or parameters are invalid.',
@@ -1901,6 +1986,16 @@ const tagPrefixParam = {
 /** How pages of tags are read, for both lists (ADR-272). */
 const tagPagesNote =
   'Pages continue after the last tag of the page before, so paging never skips or repeats a tag that stays in use; a tag first used meanwhile before the cursor is listed on the next pass, and the counts are read with each page.';
+
+/** An enrolment of the automation the path names (ADR-403). */
+const enrollmentIdParam = {
+  name: 'enrollmentId',
+  in: 'path',
+  required: true,
+  schema: { type: 'string', format: 'uuid' },
+  description:
+    'An enrolment of the automation (GET /automations/{id}/enrollments); another automation’s is not found.',
+};
 
 const pageParams = [
   {
@@ -2121,6 +2216,33 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('MessageTemplateDetail'))),
             },
             ...errors(400, 401, 403, 404, 412, 422, 423, 429, 500),
+            '503': {
+              description:
+                'Meta is limiting management requests for the template’s WhatsApp Business account: nothing was queued. The message gives the time in UTC and `details.pausedUntil` the instant; retry after it.',
+              content: json(ref('Error')),
+            },
+          },
+        },
+      },
+      '/message-templates/{id}/edit': {
+        post: {
+          operationId: 'editMessageTemplate',
+          summary: 'Edit a template Meta has',
+          description: [
+            `${scopeNote('templates.submit')} Sends Meta an edit of a template it has, as members do on the Templates page: its whole new content, checked as the template editor checks drafts (422). Its name, language and category stay (a different \`definition.category\` answers 422). Refused with 412 for a template Meta does not have (change the draft instead), one whose edit is still waiting for Meta’s answer, content HyFib cannot represent, the content Meta has already, while one of the company’s campaigns using it is scheduled or sending, or when it changes the template’s variables or buttons (how many values its header, body or links take, its quick replies and their titles) while an unfinished campaign, a published automation or a store message uses it (wording alone is allowed), and with 409 for one deleted or being deleted; its WhatsApp Business account must be connected (412). HyFib does not limit which statuses can be edited or how often: Meta decides, and its refusal is given with its code and message in \`edit.error\`, \`edit.state\` \`failed\`. The edit is sent to Meta at most once: after an answer that may have done it (a lost answer, a 5xx), HyFib never sends it again but reads the template from Meta to settle it. While the edit is \`sending\` the template keeps the status and content Meta has; once Meta takes it, HyFib reads the template from Meta again and gives the status, category and content Meta reports, which later sends use. Its history records the edit (\`edit_requested\`, \`edited\` or \`edit_failed\`, source \`edit\`). While Meta limits management requests for the account, it answers 503 and nothing changes. The audit log names the key.`,
+            'With an `Idempotency-Key`, a retry answers the first response; without one, editing it again while the first edit is sending is refused with 412.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+          ],
+          requestBody: { required: true, content: json(ref('EditMessageTemplate')) },
+          responses: {
+            '200': {
+              description: 'The template, its edit being sent.',
+              content: json(dataOf(ref('MessageTemplateDetail'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
             '503': {
               description:
                 'Meta is limiting management requests for the template’s WhatsApp Business account: nothing was queued. The message gives the time in UTC and `details.pausedUntil` the instant; retry after it.',
@@ -3295,7 +3417,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'createCampaign',
           summary: 'Create a campaign draft',
-          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign or store of the company; an \`orders\` or \`spend\` condition also needs \`orders.read\`). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: a member submits it in the app, or a key submits it for a member's approval (POST /campaigns/{id}/submit), and it sends under the authority of a member allowed to send campaigns; a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
+          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign or store of the company; an \`orders\` or \`spend\` condition also needs \`orders.read\`). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: a member submits it in the app, or a key submits it for a member's approval (POST /campaigns/{id}/submit), and it sends under the authority of a member allowed to send campaigns; a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. \`variantB\` adds a second template for an A/B test: sent from the same number to the share of the recipients given, with its own variables, each variant checked on its own when the draft is submitted. One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('CreateCampaign')) },
           responses: {
@@ -3311,7 +3433,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'getCampaign',
           summary: 'A campaign with its results and settings',
-          description: `${scopeNote('campaigns.read')} The results are counted when the campaign is read, as its page in the app counts them: messages sent, delivered, read and failed, replies and opt-outs, why recipients were skipped and the commonest WhatsApp error codes of failed messages; null for a draft. Counts only (GET /campaigns/{id}/recipients lists the recipients): never members or costs. A key that also holds \`campaigns.write\` gets its settings, as members edit them while it is a draft, and its version; other keys get null for both.`,
+          description: `${scopeNote('campaigns.read')} The results are counted when the campaign is read, as its page in the app counts them: messages sent, delivered, read and failed, replies and opt-outs, why recipients were skipped and the commonest WhatsApp error codes of failed messages; null for a draft. Counts only (GET /campaigns/{id}/recipients lists the recipients): never members or costs. A key that also holds \`campaigns.write\` gets its settings, as members edit them while it is a draft, and its version; other keys get null for both. A campaign with variant B also gives \`variants\`: each variant's template, share and results side by side, descriptive counts that add up to \`results\` (HyFib picks no winner).`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': {
@@ -3395,7 +3517,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listCampaignRecipients',
           summary: 'A campaign’s recipients and what happened to each',
-          description: `${scopeNote('campaigns.read')} Also needs \`contacts.read\`, as the list names contacts. The campaign's recipients in a fixed order (by id), on pages that never skip or repeat one: the contact, whether the recipient is waiting, queued, skipped (and why) or was left out when the campaign was canceled, the message queued for it (the id the message feeds, with \`conversations.read\`, and \`message.status\` webhooks give it) with its status and WhatsApp's error, and when a reply and an opt-out were counted for it. \`outcome\` keeps the recipients one count of the campaign's results counts (GET /campaigns/{id}), by the count's own rule, so it lists as many recipients as that count, less those whose contact was erased: the API never lists erased contacts. Each page is read when it is asked for, so outcomes can change between pages while the campaign runs. A draft has no recipients.`,
+          description: `${scopeNote('campaigns.read')} Also needs \`contacts.read\`, as the list names contacts. The campaign's recipients in a fixed order (by id), on pages that never skip or repeat one: the contact, whether the recipient is waiting, queued, skipped (and why) or was left out when the campaign was canceled, the message queued for it (the id the message feeds, with \`conversations.read\`, and \`message.status\` webhooks give it) with its status and WhatsApp's error, and when a reply and an opt-out were counted for it. \`outcome\` keeps the recipients one count of the campaign's results counts (GET /campaigns/{id}), by the count's own rule, so it lists as many recipients as that count, less those whose contact was erased: the API never lists erased contacts. Each page is read when it is asked for, so outcomes can change between pages while the campaign runs. Each recipient names its \`variant\`, given when the audience was taken and never changed: B for those sent a campaign's second template, A otherwise. A draft has no recipients.`,
           parameters: [
             { $ref: '#/components/parameters/Id' },
             ...pageParams,
@@ -3611,6 +3733,75 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf({ type: 'array', items: ref('AutomationRunStart') })),
             },
             ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/automations/{id}/enrollments': {
+        get: {
+          operationId: 'listAutomationEnrollments',
+          summary: 'An automation’s enrolments, newest first',
+          description: `${scopeNote('automations.start')} Every enrolment of the automation, those members started in the app and those keys started, newest first, with its status and counts. Reading works while the company is suspended.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
+          responses: {
+            '200': {
+              description: 'A page of enrolments.',
+              content: pageOf('AutomationEnrollment'),
+            },
+            ...errors(401, 403, 404, 422, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'startAutomationEnrollment',
+          summary: 'Enrol contacts or a segment in an automation',
+          description: [
+            `${scopeNote('automations.start')} Also needs \`contacts.read\`, \`campaigns.read\` for a segment, the scopes that read a segment's conditions on conversations (\`conversations.read\`) or store orders (\`orders.read\`), and \`messages.send_marketing\` when the automation sends marketing templates. Enrols in a published, active automation started by a member or through the API either a saved segment's members (\`segmentId\`) or the contacts a tag and marketing consent find (\`contacts.conditions\`, written as POST /contacts/search writes them: the Contacts page's filters, one condition at least; none is refused with 422, so a call never enrols every contact unasked: enrol a segment for that), with every input its trigger declares, once for everyone. With \`expectedCount\`, a snapshot of another number of contacts is refused with 409, enrolling nobody, as a member's enrolment is when its count changed.`,
+            `The contacts are counted and snapshotted now, in contact id order: 1 to ${ENROLLMENT_LIMITS.contacts.toLocaleString('en-US')} (422 otherwise; send a campaign to more); contacts matching later are not enrolled. Runs then start in the background in batches of ${ENROLLMENT_LIMITS.batch}, paced by the number's send rate, each contact with the checks of POST /automations/{id}/runs (a refused contact is counted with its reason and the others go on). One enrolment of an automation runs at a time: another is refused with 409 (reason \`enrollment_running\`, naming it).`,
+            'Each batch checks the key again as a request would: a key revoked or expired since, a plan that no longer includes the API or a scope this needs, ends the enrolment (`stopped`, with the reason); contacts not handled are not started and runs already started go on. The call counts as one request; batches count none. Runs it starts send `automation.run_started` and the other run events with `run.enrollmentId` set and `run.apiKeyId` null. One enrolment per `Idempotency-Key`: a retry answers as the first request did.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKey' },
+          ],
+          requestBody: { required: true, content: json(ref('StartAutomationEnrollment')) },
+          responses: {
+            '201': {
+              description: 'The enrolment, as it starts.',
+              content: json(dataOf(ref('AutomationEnrollmentWithProgress'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/automations/{id}/enrollments/{enrollmentId}': {
+        get: {
+          operationId: 'getAutomationEnrollment',
+          summary: 'An enrolment’s progress',
+          description: `${scopeNote('automations.start')} One enrolment of the automation, a member's or a key's: its status, counts, refusals by reason, who started and stopped it, and whether it has stalled. Its contacts are not listed one by one.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }, enrollmentIdParam],
+          responses: {
+            '200': {
+              description: 'The enrolment.',
+              content: json(dataOf(ref('AutomationEnrollmentWithProgress'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
+      '/automations/{id}/enrollments/{enrollmentId}/stop': {
+        post: {
+          operationId: 'stopAutomationEnrollment',
+          summary: 'Stop an enrolment',
+          description: [
+            `${scopeNote('automations.start')} Any running enrolment of the automation, a member's or a key's, as a member stops one in the app: once a batch in progress has finished, its contacts not handled are not started (\`cancelled\`) and it ends as \`stopped\` with \`stopped_by_api\`, naming the key. Runs already started go on; stop one with POST /automation-runs/{id}/stop only when a key started it.`,
+            'One that has ended is refused with 409 (reason `enrollment_ended`): GET it to see how it ended.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }, enrollmentIdParam],
+          responses: {
+            '200': {
+              description: 'The enrolment, as it now is.',
+              content: json(dataOf(ref('AutomationEnrollmentWithProgress'))),
+            },
+            ...errors(401, 403, 404, 409, 423, 429, 500),
           },
         },
       },
@@ -4628,7 +4819,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'automation.run_started': webhook(
         'webhookAutomationRunStarted',
         WEBHOOK_EVENT_INFO['automation.run_started'].label,
-        `${WEBHOOK_EVENT_INFO['automation.run_started'].description} For a run started through the API, run.id is the id POST /automations/{id}/runs answered and run.apiKeyId names the key that called it. An endpoint receives every automation's runs unless it names the automations it takes (its \`automationIds\`, or the automations chosen in Settings → Webhooks), and every run unless it names the API keys whose runs it takes (its \`runApiKeyIds\`, or the keys ticked in Settings → Webhooks): then it receives the runs those keys started, or a key rotated from or into one of them.`,
+        `${WEBHOOK_EVENT_INFO['automation.run_started'].description} For a run started through the API, run.id is the id POST /automations/{id}/runs answered and run.apiKeyId names the key that called it. An endpoint receives every automation's runs unless it names the automations it takes (its \`automationIds\`, or the automations chosen in Settings → Webhooks), and every run unless it names the API keys whose runs it takes (its \`runApiKeyIds\`, or the keys ticked in Settings → Webhooks): then it receives the runs those keys started through POST /automations/{id}/runs (or start-many), or a key rotated from or into one of them; runs of an enrolment, by a member or a key, carry no key (run.apiKeyId null, run.enrollmentId set) and are not received.`,
         'WebhookAutomationRunStarted',
       ),
       'automation.run_ended': webhook(
@@ -4987,6 +5178,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         MessageTemplateDetail: jsonSchema(apiMessageTemplateDetailSchema),
         CreateMessageTemplate: jsonSchema(apiCreateMessageTemplateSchema, 'input'),
         UpdateMessageTemplate: jsonSchema(apiUpdateMessageTemplateSchema, 'input'),
+        EditMessageTemplate: jsonSchema(apiEditMessageTemplateSchema, 'input'),
         SavedReply: jsonSchema(apiSavedReplySchema),
         CreateSavedReply: jsonSchema(apiCreateSavedReplySchema, 'input'),
         UpdateSavedReply: jsonSchema(apiUpdateSavedReplySchema, 'input'),
@@ -5035,6 +5227,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         StartManyAutomationRuns: jsonSchema(apiStartManyAutomationRunsSchema, 'input'),
         StopManyAutomationRuns: jsonSchema(apiStopManyAutomationRunsSchema, 'input'),
         AutomationRunStart: jsonSchema(apiAutomationRunStartSchema),
+        AutomationEnrollment: jsonSchema(apiAutomationEnrollmentSchema),
+        AutomationEnrollmentWithProgress: jsonSchema(apiAutomationEnrollmentDetailSchema),
+        StartAutomationEnrollment: jsonSchema(apiStartEnrollmentSchema, 'input'),
         WebhookEndpoint: jsonSchema(apiWebhookEndpointSchema),
         WebhookEndpointWithSecret: jsonSchema(apiWebhookEndpointWithSecretSchema),
         WebhookDelivery: jsonSchema(apiWebhookDeliverySchema),
@@ -5094,6 +5289,7 @@ export const API_ROUTES = [
   ['patch', '/message-templates/{id}'],
   ['delete', '/message-templates/{id}'],
   ['post', '/message-templates/{id}/submit'],
+  ['post', '/message-templates/{id}/edit'],
   ['get', '/channels'],
   ['get', '/contacts'],
   ['post', '/contacts'],
@@ -5171,6 +5367,10 @@ export const API_ROUTES = [
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],
   ['post', '/automations/{id}/runs/start-many'],
+  ['get', '/automations/{id}/enrollments'],
+  ['post', '/automations/{id}/enrollments'],
+  ['get', '/automations/{id}/enrollments/{enrollmentId}'],
+  ['post', '/automations/{id}/enrollments/{enrollmentId}/stop'],
   ['get', '/automation-runs/{id}'],
   ['post', '/automation-runs/{id}/stop'],
   ['post', '/automation-runs/stop-many'],

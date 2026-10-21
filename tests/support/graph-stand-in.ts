@@ -46,6 +46,21 @@ export type TemplateCreateBehaviour =
   /** Refuses the connection-level request without creating anything. */
   | { kind: 'drop_connection' };
 
+/**
+ * How the stand-in answers the next edit of a template (`POST /{template-id}`, research M-201).
+ * `accept` applies the components (and the category sent) and answers `success: true`, setting the
+ * template's status to `status` when given: what status Meta gives an edited template is not
+ * confirmed, so tests choose it. `error` refuses it with a Graph error and changes nothing.
+ */
+export type TemplateEditBehaviour =
+  | { kind: 'accept'; status?: string }
+  /** `apply`: the edit is applied before the error is answered, as a 5xx after the work may be. */
+  | { kind: 'error'; status: number; code: number; message: string; apply?: boolean }
+  /** Applies the edit, then drops the connection before answering (lost response). */
+  | { kind: 'apply_then_drop'; status?: string }
+  /** Drops the connection without applying anything. */
+  | { kind: 'drop_connection' };
+
 /** A WhatsApp flow as the stand-in keeps it (research M-161 to M-163). */
 export interface FlowFixture {
   id: string;
@@ -112,6 +127,10 @@ export interface StandInState {
   rejectExtraTemplateFields: boolean;
   /** When set, template deletions fail with this Graph error and the template stays listed. */
   templateDeleteError: { status: number; code: number; message: string } | null;
+  /** How the next template edits are answered (one entry per edit; `accept` when empty). */
+  templateEditQueue: TemplateEditBehaviour[];
+  /** When set, template reads by id (`GET /{template-id}`) fail with this Graph error. */
+  templateReadError: { status: number; code: number; message: string } | null;
   /** Recipient -> WhatsApp id returned in send responses (defaults to the recipient). */
   waIdFor: Map<string, string>;
   templateCounter: number;
@@ -727,6 +746,8 @@ export async function startGraphStandIn(options: {
     templateCreateQueue: [],
     rejectExtraTemplateFields: false,
     templateDeleteError: null,
+    templateEditQueue: [],
+    templateReadError: null,
     waIdFor: new Map(),
     templateCounter: 0,
     flows: new Map(),
@@ -844,6 +865,15 @@ export async function startGraphStandIn(options: {
         const template = state.templates.get(String(b.wabaId))?.find((t) => t.name === b.name);
         if (!template || typeof b.status !== 'string') return json(res, 404, { ok: false });
         template.status = b.status;
+        return json(res, 200, { ok: true });
+      }
+      // Test control: how the next template edit is answered (ADR-404), such as Meta's refusal.
+      if (req.method === 'POST' && url.pathname === '/__stand-in/template-edit') {
+        const b = (body ?? {}) as { behaviour?: TemplateEditBehaviour };
+        if (!b.behaviour || typeof b.behaviour.kind !== 'string') {
+          return json(res, 400, { ok: false });
+        }
+        state.templateEditQueue.push(b.behaviour);
         return json(res, 200, { ok: true });
       }
       // Test control: a file a customer sent, as WhatsApp keeps it for the account (ADR-216).
@@ -1165,6 +1195,46 @@ export async function startGraphStandIn(options: {
           list.splice(index, 1);
           return json(res, 200, { success: true });
         }
+      }
+      // A template by its id (research M-201): read with Meta's default fields, or edited.
+      const byId =
+        first && !second
+          ? [...state.templates.values()].flat().find((t) => t.id === first)
+          : undefined;
+      if (byId && req.method === 'GET') {
+        if (state.templateReadError) {
+          const e = state.templateReadError;
+          return graphError(res, e.status, e.code, e.message);
+        }
+        const { id, name, language, status, category, components } = byId;
+        return json(res, 200, { id, name, language, status, category, components });
+      }
+      if (byId && req.method === 'POST') {
+        const b = (body ?? {}) as Record<string, unknown>;
+        // Only the fields HyFib sends: name and language cannot change and are not sent.
+        const extra = Object.keys(b).filter((k) => k !== 'category' && k !== 'components');
+        if (!Array.isArray(b.components) || typeof b.category !== 'string' || extra.length > 0) {
+          return graphError(res, 400, 100, 'Invalid parameter');
+        }
+        const behaviour = state.templateEditQueue.shift() ?? { kind: 'accept' };
+        if (behaviour.kind === 'drop_connection') {
+          req.socket.destroy();
+          return;
+        }
+        if (behaviour.kind === 'error' && !behaviour.apply) {
+          return graphError(res, behaviour.status, behaviour.code, behaviour.message);
+        }
+        byId.components = b.components;
+        byId.category = b.category;
+        if (behaviour.kind === 'error') {
+          return graphError(res, behaviour.status, behaviour.code, behaviour.message);
+        }
+        if (behaviour.status) byId.status = behaviour.status;
+        if (behaviour.kind === 'apply_then_drop') {
+          req.socket.destroy();
+          return;
+        }
+        return json(res, 200, { success: true });
       }
       // Catalogs (research M-172) ---------------------------------------------------------------
       if (

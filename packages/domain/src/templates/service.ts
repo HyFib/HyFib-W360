@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { AppError, notFound, uuidv7, type Clock, type Keyring } from '@w360/core';
-import { QUEUES } from '@w360/contracts';
 import {
   and,
   asc,
@@ -34,7 +33,6 @@ import {
   refusedForPause,
   type ManagementPaused,
 } from '../messaging/management-pace';
-import { credentialAad } from '../messaging/credentials';
 import { parseInput } from '../validation';
 import {
   TEMPLATE_LANGUAGE_RE,
@@ -47,6 +45,34 @@ import {
   validateDefinition,
   type TemplateDefinition,
 } from './definition';
+import {
+  databaseNow,
+  maskUsage,
+  reconcileTemplateEdit,
+  templateUsage,
+  writeEditTemplate,
+  type UsageVisibility,
+} from './edit';
+import { templateEditBlocker } from './edit-model';
+import {
+  enqueueTemplateJob,
+  insertStatusEvent,
+  mapProviderTemplateStatus,
+  requestSyncTx,
+  templateAccount,
+  wabaCredential,
+} from './shared';
+
+export { PROVIDER_TEMPLATE_STATUS, mapProviderTemplateStatus, wabaCredential } from './shared';
+
+/** The usage names a member may read: those their read permissions cover (ADR-404). */
+export function memberVisibility(ctx: TenantContext): UsageVisibility {
+  return {
+    campaigns: can(ctx, 'campaigns.read'),
+    automations: can(ctx, 'automations.read'),
+    stores: can(ctx, 'commerce.read'),
+  };
+}
 
 /**
  * WhatsApp message templates. Local states (`draft`, `submitting`, `submit_failed`) exist before
@@ -70,25 +96,6 @@ const SYNC_MAX_PAGES = 50;
 const SYNC_FIELDS = 'id,name,language,status,category,components,rejected_reason,quality_score';
 const DEFAULT_FIELDS_FALLBACK = 'id,name,language,status,category,components';
 
-export const PROVIDER_TEMPLATE_STATUS: Record<string, TemplateStatus> = {
-  APPROVED: 'approved',
-  PENDING: 'pending',
-  REJECTED: 'rejected',
-  PAUSED: 'paused',
-  DISABLED: 'disabled',
-  IN_APPEAL: 'in_appeal',
-  FLAGGED: 'flagged',
-  ARCHIVED: 'archived',
-  PENDING_DELETION: 'pending_deletion',
-  DELETED: 'deleted',
-  LIMIT_EXCEEDED: 'limit_exceeded',
-  LOCKED: 'locked',
-};
-
-export function mapProviderTemplateStatus(status: string | null | undefined): TemplateStatus {
-  return (status && PROVIDER_TEMPLATE_STATUS[status.toUpperCase()]) || 'unknown';
-}
-
 const LOCAL_STATES: readonly TemplateStatus[] = ['draft', 'submitting', 'submit_failed'];
 const EDITABLE_STATES: readonly TemplateStatus[] = ['draft', 'submit_failed'];
 
@@ -106,6 +113,11 @@ export const draftInputSchema = z.object({
   whatsappAccountId: z.uuid(),
   name: templateNameSchema,
   language: templateLanguageSchema,
+  definition: templateDefinitionSchema,
+});
+
+/** What an edit of a template Meta has takes (ADR-404): its whole new content. */
+export const editTemplateSchema = z.object({
   definition: templateDefinitionSchema,
 });
 
@@ -129,44 +141,11 @@ export function assertValidDefinition(def: TemplateDefinition) {
   }
 }
 
-async function insertStatusEvent(
-  tx: Tx,
-  tenantId: string,
-  input: {
-    templateId: string;
-    status: string;
-    reason?: string | null;
-    source: 'submit' | 'sync' | 'send' | 'delete';
-    actorUserId?: string | null;
-    at: Date;
-  },
-) {
-  await tx.insert(templateStatusEvents).values({
-    id: uuidv7(),
-    tenantId,
-    templateId: input.templateId,
-    status: input.status.slice(0, 32),
-    reason: input.reason?.slice(0, 1000) ?? null,
-    source: input.source,
-    actorUserId: input.actorUserId ?? null,
-    occurredAt: input.at,
-  });
-}
-
 /**
  * The template.sync queue's priorities (pg-boss fetches higher first): a refresh a member asked for
  * goes before the sweep's routine syncs, which keep the default (ADR-178).
  */
 export const TEMPLATE_SYNC_PRIORITY = { requested: 10, routine: 0 } as const;
-
-async function requestSyncTx(tx: Tx, tenantId: string, whatsappAccountId: string, at: Date) {
-  await tx
-    .update(whatsappAccounts)
-    .set({ templatesSyncRequestedAt: at })
-    .where(
-      and(eq(whatsappAccounts.tenantId, tenantId), eq(whatsappAccounts.id, whatsappAccountId)),
-    );
-}
 
 /** Who adds a draft: a member, or a key through the API (ADR-295). */
 export type TemplateAuthor = { userId: string } | { apiKeyId: string };
@@ -306,31 +285,6 @@ export async function writeDeleteLocalTemplate(
   });
 }
 
-/** Queues a template job, signed for the company and who asked: a member, or none for a key. */
-async function enqueueTemplateJob(
-  tx: Tx | null,
-  deps: Pick<TemplateDeps, 'jobs' | 'signer'>,
-  kind: 'template.submit' | 'template.delete' | 'template.sync',
-  tenantId: string,
-  actorUserId: string | null,
-  ref: string,
-  singletonKey: string,
-  priority?: number,
-) {
-  const queue =
-    kind === 'template.submit'
-      ? QUEUES.templateSubmit.name
-      : kind === 'template.delete'
-        ? QUEUES.templateDelete.name
-        : QUEUES.templateSync.name;
-  await deps.jobs.enqueue(tx, queue, deps.signer.sign({ kind, tenantId, actorUserId, ref }), {
-    singletonKey,
-    ...(priority !== undefined ? { priority } : {}),
-  });
-  // A job already waiting under the key stands for this one, at the priority asked (ADR-178).
-  if (priority !== undefined) await deps.jobs.raisePriority(tx, queue, singletonKey, priority);
-}
-
 /**
  * Refuses a member's or key's management action on the account while Meta throttles its management
  * calls (ADR-399): a deletion at Meta is then not queued. `timeZone` as for `writeSubmitTemplate`.
@@ -344,23 +298,6 @@ export async function assertTemplateAccountOpen(
 ): Promise<void> {
   const waba = await templateAccount(tx, tenantId, whatsappAccountId);
   assertManagementOpen(waba.managementPausedUntil, at, timeZone);
-}
-
-/** The company's WhatsApp Business account (404 for none). */
-async function templateAccount(tx: Tx, tenantId: string, whatsappAccountId: string) {
-  const [waba] = await tx
-    .select({
-      id: whatsappAccounts.id,
-      status: whatsappAccounts.status,
-      name: whatsappAccounts.name,
-      managementPausedUntil: whatsappAccounts.managementPausedUntil,
-    })
-    .from(whatsappAccounts)
-    .where(
-      and(eq(whatsappAccounts.tenantId, tenantId), eq(whatsappAccounts.id, whatsappAccountId)),
-    );
-  if (!waba) throw notFound('WhatsApp account');
-  return waba;
 }
 
 /**
@@ -430,14 +367,23 @@ export async function writeSubmitTemplate(
 /**
  * How a locked template is deleted, as the Templates page and the API delete it (ADR-296): `local`
  * for one Meta never received, `meta` for one Meta has, which also needs `templates.submit`. One
- * already deleted, or being deleted, answers 409; one being submitted, 412.
+ * already deleted, or being deleted, answers 409; one being submitted, or whose edit is on its way
+ * to Meta (ADR-404), 412.
  */
 export function templateDeletion(row: {
   status: TemplateStatus;
   providerTemplateId: string | null;
+  editState?: string | null;
 }): 'local' | 'meta' {
   if (row.status === 'deleted' || row.status === 'pending_deletion') {
     throw new AppError('conflict', 'This template is already deleted.');
+  }
+  // Its edit could otherwise reach Meta after the deletion, or the deletion settle it (ADR-404).
+  if (row.editState === 'sending') {
+    throw new AppError(
+      'precondition_failed',
+      'Wait until Meta answers the edit of this template before deleting it.',
+    );
   }
   if (row.status === 'submitting') {
     throw new AppError(
@@ -593,10 +539,22 @@ export function createTemplatesService(deps: TemplateDeps) {
             .limit(50);
           const definition = fromMetaComponents(row.category, row.components);
           const spec = sendSpecFor(row.category, row.components);
+          // The content an open edit sent (sending, or failed so it can be changed and sent again).
+          const editDefinition =
+            row.editState && row.editComponents
+              ? fromMetaComponents(row.category, row.editComponents)
+              : null;
           return {
             template: row,
             definition,
             editable: isEditableDraft(row),
+            /**
+             * Whether HyFib can send Meta an edit of it (ADR-404): Meta has it, it is not being
+             * deleted, no edit is on its way and HyFib can represent its content. Meta decides the
+             * rest (statuses, how often).
+             */
+            metaEditable: templateEditBlocker(row) === null,
+            editDefinition,
             preview: definition ? renderExample(definition) : null,
             sendable: row.status === 'approved' && spec.supported,
             unsupportedReason: spec.supported ? null : spec.reason,
@@ -654,6 +612,76 @@ export function createTemplatesService(deps: TemplateDeps) {
           );
         }
         await writeUpdateTemplateDraft(tx, ctx.tenant.id, templateId, data.definition);
+      });
+    },
+
+    /**
+     * Where a template is used (ADR-404): unfinished campaigns, published automations and store
+     * rules that send it, shown before a member edits a template Meta has.
+     */
+    async templateUsage(ctx: TenantContext, templateId: string) {
+      assertCan(ctx, 'templates.submit');
+      if (!z.uuid().safeParse(templateId).success) throw notFound('Template');
+      return db.run(
+        ctx.scope,
+        async (tx) => {
+          const [row] = await tx
+            .select({ id: messageTemplates.id })
+            .from(messageTemplates)
+            .where(
+              and(
+                eq(messageTemplates.tenantId, ctx.tenant.id),
+                eq(messageTemplates.id, templateId),
+              ),
+            );
+          if (!row) throw notFound('Template');
+          // Every role that submits templates reads these (a unit test pins it); a company's own
+          // permission choices could differ, so names are shown only to members who may read them.
+          return maskUsage(
+            await templateUsage(tx, ctx.tenant.id, templateId),
+            memberVisibility(ctx),
+          );
+        },
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * Sends Meta an edit of a template it has (ADR-404), written ahead: the edit is `sending`, with
+     * its status change, and the `template.edit` job queued. Name, language and category stay.
+     */
+    async editTemplate(
+      ctx: TenantContext,
+      templateId: string,
+      input: unknown,
+      meta: RequestMeta = {},
+    ) {
+      assertCan(ctx, 'templates.submit');
+      const data = parseInput(editTemplateSchema, input);
+      await db.run(ctx.scope, async (tx) => {
+        const row = await loadForUpdate(tx, ctx, templateId);
+        await writeEditTemplate(
+          tx,
+          deps,
+          ctx.tenant.id,
+          row,
+          data.definition,
+          ctx.user.id,
+          clock.now(),
+          memberVisibility(ctx),
+          ctx.tenant.timezone,
+        );
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'template.edit_requested',
+            subjectType: 'template',
+            subjectId: templateId,
+            metadata: { name: row.name, language: row.language, category: row.category },
+          },
+          meta,
+        );
       });
     },
 
@@ -807,36 +835,6 @@ export interface TemplateWorkerDeps {
   keyring: Keyring;
   graph: GraphClient;
   clock: Clock;
-}
-
-/**
- * The WhatsApp account's id at Meta, its decrypted token and until when Meta throttles its
- * management calls (ADR-399), or null unless it is connected.
- */
-export async function wabaCredential(
-  tx: Tx,
-  tenantId: string,
-  whatsappAccountId: string,
-  keyring: Keyring,
-) {
-  const [waba] = await tx
-    .select({
-      wabaId: whatsappAccounts.wabaId,
-      status: whatsappAccounts.status,
-      credential: whatsappAccounts.credentialCiphertext,
-      managementPausedUntil: whatsappAccounts.managementPausedUntil,
-    })
-    .from(whatsappAccounts)
-    .where(
-      and(eq(whatsappAccounts.tenantId, tenantId), eq(whatsappAccounts.id, whatsappAccountId)),
-    );
-  if (!waba || waba.status !== 'connected' || !waba.credential) return null;
-  return {
-    whatsappAccountId,
-    wabaId: waba.wabaId,
-    token: keyring.decryptString(waba.credential, credentialAad(tenantId, whatsappAccountId)),
-    managementPausedUntil: waba.managementPausedUntil,
-  };
 }
 
 /** `paused`: Meta throttles the account's management calls; nothing was sent (ADR-399). */
@@ -1301,6 +1299,8 @@ export async function syncTemplates(
 
   await deps.db.run(scope, async (tx) => {
     const now = deps.clock.now();
+    // An edit's window is judged on the database's clock, which set its request time (ADR-404).
+    const dbNow = await databaseNow(tx);
     const local = await tx
       .select()
       .from(messageTemplates)
@@ -1389,6 +1389,8 @@ export async function syncTemplates(
             at: now,
           });
         }
+        // An edit whose answer was lost: Meta's content confirms it, or the window ends (ADR-404).
+        await reconcileTemplateEdit(tx, scope.tenantId, existing, remote, now, dbNow);
       } else if (category && components) {
         const id = uuidv7();
         await tx.insert(messageTemplates).values({
@@ -1465,6 +1467,7 @@ export async function syncTemplates(
           source: 'sync',
           at: now,
         });
+        await reconcileTemplateEdit(tx, scope.tenantId, row, null, now, dbNow);
       }
     }
     await tx

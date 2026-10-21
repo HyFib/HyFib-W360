@@ -318,6 +318,25 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   per-minute messaging sweep (`ops.template_sync_due`: requested, in review every 5 minutes, or
   older than 6 hours) and by members. The sweep lists the accounts asked for first, and their syncs,
   like members' refreshes, are queued at a higher pg-boss priority than routine ones (ADR-178).
+- **Editing a template Meta has (ADR-404):** `templates/edit-model.ts` decides (the request, the
+  refusals, how a sync settles a lost answer) and `templates/edit.ts` writes; shared writes live in
+  `templates/shared.ts`. A member with `templates.submit` (or a key with that scope, `POST
+/message-templates/{id}/edit`) sends new content in the draft editor after seeing where the
+  template is used (`templateUsage`: unfinished campaigns, published automations, store rules);
+  name, language and category stay; an edit is refused while a campaign using it is `scheduled` or
+  `running` (read under a share lock), and one that changes its shape (`templateShape`) while
+  anything uses it (automations count while runs are in progress on any version that sends it;
+  names are masked by the caller's read permissions or scopes). The job carries the edit's id and
+  commits one attempt before posting; only a rate limit clears it.
+  Written ahead on the template (`edit_state = 'sending'`, `edit_components`, who and when, an
+  `edit_requested` status change, migration 0316) and sent by the `template.edit` queue (paced by
+  ADR-399, deferred like a submission): `POST /{template-id}` with the unchanged category and the
+  components; on `success: true` the job reads `GET /{template-id}` and stores Meta's status,
+  category and components (no status assumed; a sync is requested when the read cannot be made);
+  a refusal leaves the edit `failed` with Meta's code and message. The sync settles a lost answer by
+  comparing Meta's components with the content sent (`editReconciliation`, 10-minute window), and
+  `ops.template_sync_due` syncs an account with an edit sending every 5 minutes. The template's own
+  `status`, `category` and `components` always mirror Meta.
 - **Starter templates (ADR-232):** `TEMPLATE_STARTERS` (`templates/library.ts`) holds HyFib's
   starters as editor definitions; `starterDraft` gives a company's draft of one (its name, its
   definition and, on a marketing starter, a quick reply with the company's first marketing opt-out
@@ -391,6 +410,25 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   recipients only. Analytics compute rates with explicit denominators from `METRIC_DEFINITIONS`
   (`packages/domain/src/reports/definitions.ts`); clicks and conversions are reported as not
   measured. Per-recipient CSV export is formula-safe and audited.
+- **A/B variants (ADR-405, `campaigns/variants.ts`):** a draft may add variant B in
+  `app.campaign_variants` (labels B to Z, so more variants need no new table; two are built): a
+  second template of the number's account with its own mapping and its share (10% to 90% in steps
+  of 5); the campaign's own template is A. `evaluateReadiness` checks each variant with
+  `variantTemplateProblems` (with B, each problem names its variant) and builds one `AudienceArm`
+  per variant: its template's rules and `variantConditionSql`, the bucket of the MD5 of
+  "campaign:contact" (first 32 bits modulo 100, `variantBucket` in TypeScript), below B's share for
+  B. `insertSnapshot` freezes each arm's contacts with its label in
+  `campaign_recipients.variant`, never updated (no grant). The review classifies and prices each
+  arm (`estimateFromTable` at its category, summed by `combineEstimates`), refuses a variant
+  nobody in its share can receive, and the messaging-limit notice counts all of them. Approval,
+  resuming and the runner check each variant's template (`variantSendable`) while that variant has
+  pending recipients (`pendingByVariant`), so a finished variant never holds the other back; a tick
+  sends each recipient
+  its recorded variant's template, checked against its variant's consent purpose and the
+  frequency cap for marketing variants, priced at its category. `campaignVariantAnalytics` counts
+  each variant as `campaignAnalytics` counts the campaign; the page, `GET /campaigns/{id}`
+  (`variants`), the recipients list and `campaign.recipient_skipped` (`variant`) show them.
+  Descriptive only: no winner, no significance.
 - **Rate cards** (`ops.rate_cards`, `rate_card_prefixes`, `rate_card_prices`): entered by platform
   staff from Meta's published cards (platform console), immutable once published; the app role reads
   published and withdrawn cards, and estimates use published cards only. Companies see the cards
@@ -781,6 +819,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   again, through the definer due list `ops.automation_enrollments_due`, a running enrolment whose
   next batch is more than 10 minutes overdue (a lost job, or one out of retries). A suspended
   company's job is queued again five minutes later; a job whose member left ends the enrolment.
+- **Enrolments through the public API** (`api/automation-enrollments.ts`, migration 0315,
+  ADR-403): a key with `automations.start` and `contacts.read` (and `campaigns.read` for a
+  segment) starts the same enrolment through the same steps (`snapshotEnrollment`,
+  `matchingContactIds`, `loadEnrollmentSegment`), choosing a segment or a tag and marketing consent
+  written as `POST /contacts/search` writes them, mapped onto the Contacts page's
+  `contactFilterSchema` (`enrollmentFilterOf`, `contactFilterConditionsFor`). The enrolment names
+  its key (`created_by_api_key_id`, exactly one of member and key) and its jobs are signed with no
+  user; each batch re-checks the key in place of the member (`apiKeyEnrollmentEnd`: revoked,
+  expired, the API and the scopes in the plan). Keys list (keyset pages), read and stop every
+  enrolment of the company (`selectEnrollmentPage`, `readEnrollmentDetail`,
+  `stopRunningEnrollment`, shared with members' pages).
 - **Not built yet:** templates with media headers in template steps, usage billing. Form steps
   (ADR-248), runs started through the public API (ADR-077), template steps' website buttons whose
   link ends with a value (ADR-229), products steps (ADR-383), steps that set deal fields

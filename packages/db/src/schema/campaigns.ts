@@ -143,7 +143,25 @@ export const campaignRecipients = appSchema.table('campaign_recipients', {
   queuedAt: tz('queued_at'),
   repliedAt: tz('replied_at'),
   optedOutAt: tz('opted_out_at'),
+  /** The variant it was given when the audience was taken (migration 0317, ADR-405); never changes. */
+  variant: text('variant').notNull().default('A'),
   createdAt: tz('created_at').notNull().defaultNow(),
+});
+
+/**
+ * A campaign's variants after A (migration 0317, ADR-405): a second template with its own mapping,
+ * sent to `share_percent` of the recipients. A is the campaign's own template and mapping.
+ */
+export const campaignVariants = appSchema.table('campaign_variants', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  campaignId: uuid('campaign_id').notNull(),
+  label: text('label').notNull(),
+  templateId: uuid('template_id'),
+  variables: jsonb('variables').notNull().$type<Record<string, unknown>>(),
+  sharePercent: smallint('share_percent').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
 export const CAMPAIGN_EVENT_TYPES = [

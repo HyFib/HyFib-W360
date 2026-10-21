@@ -221,6 +221,21 @@ export const QUEUES = {
     deleteAfterHours: 168,
   },
   /**
+   * Sends an edit of a template Meta has (ADR-404), written ahead as a submission is: only a
+   * connection that failed before sending is retried; a lost answer is settled by the sync.
+   */
+  templateEdit: {
+    name: 'template.edit',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 900,
+    expireInSeconds: 120,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 168,
+  },
+  /**
    * Deletes a template at Meta. A repeat is harmless, so it retries for 4 to 5 hours; a deletion
    * still pending after that is settled by the minute sweep (ADR-111).
    */

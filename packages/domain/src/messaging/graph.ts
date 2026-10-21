@@ -51,6 +51,47 @@ export interface RemoteTemplate {
   qualityScore: string | null;
 }
 
+/**
+ * What an edit of a template Meta has sends (`POST /{template-id}`, research M-201): the category
+ * Meta last reported, unchanged (ADR-404 keeps it), and the new components in the shape creation
+ * sends. Name and language are not sent: the path names the template, and neither can change.
+ */
+export interface EditTemplateRequest {
+  category: 'MARKETING' | 'UTILITY';
+  components: Record<string, unknown>[];
+}
+
+/** A template as Graph's listing or read by id gives it, or null when a field is missing. */
+export function remoteTemplateOf(value: unknown): RemoteTemplate | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  if (
+    typeof raw.id !== 'string' ||
+    typeof raw.name !== 'string' ||
+    typeof raw.language !== 'string' ||
+    typeof raw.status !== 'string' ||
+    typeof raw.category !== 'string'
+  ) {
+    return null;
+  }
+  const quality = raw.quality_score as { score?: unknown } | string | undefined;
+  return {
+    id: raw.id,
+    name: raw.name,
+    language: raw.language,
+    status: raw.status,
+    category: raw.category,
+    components: Array.isArray(raw.components) ? raw.components : [],
+    rejectedReason: typeof raw.rejected_reason === 'string' ? raw.rejected_reason : null,
+    qualityScore:
+      typeof quality === 'string'
+        ? quality
+        : typeof quality?.score === 'string'
+          ? quality.score
+          : null,
+  };
+}
+
 export interface GraphClientOptions {
   baseUrl: string;
   version: string;
@@ -84,6 +125,22 @@ function causeCode(error: unknown): string | undefined {
     current = (current as { cause?: unknown }).cause;
   }
   return undefined;
+}
+
+/**
+ * Whether a refusal is Meta's rate limit (HTTP 429 or a rate-limit code): Meta did not do the
+ * work, so it may be asked again. Other retryable answers (5xx, transient codes) may have done it.
+ */
+export function isRateLimited(failure: {
+  kind: GraphFailureKind;
+  httpStatus?: number;
+  code?: number;
+}): boolean {
+  return (
+    failure.kind === 'retryable' &&
+    (failure.httpStatus === 429 ||
+      (failure.code !== undefined && RATE_LIMIT_CODES.has(failure.code)))
+  );
 }
 
 export function classifyGraphError(
@@ -434,32 +491,9 @@ export class GraphClient {
       (json) => {
         if (!Array.isArray(json.data)) return null;
         const templates: RemoteTemplate[] = [];
-        for (const raw of json.data as Record<string, unknown>[]) {
-          if (
-            typeof raw.id !== 'string' ||
-            typeof raw.name !== 'string' ||
-            typeof raw.language !== 'string' ||
-            typeof raw.status !== 'string' ||
-            typeof raw.category !== 'string'
-          ) {
-            continue;
-          }
-          const quality = raw.quality_score as { score?: unknown } | string | undefined;
-          templates.push({
-            id: raw.id,
-            name: raw.name,
-            language: raw.language,
-            status: raw.status,
-            category: raw.category,
-            components: Array.isArray(raw.components) ? raw.components : [],
-            rejectedReason: typeof raw.rejected_reason === 'string' ? raw.rejected_reason : null,
-            qualityScore:
-              typeof quality === 'string'
-                ? quality
-                : typeof quality?.score === 'string'
-                  ? quality.score
-                  : null,
-          });
+        for (const raw of json.data as unknown[]) {
+          const template = remoteTemplateOf(raw);
+          if (template) templates.push(template);
         }
         const paging = json.paging as { next?: unknown; cursors?: { after?: unknown } } | undefined;
         const after = paging?.cursors?.after;
@@ -469,6 +503,31 @@ export class GraphClient {
           after: typeof paging?.next === 'string' && typeof after === 'string' ? after : null,
         };
       },
+    );
+  }
+
+  /**
+   * POST /{template-id} (`editTemplate`, research M-201): changes a template Meta has. The body
+   * carries only what HyFib sends (`EditTemplateRequest`); Meta answers `success: true`. Any other
+   * answer is a response HyFib cannot read (`unknown`), settled by the next sync.
+   */
+  editTemplate(templateId: string, token: string, request: EditTemplateRequest) {
+    const body: EditTemplateRequest = {
+      category: request.category,
+      components: request.components,
+    };
+    return this.request('POST', `/${encodeURIComponent(templateId)}`, { token, body }, (json) =>
+      json.success === true ? { edited: true as const } : null,
+    );
+  }
+
+  /**
+   * GET /{template-id} with Meta's default fields (`getTemplateByIdDefaultFields`, research M-201):
+   * one template's id, name, language, status, category and components.
+   */
+  getTemplate(templateId: string, token: string) {
+    return this.request('GET', `/${encodeURIComponent(templateId)}`, { token }, (json) =>
+      remoteTemplateOf(json),
     );
   }
 

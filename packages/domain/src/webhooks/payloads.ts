@@ -452,19 +452,19 @@ const webhookRunSchema = z.object({
   trigger: z
     .enum(WEBHOOK_RUN_TRIGGERS)
     .describe(
-      'What started it: a keyword, a new conversation, any message, a store’s order event, or a call through the API or a member’s enrolment of the contact (api; apiKeyId or enrollmentId says which).',
+      'What started it: a keyword, a new conversation, any message, a store’s order event, or a call through the API or an enrolment of the contact by a member or an API key (api; apiKeyId or enrollmentId says which).',
     ),
   apiKeyId: z
     .uuid()
     .nullable()
     .describe(
-      'The API key that started it, for a run started through the API; null for every other run, including a run of an automation started through the API that a member’s enrolment started.',
+      'The API key that started it, for a run started through the API; null for every other run, including a run an enrolment started, whether a member or an API key started the enrolment (enrollmentId names it; the enrolment names its key).',
     ),
   enrollmentId: z
     .uuid()
     .nullable()
     .describe(
-      'The member’s enrolment that started it (trigger api, apiKeyId null); null for every other run. One enrolment starts many runs, one per contact.',
+      'The enrolment that started it, by a member or an API key (trigger api, apiKeyId null); null for every other run. One enrolment starts many runs, one per contact.',
     ),
   status: z
     .enum(AUTOMATION_RUN_STATUSES)
@@ -680,8 +680,18 @@ const webhookCampaignSchema = z.object({
     .describe(
       'Why it completed, when the status is completed: every recipient was processed, or its sending time ran out. Null otherwise.',
     ),
-  templateId: z.uuid().nullable(),
-  templateName: z.string().nullable().describe('The template’s name when the event is delivered.'),
+  templateId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'Variant A’s (the campaign’s own) template; a campaign with variant B also sends B’s (see `variants` in GET /campaigns/{id}).',
+    ),
+  templateName: z
+    .string()
+    .nullable()
+    .describe(
+      'Variant A’s (the campaign’s own) template’s name when the event is delivered; see `variants` in GET /campaigns/{id} for variant B’s.',
+    ),
   scheduledAt: z.iso.datetime().nullable().describe('When it was set to start.'),
   startedAt: z.iso.datetime().nullable(),
   completedAt: z.iso.datetime().nullable(),
@@ -725,16 +735,28 @@ export const campaignRecipientSkippedPayloadSchema = envelope(
         .describe(
           'Why the campaign did not send it its message, as the campaign’s page explains it: contact_erased, no_phone (no WhatsApp number), suppressed (on the suppression list), opted_out, no_marketing_opt_in, missing_variable (no value for a variable without a fallback), frequency_capped (the marketing frequency cap), cost_unknown (no price for the number’s market under a spending cap) or expired (the sending period ended first).',
         ),
+      variant: z
+        .enum(['A', 'B'])
+        .describe(
+          'The variant the recipient was given when the audience was taken, as GET /campaigns/{id}/recipients gives it: A, the campaign’s own template, or B, its second template. A for every recipient of a campaign without variant B. The reason was checked against its variant’s template (a marketing variant needs marketing consent).',
+        ),
     }),
     campaign: z.object({
       id: z.uuid(),
       name: z.string().describe('The campaign’s name when the event is delivered.'),
       status: campaignStatusSchema.describe('Its status when the event is delivered.'),
-      templateId: z.uuid().nullable(),
+      templateId: z
+        .uuid()
+        .nullable()
+        .describe(
+          'Variant A’s (the campaign’s own) template; the recipient’s template is its variant’s (see `recipient.variant`).',
+        ),
       templateName: z
         .string()
         .nullable()
-        .describe('The template’s name when the event is delivered.'),
+        .describe(
+          'Variant A’s (the campaign’s own) template’s name when the event is delivered; see `recipient.variant`.',
+        ),
     }),
     contact: contactSchema.describe(
       'The recipient’s contact as it is when the event is delivered (a contact merged into another is the one it was merged into), as erasure left it.',
@@ -2178,6 +2200,7 @@ async function campaignRecipientOf(tx: Tx, tenantId: string, recipientId: string
       id: campaignRecipients.id,
       campaignId: campaignRecipients.campaignId,
       contactId: campaignRecipients.contactId,
+      variant: campaignRecipients.variant,
     })
     .from(campaignRecipients)
     .where(and(eq(campaignRecipients.tenantId, tenantId), eq(campaignRecipients.id, recipientId)));
@@ -2796,7 +2819,12 @@ export async function buildWebhookPayload(
       return {
         ...base,
         data: {
-          recipient: { id: recipient.id, skipReason },
+          // The variant recorded with the snapshot (ADR-405): it never changes.
+          recipient: {
+            id: recipient.id,
+            skipReason,
+            variant: recipient.variant === 'B' ? ('B' as const) : ('A' as const),
+          },
           campaign: {
             id: campaign.id,
             name: campaign.name,

@@ -11,6 +11,7 @@ import { RetryableJobError } from './email';
 export const PAUSE_DEFERRAL_QUEUES = {
   'template.submit': QUEUES.templateSubmit.name,
   'template.delete': QUEUES.templateDelete.name,
+  'template.edit': QUEUES.templateEdit.name,
   'template.sync': null,
   'flow.sync': QUEUES.flowSync.name,
   'flow.keys': QUEUES.flowKeys.name,

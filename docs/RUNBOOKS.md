@@ -435,6 +435,44 @@ to the template webhook fields (docs/META-SETUP.md). A refresh, and a sync Meta'
 asks for, is queued ahead of routine syncs (ADR-178): if statuses still take more than a few
 minutes, look at the template.sync queue's oldest wait on Operations → Queues.
 
+**A member's template edit is "Sent to Meta" for a while (ADR-404).** The `template.edit` job
+sends it; Meta's `success: true` settles it and HyFib reads the template again. When the answer was
+lost, the page says "Waiting for Meta to confirm the edit." and the sync (every 5 minutes while an
+edit is sending) settles it: Meta's template showing the new content confirms it; otherwise, 10
+minutes after the request (or after a deferral while Meta limited management requests), it is
+"Meta did not take the edit" with "HyFib could not confirm the edit". Tell the member to check the
+template in WhatsApp Manager and, if the new content is not there, send the edit again (the editor
+starts from it); nothing is resent automatically. Whether Meta's listing shows new content before
+Meta approves it is not confirmed (research M-201): if it does not, a lost answer always ends as
+"could not confirm", and a later sync still confirms the edit once Meta lists the content. HyFib
+also sends an edit without the template's name and language, which Meta's only example includes;
+if Meta refuses edits for that, its message says so and the refusal is shown as usual. An edit is
+sent at most once: a job run again after its attempt, or after a 5xx that paused the account, only
+asks for a sync. A failed edit keeps its account synced every 5 minutes for an hour after it
+failed, so an edit Meta applies late is confirmed then (later, at the 6-hourly sync). Check the
+`template.edit` and `template.sync` queues on Operations → Queues.
+
+**Meta refused a template edit.** The page and the API (`edit.error`) give Meta's code and message
+as Meta sent them, and the history an "Edit failed" row with the same. HyFib does not limit which
+statuses can be edited or how often, because Meta's documentation does not say (research M-201):
+tell the member what Meta's message says (for example a limit on edits, or content Meta does not
+take), that the template keeps the content and status Meta has, and that they can change the
+content and send it again, or make a new template. A credential error (190 and similar) also starts
+an access check; reconnect the account if Channels says so. An edit is refused in HyFib while a
+campaign using the template is scheduled or sending: wait, or pause or cancel it, then edit. An edit
+that changes the template's variables or buttons (how many values the header, body or a link take,
+or the quick-reply buttons and their titles) is refused while an unfinished campaign, a published
+automation or a store message uses the template, because each stores values for the old shape and
+would stop: change those to another template first, or add a new template. Automations count
+while they have runs in progress on any version that sends the template, not only the live one.
+Wording-only edits stay allowed. The shape check is broader than each sender needs (a renamed
+quick reply is refused even when only a campaign, which checks counts only, uses the template).
+These checks hold when the edit is requested: a campaign launched or resumed, an automation
+published or a store rule saved while a shape-changing edit is still sending is not refused, and
+stops if Meta takes the edit (a campaign pauses as "template not approved", an automation step ends
+"template changed"). Tell the member to point it at the edited template's values, or another
+template, and resume it.
+
 **A template send failed with 132015 / 132016.** Meta paused or disabled the template; HyFib marks it
 and requests a sync. Improve the template (quality) or use another one; do not resend blindly.
 
@@ -469,6 +507,37 @@ it or reports it as failed; one Meta accepts but never delivers stays sent. Rese
 of what Meta does with messages over the limit, and HyFib names no code for it. A limit
 that looks out of date is the one Meta gave at the number's last health read (see "Messaging limit
 on Channels" above for when a number is read).
+
+**A/B variants (ADR-405).** A draft can add variant B under "A/B test": a second approved template
+of the same number's account, with its own variables, for 10% to 90% of the recipients in steps of
+5 (A, the campaign's own template, gets the rest). What a member sees and what to tell them:
+
+- The split is close to the share but rarely exact (with 1,000 contacts, a 30% share commonly gives
+  between about 27% and 33%): each contact's variant comes from a fixed rule on the campaign and the
+  contact, given once when the campaign is submitted and never changed, also after a pause, a
+  resume or a worker restart. Taking a submission back and submitting it again gives each contact
+  the same variant.
+- A problem that names a variant ("Variant B: The template is not approved by Meta.") blocks
+  submitting until that variant is fixed; so does "Variant B: no contact in its share of the
+  audience can receive the campaign now" (often a marketing B whose contacts have no marketing
+  opt-in: use a utility template, or more opted-in contacts).
+- Each variant is checked by its own template: a marketing variant needs marketing consent (and
+  the opt-in when the company requires it) and keeps to the frequency cap; a utility one does not.
+  So the two variants can skip different contacts; the Variants table shows each one's counts.
+- The cost estimate prices each variant's contacts at its own category's rate, once; the spending
+  cap counts both. Meta bills the company directly: no wallet funds are reserved for campaigns.
+- Approvers see both templates and the split on the campaign's page and in the approval email;
+  approving approves both. A variant's template is checked only while that variant still has
+  contacts waiting: if it stops being approved then, the whole campaign pauses ("its template can
+  no longer be sent"; the history names the variant) and resumes once it is approved again. A
+  variant that has finished (nobody of it waiting) is not checked, so Meta pausing its template
+  later never stops the other variant, and a resume is not refused for it.
+- The Variants table on the page gives each variant's counts and rates with the same denominators
+  as the results. It picks no winner and computes no significance: tell members that a difference
+  between small groups can be chance, and to compare counts, not only percentages.
+- Test sends can use either variant ("Variant to test"). The recipients page and its CSV export
+  name each recipient's variant; the API gives `variant` on each recipient, `variants` on
+  `GET /campaigns/{id}`, and `campaign.recipient_skipped` gives `recipient.variant`.
 
 **Stop a campaign now (wrong audience or content).** Cancel it from the detail page (members with
 `campaigns.send`): pending recipients and queued sends that no worker has claimed are cancelled in
@@ -775,6 +844,23 @@ The audit log has `automation.enrollment_started`, `automation.enrollment_stoppe
 started say so on their page and reach webhooks as runs of trigger `api` with no API key and their
 `enrollmentId`: an endpoint that filters runs by the trigger `api` receives them too; one limited to
 API keys' runs does not.
+
+**Enrolments started through the API (ADR-403).** A key holding `automations.start` and
+`contacts.read` (and `campaigns.read` for a segment) enrols contacts with
+`POST /api/v1/automations/{id}/enrollments`; its enrolment's page says "started … through the API
+with key <name>" and the automation's page lists it beside members'. It runs exactly as a member's
+(the same limits, pacing, sweep and refusals); its jobs act for the company, so a member leaving
+changes nothing. It stops by itself, with its reason on the page and in `endReason`, when the key
+is revoked ("The API key that started it was revoked"), expires (a rotated key expires when its
+72-hour overlap ends: an enrolment of 10,000 contacts takes about nine minutes, so only a stalled or
+suspended one meets it), or the plan no longer includes the API or a scope it needs; enrol again
+with a usable key. A key stops any running enrolment with
+`POST /api/v1/automations/{id}/enrollments/{enrollmentId}/stop` ("A key stopped it", naming the
+key), as a member stops one from its page; the audit log names the key (actor `api_key`) for its
+starts and stops. An integration that gets 409 `enrollment_running` sees the running enrolment's id
+in the message: wait for it (`GET …/enrollments/{enrollmentId}`) or stop it. Runs a key's
+enrolment started reach webhooks with `run.apiKeyId` null and their `run.enrollmentId`; the
+enrolment names the key.
 
 **Budgets and failed sends.** A run fails, and hands the conversation to people, when it exceeds
 200 steps, enters one step 20 times, sends 50 messages or runs longer than 7 days, or when a

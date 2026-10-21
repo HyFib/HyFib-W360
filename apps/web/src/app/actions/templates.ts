@@ -32,6 +32,21 @@ export async function updateTemplateDraftAction(
   });
 }
 
+/** Sends Meta an edit of a template it has (ADR-404). */
+export async function editTemplateAction(
+  slug: string,
+  templateId: string,
+  input: unknown,
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { templates } = await getRuntime();
+    await templates.editTemplate(ctx, String(templateId), input, await requestMeta());
+    refresh();
+    return null;
+  });
+}
+
 export async function submitTemplateAction(
   slug: string,
   templateId: string,

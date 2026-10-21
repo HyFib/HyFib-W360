@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { authorizedTenantScope, sql, type TenantScope } from '@w360/db';
 import {
+  assignVariant,
   attributeCampaignOptOut,
   campaignCompletionNotice,
   campaignPauseNotice,
@@ -1877,4 +1878,436 @@ describe('a 10,000-recipient campaign', () => {
       `10k campaign: seed ${seeded} ms, snapshot ${snapshotMs} ms, ${ticks} ticks queued 10,000 in ${queueMs} ms`,
     );
   }, 180_000);
+});
+
+describe('A/B template variants (ADR-405)', () => {
+  /** A test-only currency, so the rate card below changes no other test's estimates. */
+  const CURRENCY = 'XVB';
+  const MARKETING_MICROS = 1_000_000;
+  const UTILITY_MICROS = 100_000;
+  let cardCreated = false;
+
+  /** Test-only prices for +91 numbers in XVB (not Meta's): marketing 1, utility 0.1. */
+  async function ensureRateCard(createdBy: string) {
+    if (cardCreated) return;
+    const [card] = await fx.query<{ id: string }>(
+      `INSERT INTO ops.rate_cards (id, currency, effective_from, source_url, created_by_user_id)
+       VALUES (gen_random_uuid(), $1, now() - interval '1 day', 'https://example.test/ab-rates', $2)
+       RETURNING id`,
+      [CURRENCY, createdBy],
+    );
+    await fx.query(
+      `INSERT INTO ops.rate_card_prefixes (rate_card_id, prefix, market) VALUES ($1, '91', 'India')`,
+      [card!.id],
+    );
+    await fx.query(
+      `INSERT INTO ops.rate_card_prices (rate_card_id, market, category, price_micros)
+       VALUES ($1, 'India', 'marketing', $2), ($1, 'India', 'utility', $3)`,
+      [card!.id, MARKETING_MICROS, UTILITY_MICROS],
+    );
+    await fx.query(`UPDATE ops.rate_cards SET status = 'published' WHERE id = $1`, [card!.id]);
+    cardCreated = true;
+  }
+
+  const notice: TemplateDefinition = {
+    category: 'UTILITY',
+    header: { type: 'none' },
+    body: { text: 'Your store has news for you.', examples: [] },
+    footer: null,
+    buttons: [],
+  };
+
+  /** Another approved template of the company's WhatsApp account. */
+  async function approvedTemplate(s: Setup, name: string, definition: TemplateDefinition) {
+    const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+    const templates = createTemplatesService(deps);
+    const owner = await fx.ctx(s.c, s.c.owner);
+    const { id } = await templates.createDraft(owner, {
+      whatsappAccountId: s.c.whatsappAccountId,
+      name,
+      language: 'en',
+      definition,
+    });
+    await templates.submitTemplate(owner, id);
+    const workerDeps = { ...deps, keyring: fx.keyring, graph: fx.graph };
+    expect(await processTemplateSubmit(workerDeps, scopeOf(s.c), id)).toBe('done');
+    fx.standIn.state.templates.get(s.c.wabaId)!.find((x) => x.name === name)!.status = 'APPROVED';
+    await syncTemplates(workerDeps, scopeOf(s.c), s.c.whatsappAccountId);
+    return id;
+  }
+
+  async function variantRows(campaignId: string) {
+    return fx.query<{
+      contact_id: string;
+      variant: string;
+      state: string;
+      skip_reason: string | null;
+      message_id: string | null;
+      estimated_cost_micros: string | null;
+    }>(
+      `SELECT contact_id, variant, state, skip_reason, message_id, estimated_cost_micros
+         FROM app.campaign_recipients WHERE campaign_id = $1`,
+      [campaignId],
+    );
+  }
+
+  const byContact = (rows: { contact_id: string; variant: string }[]) =>
+    new Map(rows.map((r) => [r.contact_id, r.variant]));
+
+  it('assigns, prices, sends and reports each variant, every recipient once', async () => {
+    const s = await setup();
+    const owner = await fx.ctx(s.c, s.c.owner);
+    await ensureRateCard(s.c.owner.id);
+    await s.campaigns.updateSettings(
+      owner,
+      { approvalRequired: false, cap: null, costCurrency: CURRENCY },
+      {},
+    );
+    for (let i = 0; i < 40; i += 1)
+      await s.contact(`+9198410000${String(i).padStart(2, '0')}`, { name: `Ab${i}` });
+    const noticeId = await approvedTemplate(s, 'store_news', notice);
+    const { id } = await s.draft('A/B test', {
+      variantB: { templateId: noticeId, variables: { header: [], body: [] }, sharePercent: 30 },
+    });
+
+    // The review checks and prices each variant by its own template.
+    const review = await s.campaigns.reviewDraft(owner, id);
+    expect(review.problems).toEqual([]);
+    expect(review.audience).toMatchObject({ total: 40, eligible: 40 });
+    const [a, b] = review.variants!;
+    expect(a).toMatchObject({ label: 'A', templateId: s.templateId, sharePercent: 70 });
+    expect(b).toMatchObject({ label: 'B', templateId: noticeId, sharePercent: 30 });
+    expect(a!.audience!.total + b!.audience!.total).toBe(40);
+    expect(b!.audience!.total).toBeGreaterThan(0);
+    expect(a!.audience!.total).toBeGreaterThan(0);
+    expect(a!.estimate!.totalMicros).toBe(a!.audience!.eligible * MARKETING_MICROS);
+    expect(b!.estimate!.totalMicros).toBe(b!.audience!.eligible * UTILITY_MICROS);
+    expect(review.estimate).toMatchObject({
+      currency: CURRENCY,
+      totalMicros: a!.estimate!.totalMicros + b!.estimate!.totalMicros,
+      pricedCount: 40,
+      unpricedCount: 0,
+    });
+    // The messaging limit notice counts every variant's recipients.
+    if (review.messagingLimit) expect(review.messagingLimit.recipients).toBe(40);
+
+    await s.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {});
+    const frozen = await variantRows(id);
+    expect(frozen).toHaveLength(40);
+    // Each recipient's variant is the one the stable hash gives, in SQL as in TypeScript.
+    for (const r of frozen) expect(r.variant).toBe(assignVariant(id, r.contact_id, 30));
+    const bCount = frozen.filter((r) => r.variant === 'B').length;
+    expect(bCount).toBe(b!.audience!.total);
+
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 40 });
+    const queued = await variantRows(id);
+    // Each recipient priced once, at its variant's category.
+    for (const r of queued) {
+      expect(r.state).toBe('queued');
+      expect(r.estimated_cost_micros).toBe(
+        String(r.variant === 'B' ? UTILITY_MICROS : MARKETING_MICROS),
+      );
+    }
+    const spent = await campaignRow(id);
+    expect(Number(spent.spent_estimate_micros)).toBe(
+      (40 - bCount) * MARKETING_MICROS + bCount * UTILITY_MICROS,
+    );
+
+    // Each message is its variant's template, with its variant's variables.
+    const messages = await fx.query<{ id: string; template_id: string; contact_id: string }>(
+      `SELECT m.id, m.template_id, cv.contact_id FROM app.messages m
+         JOIN app.conversations cv ON cv.id = m.conversation_id WHERE m.campaign_id = $1`,
+      [id],
+    );
+    const variants = byContact(queued);
+    for (const m of messages)
+      expect(m.template_id).toBe(variants.get(m.contact_id) === 'B' ? noticeId : s.templateId);
+    const outcomes = await s.dispatchAll(id);
+    expect(outcomes).toHaveLength(40);
+    const sentNames = fx.standIn.state.requests
+      .filter((r) => r.path.endsWith('/messages'))
+      .slice(-40)
+      .map((r) => (r.body as { template: { name: string } }).template.name);
+    expect(sentNames.filter((n) => n === 'store_news')).toHaveLength(bCount);
+    expect(sentNames.filter((n) => n === 'festive_sale')).toHaveLength(40 - bCount);
+
+    // Results per variant add up to the campaign's.
+    const view = await s.campaigns.getCampaign(owner, id);
+    expect(view.variantB).toMatchObject({ templateId: noticeId, sharePercent: 30 });
+    const results = view.variantResults!;
+    expect(results.map((r) => r.variant)).toEqual(['A', 'B']);
+    expect(results[0]!.analytics).toMatchObject({ audience: 40 - bCount, queued: 40 - bCount });
+    expect(results[1]!.analytics).toMatchObject({ audience: bCount, queued: bCount });
+    expect(results[0]!.analytics.estimateMicros + results[1]!.analytics.estimateMicros).toBe(
+      view.analytics!.estimateMicros,
+    );
+    // The recipients list names each one's variant.
+    const listed = await s.campaigns.listRecipients(owner, id, {});
+    expect(listed.withVariants).toBe(true);
+    for (const r of listed.items) expect(r.variant).toBe(variants.get(r.contactId));
+  });
+
+  it('leaves a campaign without variant B as it was', async () => {
+    const s = await setup();
+    const owner = await fx.ctx(s.c, s.c.owner);
+    for (let i = 0; i < 5; i += 1) await s.contact(`+9198420000${10 + i}`, { name: `P${i}` });
+    const { id } = await s.draft('Plain');
+    const review = await s.campaigns.reviewDraft(owner, id);
+    expect(review.variants).toBeNull();
+    expect(review.problems).toEqual([]);
+    await s.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {});
+    expect((await variantRows(id)).every((r) => r.variant === 'A')).toBe(true);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 5 });
+    const view = await s.campaigns.getCampaign(owner, id);
+    expect(view.variantB).toBeNull();
+    expect(view.variantResults).toBeNull();
+    expect((await s.campaigns.listRecipients(owner, id, {})).withVariants).toBe(false);
+    const [variantCount] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.campaign_variants WHERE campaign_id = $1`,
+      [id],
+    );
+    expect(variantCount!.n).toBe(0);
+  });
+
+  it("refuses another company's template as variant B", async () => {
+    const mine = await setup();
+    const theirs = await setup();
+    const owner = await fx.ctx(mine.c, mine.c.owner);
+    const { id } = await mine.draft('Borrowing');
+    await expectAppError(
+      mine.campaigns.updateDraft(
+        owner,
+        id,
+        mine.draftInput('Borrowing', {
+          expectedVersion: 1,
+          variantB: {
+            templateId: theirs.templateId,
+            variables: { header: [], body: [{ source: 'name', fallback: 'there' }] },
+            sharePercent: 50,
+          },
+        }),
+        {},
+      ),
+      'not_found',
+    );
+    // Nothing was written, and the database refuses the row too (its foreign key is the
+    // company's own templates).
+    const [count] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.campaign_variants WHERE campaign_id = $1`,
+      [id],
+    );
+    expect(count!.n).toBe(0);
+    await expect(
+      fx.query(
+        `INSERT INTO app.campaign_variants (id, tenant_id, campaign_id, label, template_id, share_percent)
+         VALUES (gen_random_uuid(), $1, $2, 'B', $3, 50)`,
+        [mine.c.tenant.id, id, theirs.templateId],
+      ),
+    ).rejects.toThrow(/campaign_variants_template_fk/);
+    // A share off the 5% steps is refused before anything is read.
+    await expectAppError(
+      mine.campaigns.updateDraft(
+        owner,
+        id,
+        mine.draftInput('Borrowing', {
+          expectedVersion: 1,
+          variantB: { templateId: mine.templateId, variables: {}, sharePercent: 33 },
+        }),
+        {},
+      ),
+      'validation_failed',
+    );
+  });
+
+  it('skips only the recipients of a marketing variant B who have not opted in', async () => {
+    const s = await setup();
+    const owner = await fx.ctx(s.c, s.c.owner);
+    for (let i = 0; i < 20; i += 1)
+      await s.contact(`+9198430000${String(i).padStart(2, '0')}`, { name: `In${i}` });
+    for (let i = 20; i < 40; i += 1)
+      await s.contact(`+9198430000${String(i).padStart(2, '0')}`, {
+        name: `Out${i}`,
+        optIn: false,
+      });
+    const noticeId = await approvedTemplate(s, 'store_news_util', notice);
+    // A is the utility notice; B is the marketing template, which needs an opt-in.
+    const { id } = await s.draft('Marketing B', {
+      templateId: noticeId,
+      variables: { header: [], body: [] },
+      variantB: {
+        templateId: s.templateId,
+        variables: { header: [], body: [{ source: 'name', fallback: 'there' }] },
+        sharePercent: 50,
+      },
+    });
+    const review = await s.campaigns.reviewDraft(owner, id);
+    expect(review.frequencyCap).toBeNull();
+    expect(review.problems).toEqual([]);
+    await s.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {});
+    const rows = await variantRows(id);
+    const optedOutNames = new Set(
+      (
+        await fx.query<{ id: string }>(
+          `SELECT id FROM app.contacts WHERE tenant_id = $1 AND display_name LIKE 'Out%'`,
+          [s.c.tenant.id],
+        )
+      ).map((r) => r.id),
+    );
+    for (const r of rows) {
+      const withoutOptIn = optedOutNames.has(r.contact_id);
+      if (r.variant === 'B' && withoutOptIn) {
+        expect(r).toMatchObject({ state: 'skipped', skip_reason: 'no_marketing_opt_in' });
+      } else {
+        expect(r).toMatchObject({ state: 'pending', skip_reason: null });
+      }
+    }
+    expect(rows.some((r) => r.variant === 'B' && r.state === 'skipped')).toBe(true);
+    expect(rows.some((r) => r.variant === 'A' && optedOutNames.has(r.contact_id))).toBe(true);
+    // The runner checks each recipient against its own variant's purpose again.
+    const tick = await s.tick(id);
+    expect(tick).toMatchObject({ outcome: 'progress' });
+    const after = await variantRows(id);
+    expect(after.filter((r) => r.state === 'queued')).toHaveLength(
+      rows.filter((r) => r.state === 'pending').length,
+    );
+  });
+
+  it('keeps every assignment through a pause, a resume, a lost tick and a resubmission', async () => {
+    const s = await setup();
+    const owner = await fx.ctx(s.c, s.c.owner);
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    for (let i = 0; i < 30; i += 1)
+      await s.contact(`+9198440000${String(i).padStart(2, '0')}`, { name: `R${i}` });
+    const noticeId = await approvedTemplate(s, 'store_news_restart', notice);
+    await s.campaigns.updateSettings(
+      owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    const { id } = await s.draft('Restart', {
+      ratePerMinute: 60,
+      variantB: { templateId: noticeId, variables: { header: [], body: [] }, sharePercent: 50 },
+    });
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    const first = byContact(await variantRows(id));
+    // Taken back to a draft and submitted again: the same contacts get the same variants.
+    await s.campaigns.withdrawCampaign(marketer, id, {});
+    expect(await variantRows(id)).toHaveLength(0);
+    const draft = await s.campaigns.getCampaign(owner, id);
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: draft.campaign.version }, {});
+    expect(byContact(await variantRows(id))).toEqual(first);
+    // The approval email names both variants.
+    const approvals = await campaignEmails(s.c.tenant.id, `campaign-approval:${id}:`);
+    expect(approvals.length).toBeGreaterThan(0);
+    for (const email of approvals)
+      expect(email.lines.join(' ')).toContain('It tests 2 templates side by side');
+    await s.campaigns.approveCampaign(owner, id, {}, {});
+    // Ten a tick at 60 a minute: a tick, a pause, a resume and a tick lost and signalled again.
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 10 });
+    await s.campaigns.pauseCampaign(owner, id, {});
+    expect(byContact(await variantRows(id))).toEqual(first);
+    await s.campaigns.resumeCampaign(owner, id, {});
+    s.clock.advance(15_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress' });
+    s.clock.advance(15_000);
+    await s.tick(id);
+    const after = await variantRows(id);
+    expect(byContact(after)).toEqual(first);
+    // The runtime role cannot change a recorded variant: PostgreSQL refuses the column, which the
+    // database layer maps to forbidden ("Operation not permitted.") with the reason as its cause.
+    const refusal = await fx.dbs.app
+      .run(scopeOf(s.c), (tx) =>
+        tx.execute(sql`update app.campaign_recipients set variant = 'B' where campaign_id = ${id}`),
+      )
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(isAppError(refusal) ? refusal.code : refusal).toBe('forbidden');
+    const reasons: string[] = [];
+    for (let e: unknown = refusal; e instanceof Error; e = e.cause) reasons.push(e.message);
+    expect(reasons.join(' | ')).toMatch(/permission denied/);
+    // Each queued message used its recipient's recorded variant's template.
+    const messages = await fx.query<{ template_id: string; contact_id: string }>(
+      `SELECT m.template_id, cv.contact_id FROM app.messages m
+         JOIN app.conversations cv ON cv.id = m.conversation_id
+        WHERE m.campaign_id = $1 AND m.status <> 'canceled'`,
+      [id],
+    );
+    for (const m of messages)
+      expect(m.template_id).toBe(first.get(m.contact_id) === 'B' ? noticeId : s.templateId);
+    await s.campaigns.updateSettings(
+      owner,
+      { approvalRequired: false, cap: null, costCurrency: null },
+      {},
+    );
+  });
+
+  it('checks a variant’s template only while it has pending recipients, so a finished B never holds A back', async () => {
+    const s = await setup();
+    const owner = await fx.ctx(s.c, s.c.owner);
+    for (let i = 0; i < 30; i += 1)
+      await s.contact(`+9198450000${String(i).padStart(2, '0')}`, { name: `F${i}` });
+    const noticeId = await approvedTemplate(s, 'store_news_finished', notice);
+    const variantB = {
+      templateId: noticeId,
+      variables: { header: [], body: [] },
+      sharePercent: 50,
+    };
+    const { id: stillSending } = await s.draft('B still sending', { variantB });
+    const { id: finished } = await s.draft('B finished', { variantB });
+    await s.campaigns.submitCampaign(owner, stillSending, { expectedVersion: 1 }, {});
+    await s.campaigns.submitCampaign(owner, finished, { expectedVersion: 1 }, {});
+    // B's recipients of the second campaign were all handled; then Meta paused B's template.
+    await fx.query(
+      `UPDATE app.campaign_recipients SET state = 'skipped', skip_reason = 'suppressed'
+        WHERE campaign_id = $1 AND variant = 'B'`,
+      [finished],
+    );
+    await fx.query(`UPDATE app.message_templates SET status = 'paused' WHERE id = $1`, [noticeId]);
+
+    // While B has pending recipients, its template pauses the campaign and a resume names B.
+    expect(await s.tick(stillSending)).toMatchObject({
+      outcome: 'paused',
+      pauseReason: 'template_not_approved',
+    });
+    await expectAppError(
+      s.campaigns.resumeCampaign(owner, stillSending, {}),
+      'precondition_failed',
+      /Variant B’s template is not approved/,
+    );
+
+    // Once B has none, A keeps sending, and a member's pause and resume are not refused for B.
+    const aPending = (await variantRows(finished)).filter(
+      (r) => r.variant === 'A' && r.state === 'pending',
+    ).length;
+    expect(aPending).toBeGreaterThan(0);
+    expect(await s.tick(finished)).toMatchObject({ outcome: 'progress', queued: aPending });
+    await s.campaigns.pauseCampaign(owner, finished, {});
+    await s.campaigns.resumeCampaign(owner, finished, {});
+    expect(await campaignRow(finished)).toMatchObject({ status: 'running' });
+    await fx.query(`UPDATE app.message_templates SET status = 'approved' WHERE id = $1`, [
+      noticeId,
+    ]);
+  });
+
+  it('ignores a variant B that got no recipients, as when a web server of the release before submitted the draft', async () => {
+    const s = await setup();
+    const owner = await fx.ctx(s.c, s.c.owner);
+    for (let i = 0; i < 6; i += 1)
+      await s.contact(`+9198460000${String(i).padStart(2, '0')}`, { name: `O${i}` });
+    const { id } = await s.draft('Old web server');
+    await s.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {});
+    // The draft had a variant B without a template, which the older server's snapshot ignored.
+    await fx.query(
+      `INSERT INTO app.campaign_variants (id, tenant_id, campaign_id, label, share_percent)
+       VALUES (gen_random_uuid(), $1, $2, 'B', 50)`,
+      [s.c.tenant.id, id],
+    );
+    expect((await variantRows(id)).every((r) => r.variant === 'A')).toBe(true);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 6 });
+    await s.campaigns.pauseCampaign(owner, id, {});
+    await s.campaigns.resumeCampaign(owner, id, {});
+    expect(await campaignRow(id)).toMatchObject({ status: 'running' });
+  });
 });

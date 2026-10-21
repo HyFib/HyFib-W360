@@ -8,6 +8,7 @@ import { ROLE_PERMISSIONS } from '../authz/permissions';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { toMetaComponents, type TemplateDefinition } from '../templates/definition';
+import { writeEditTemplate } from '../templates/edit';
 import {
   templateNameError,
   writeCreateTemplateDraft,
@@ -19,6 +20,8 @@ import {
   apiCreateMessageTemplate,
   apiCreateMessageTemplateSchema,
   apiDeleteMessageTemplate,
+  apiEditMessageTemplate,
+  apiEditMessageTemplateSchema,
   apiSubmitMessageTemplate,
   apiUpdateMessageTemplate,
   apiUpdateMessageTemplateSchema,
@@ -1068,5 +1071,202 @@ describe('submitting templates and deleting those Meta has, through the API (ADR
     expect(JSON.stringify(remove?.responses['200']?.content)).toContain(
       '"status":{"type":"string","enum":["deleted","pending_deletion"]}',
     );
+  });
+});
+
+/** A caller who may read every name a usage list holds. */
+const SEE_ALL = { campaigns: true, automations: true, stores: true };
+
+describe('editing a template Meta has through the API (ADR-404)', () => {
+  const approved = {
+    id: TEMPLATE,
+    status: 'approved' as const,
+    providerTemplateId: '1234567890',
+    category: 'UTILITY' as const,
+    components: toMetaComponents(shipped),
+    whatsappAccountId: ACCOUNT,
+    editState: null,
+    name: 'order_shipped',
+    language: 'en',
+  };
+  const connected = [{ id: ACCOUNT, status: 'connected', name: 'Acme' }];
+
+  it('needs templates.submit and an id, before reading', async () => {
+    for (const key of [
+      ctx(['templates.write']),
+      ctx(['templates.read']),
+      ctx(['templates.submit'], 'restricted'),
+    ]) {
+      const refused = await refusal(
+        apiEditMessageTemplate(
+          { db: untouched, clock, ...offline },
+          key,
+          TEMPLATE,
+          { definition: delayed },
+          null,
+        ),
+      );
+      expect(refused[0]).toBe(key.tenant.status === 'active' ? 'forbidden' : 'tenant_suspended');
+    }
+    expect(
+      await refusal(
+        apiEditMessageTemplate(
+          { db: untouched, clock, ...offline },
+          ctx(['templates.submit']),
+          'order_shipped',
+          { definition: delayed },
+          null,
+        ),
+      ),
+    ).toEqual(['not_found', 'Template not found.', []]);
+    // Only the content: a name, a language or anything else is refused.
+    expect(
+      (
+        await refusal(
+          apiEditMessageTemplate(
+            { db: untouched, clock, ...offline },
+            ctx(['templates.submit']),
+            TEMPLATE,
+            { definition: delayed, name: 'other' },
+            null,
+          ),
+        )
+      )[0],
+    ).toBe('validation_failed');
+  });
+
+  it('writes the edit ahead: sending, the content sent, who asked, its change and the job in one transaction', async () => {
+    const run = recorder([[], connected]);
+    await writeEditTemplate(run.tx, run, TENANT, approved, delayed, 'user-1', NOW, SEE_ALL);
+    // Campaigns scheduled or sending, read under a share lock (none here).
+    expect(run.steps[0]?.[1]).toBe('campaigns');
+    expect(run.steps[0]?.[2]).toContain('("scheduled", "running")');
+    expect(run.steps[0]?.[3]).toBe('share');
+    const update = run.steps[2] as [string, string, Record<string, unknown>, string];
+    expect(update).toEqual([
+      'update',
+      'message_templates',
+      {
+        editId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        editState: 'sending',
+        editComponents: toMetaComponents(delayed),
+        editError: null,
+        // The database's time, against which the window is judged.
+        editRequestedAt: 'now()',
+        editRequestedByUserId: 'user-1',
+        editAttemptedAt: null,
+        editFailedAt: null,
+        managementDeferredUntil: null,
+        version: VERSION_PLUS_ONE,
+      },
+      THIS_TEMPLATE,
+    ]);
+    const editId = update[2].editId as string;
+    expect(run.steps[3]?.[2]).toMatchObject({
+      status: 'edit_requested',
+      source: 'edit',
+      actorUserId: 'user-1',
+      occurredAt: NOW,
+    });
+    expect(run.steps[4]).toEqual([
+      'enqueue',
+      true,
+      QUEUES.templateEdit.name,
+      {
+        signed: {
+          kind: 'template.edit',
+          tenantId: TENANT,
+          actorUserId: 'user-1',
+          ref: `${TEMPLATE}:${editId}`,
+        },
+      },
+      { singletonKey: `${TEMPLATE}:edit:${editId}` },
+    ]);
+    expect(run.unread()).toBe(0);
+  });
+
+  it('refuses while a campaign is scheduled or sends it, a disconnected account, a pause, and writes nothing', async () => {
+    const sending = recorder([[{ id: 'campaign-1' }]]);
+    await expect(
+      writeEditTemplate(sending.tx, sending, TENANT, approved, delayed, null, NOW, SEE_ALL),
+    ).rejects.toMatchObject({ code: 'precondition_failed' });
+    const disconnected = recorder([[], [{ ...connected[0], status: 'disconnected' }]]);
+    await expect(
+      writeEditTemplate(
+        disconnected.tx,
+        disconnected,
+        TENANT,
+        approved,
+        delayed,
+        null,
+        NOW,
+        SEE_ALL,
+      ),
+    ).rejects.toMatchObject({
+      code: 'precondition_failed',
+      publicMessage: 'Reconnect this WhatsApp account before editing templates.',
+    });
+    const pausedUntil = new Date(NOW.getTime() + 5 * 60_000);
+    const paused = recorder([[], [{ ...connected[0], managementPausedUntil: pausedUntil }]]);
+    await expect(
+      writeEditTemplate(paused.tx, paused, TENANT, approved, delayed, null, NOW, SEE_ALL),
+    ).rejects.toMatchObject({ code: 'provider_unavailable' });
+    for (const run of [sending, disconnected, paused]) {
+      expect(run.steps.every((step) => step[0] === 'read')).toBe(true);
+    }
+    // Content the editor refuses is refused before anything is read.
+    const invalid = recorder([]);
+    await expect(
+      writeEditTemplate(
+        invalid.tx,
+        invalid,
+        TENANT,
+        approved,
+        { ...delayed, body: { text: 'Hi {{1}}', examples: [] } },
+        null,
+        NOW,
+        SEE_ALL,
+      ),
+    ).rejects.toMatchObject({ code: 'validation_failed' });
+    expect(invalid.steps).toEqual([]);
+  });
+
+  it('refuses to delete a template while its edit is on its way to Meta', async () => {
+    const run = recorder([[{ ...approved, editState: 'sending' }]]);
+    expect(
+      await refusal(
+        apiDeleteMessageTemplate(
+          { db: on(run.tx), clock, ...run },
+          ctx(['templates.write', 'templates.submit']),
+          TEMPLATE,
+        ),
+      ),
+    ).toEqual([
+      'precondition_failed',
+      'Wait until Meta answers the edit of this template before deleting it.',
+      [],
+    ]);
+    expect(run.steps.every((step) => step[0] === 'read')).toBe(true);
+  });
+
+  it('is described: the scope, what stays, the refusals, Meta’s answer and the retry', () => {
+    expect(API_ROUTES).toContainEqual(['post', '/message-templates/{id}/edit']);
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, { operationId: string; description: string }>>;
+    };
+    const edit = doc.paths['/message-templates/{id}/edit']?.post;
+    expect(edit?.operationId).toBe('editMessageTemplate');
+    for (const words of [
+      'Scope: `templates.submit`.',
+      'Its name, language and category stay',
+      'while one of the company’s campaigns using it is scheduled or sending',
+      'when it changes the template’s variables or buttons',
+      'HyFib does not limit which statuses can be edited or how often: Meta decides',
+      'its code and message in `edit.error`',
+      'With an `Idempotency-Key`, a retry answers the first response',
+    ]) {
+      expect(edit?.description).toContain(words);
+    }
+    expect(apiEditMessageTemplateSchema.safeParse({ definition: delayed }).success).toBe(true);
   });
 });

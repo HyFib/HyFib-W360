@@ -6,6 +6,7 @@ import {
   findTemplateSyncsDue,
   isManagementPaused,
   processTemplateDelete,
+  processTemplateEdit,
   processTemplateSubmit,
   syncTemplates,
   TEMPLATE_SYNC_PRIORITY,
@@ -16,12 +17,13 @@ import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
 import { deferPausedWork } from './management-deferral';
 
-type TemplateKind = 'template.submit' | 'template.delete' | 'template.sync';
+type TemplateKind = 'template.submit' | 'template.delete' | 'template.edit' | 'template.sync';
 
 /**
  * Template jobs: the template (or WABA) row is the source of truth and each job re-reads it under
- * the company's RLS scope. Only a connection that failed before sending is retried automatically;
- * lost responses are settled by the next sync (see templates/service).
+ * the company's RLS scope. Only work Meta certainly did not do is retried automatically: a
+ * connection that failed before sending, and for an edit also a rate limit that paused nothing
+ * (ADR-404); lost responses are settled by the next sync (see templates/service and edit).
  */
 function templateHandler(
   rt: WorkerRuntime,
@@ -65,6 +67,10 @@ export const templateSubmitHandler = (rt: WorkerRuntime) =>
 
 export const templateDeleteHandler = (rt: WorkerRuntime) =>
   templateHandler(rt, 'template.delete', processTemplateDelete);
+
+/** Sends an edit of a template Meta has (ADR-404). */
+export const templateEditHandler = (rt: WorkerRuntime) =>
+  templateHandler(rt, 'template.edit', processTemplateEdit);
 
 export const templateSyncHandler = (rt: WorkerRuntime) =>
   templateHandler(rt, 'template.sync', syncTemplates);

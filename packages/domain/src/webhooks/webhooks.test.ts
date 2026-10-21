@@ -6843,7 +6843,11 @@ describe('skipped campaign recipients (ADR-358)', () => {
     createdAt: '2026-10-10T10:00:00.000Z',
     createdAtExact: '2026-10-10T10:00:00.000123Z',
     data: {
-      recipient: { id: '0192a1b2-0000-7000-8000-0000000000e2', skipReason: 'opted_out' },
+      recipient: {
+        id: '0192a1b2-0000-7000-8000-0000000000e2',
+        skipReason: 'opted_out',
+        variant: 'B',
+      },
       campaign: {
         id: '0192a1b2-0000-7000-8000-0000000000e3',
         name: 'Festive sale',
@@ -6901,6 +6905,18 @@ describe('skipped campaign recipients (ADR-358)', () => {
     expect(
       parses({ ...body, data: { ...body.data, recipient: { skipReason: 'opted_out' } } }),
     ).toBe(false);
+    // The recipient's variant (ADR-405): A or B, always given.
+    for (const variant of ['A', 'B']) {
+      expect(
+        parses({ ...body, data: { ...body.data, recipient: { ...body.data.recipient, variant } } }),
+      ).toBe(true);
+    }
+    for (const variant of ['C', '', null, undefined]) {
+      expect(
+        parses({ ...body, data: { ...body.data, recipient: { ...body.data.recipient, variant } } }),
+        String(variant),
+      ).toBe(false);
+    }
   });
 
   /** A transaction answering each read with the next rows given, counting what is left. */
@@ -6944,6 +6960,7 @@ describe('skipped campaign recipients (ADR-358)', () => {
     id: body.data.recipient.id,
     campaignId: body.data.campaign.id,
     contactId: body.data.contact.id,
+    variant: 'B',
   };
   const campaignRow = {
     ...body.data.campaign,
@@ -6983,7 +7000,7 @@ describe('skipped campaign recipients (ADR-358)', () => {
         .data,
     ).toEqual({
       ...body.data,
-      recipient: { id: recipientRow.id, skipReason: 'contact_erased' },
+      recipient: { id: recipientRow.id, skipReason: 'contact_erased', variant: 'B' },
       contact: { id: body.data.contact.id, phone: null, name: null },
       channel: null,
     });

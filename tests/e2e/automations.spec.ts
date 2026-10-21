@@ -431,6 +431,7 @@ test('an automation creates a CRM task and a deal about the customer, moves the 
 
 test('a member enrols the contacts the Contacts page’s filters match in an automation and sees each start (ADR-401)', async ({
   page,
+  request,
 }) => {
   test.setTimeout(180_000);
   const email = uniqueEmail('enrol');
@@ -524,4 +525,45 @@ test('a member enrols the contacts the Contacts page’s filters match in an aut
   await page.getByRole('table').getByRole('link').first().click();
   await expect(page.getByText(/by an enrolment by Esha Enrol/)).toBeVisible();
   await expect(page.getByRole('link', { name: 'Open the enrolment' })).toBeVisible();
+
+  // An API key enrols the same contacts (ADR-403); members see it on their pages, naming the key.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Booking system');
+  await page.getByRole('checkbox', { name: /Start automations/ }).check();
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+  const listed = await request.get('/api/v1/automations', { headers: auth });
+  expect(listed.status()).toBe(200);
+  const [automation] = ((await listed.json()) as { data: { id: string }[] }).data;
+  const enrolled = await request.post(`/api/v1/automations/${automation!.id}/enrollments`, {
+    headers: { ...auth, 'Idempotency-Key': crypto.randomUUID() },
+    data: {
+      contacts: { conditions: [{ type: 'tag', op: 'has', tag: 'festival' }] },
+      inputs: { offer: 'Holi' },
+    },
+  });
+  expect(enrolled.status()).toBe(201);
+  const enrollment = ((await enrolled.json()) as { data: { id: string; total: number } }).data;
+  expect(enrollment.total).toBe(2);
+  await expect(async () => {
+    const read = await request.get(
+      `/api/v1/automations/${automation!.id}/enrollments/${enrollment.id}`,
+      { headers: auth },
+    );
+    expect(((await read.json()) as { data: { status: string } }).data.status).toBe('completed');
+  }).toPass({ timeout: 60_000 });
+  // Both enrolments, newest first: the key's, then the member's.
+  const all = await request.get(`/api/v1/automations/${automation!.id}/enrollments`, {
+    headers: auth,
+  });
+  expect(
+    ((await all.json()) as { data: { startedBy: string }[] }).data.map((e) => e.startedBy),
+  ).toEqual(['api', 'member']);
+  await page.goto(`/c/${slug}/automations/${automation!.id}/enrollments/${enrollment.id}`);
+  await expect(page.getByText(/through the API with key “Booking system”/)).toBeVisible();
+  await page.goto(`/c/${slug}/automations/${automation!.id}`);
+  await expect(page.getByText('Started through the API with key “Booking system”')).toBeVisible();
 });

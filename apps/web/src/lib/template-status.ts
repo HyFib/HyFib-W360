@@ -16,6 +16,10 @@ export const TEMPLATE_STATUS: Record<string, { label: string; tone: Tone }> = {
   deleted: { label: 'Deleted', tone: 'neutral' },
   /** Status events only: a deletion Meta refused or that could not reach Meta. */
   delete_failed: { label: 'Deletion failed', tone: 'danger' },
+  /** Status events only: an edit of a template Meta has (ADR-404). */
+  edit_requested: { label: 'Edit sent to Meta', tone: 'info' },
+  edited: { label: 'Edited', tone: 'success' },
+  edit_failed: { label: 'Edit failed', tone: 'danger' },
   limit_exceeded: { label: 'Limit exceeded', tone: 'warning' },
   locked: { label: 'Locked', tone: 'warning' },
   unknown: { label: 'Unknown status', tone: 'neutral' },

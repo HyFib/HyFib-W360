@@ -99,8 +99,14 @@ export default async function CampaignPage({
             <Badge tone={status.tone}>{status.label}</Badge>
             {view.template ? (
               <span>
-                Template {view.template.name} ({view.template.language},{' '}
-                {view.template.category.toLowerCase()})
+                {view.variantB ? 'Variant A: template' : 'Template'} {view.template.name} (
+                {view.template.language}, {view.template.category.toLowerCase()})
+              </span>
+            ) : null}
+            {view.variantB?.template ? (
+              <span>
+                Variant B: template {view.variantB.template.name} ({view.variantB.template.language}
+                , {view.variantB.template.category.toLowerCase()})
               </span>
             ) : null}
           </span>
@@ -158,6 +164,13 @@ async function DraftView({
     budgetAmount: micros(c.budgetMicros),
     budgetCurrency: c.budgetCurrency,
     stopAfterHours: c.stopAfterHours,
+    variantB: view.variantB
+      ? {
+          templateId: view.variantB.templateId,
+          variables: view.variantB.variables,
+          sharePercent: view.variantB.sharePercent,
+        }
+      : null,
   };
   const audience = review.audience;
   const summary = audience
@@ -226,6 +239,7 @@ async function DraftView({
               ) : null}
             </div>
           ) : null}
+          {review.variants ? <VariantReview variants={review.variants} /> : null}
           {review.frequencyCap ? (
             <p className="text-sm text-muted-foreground">
               Contacts who already received {review.frequencyCap.count} marketing message
@@ -301,7 +315,7 @@ async function DraftView({
             <CardTitle>Test</CardTitle>
           </CardHeader>
           <CardContent>
-            <SendTest slug={slug} campaignId={c.id} />
+            <SendTest slug={slug} campaignId={c.id} withVariantB={Boolean(view.variantB)} />
           </CardContent>
         </Card>
       ) : null}
@@ -475,6 +489,7 @@ async function LiveView({
         </Card>
       ) : null}
       {view.messagingLimit ? <MessagingLimitNotice notice={view.messagingLimit} /> : null}
+      {view.variantB ? <VariantsCard view={view} /> : null}
       <Card>
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="grid gap-1">
@@ -664,6 +679,133 @@ async function LiveView({
       </Card>
       <Timeline ctx={ctx} view={view} />
     </div>
+  );
+}
+
+type Review = Awaited<
+  ReturnType<Awaited<ReturnType<typeof getRuntime>>['campaigns']['reviewDraft']>
+>;
+
+/** Each variant's template, share and audience in a draft's review (ADR-405). */
+function VariantReview({ variants }: { variants: NonNullable<Review['variants']> }) {
+  return (
+    <div className="grid gap-2">
+      <h2 className="text-sm font-semibold">Variants</h2>
+      <Table>
+        <THead>
+          <TR>
+            <TH>Variant</TH>
+            <TH>Template</TH>
+            <TH className="text-right">Share</TH>
+            <TH className="text-right">Can receive it now</TH>
+            <TH className="text-right">Estimated Meta cost</TH>
+          </TR>
+        </THead>
+        <TBody>
+          {variants.map((v) => (
+            <TR key={v.label}>
+              <TD>{v.label}</TD>
+              <TD>
+                {v.templateName
+                  ? `${v.templateName}${v.category ? ` (${v.category.toLowerCase()})` : ''}`
+                  : 'Not chosen'}
+              </TD>
+              <TD className="text-right">{v.sharePercent}%</TD>
+              <TD className="text-right">
+                {v.audience ? `${v.audience.eligible} of ${v.audience.total}` : '—'}
+              </TD>
+              <TD className="text-right">
+                {v.estimate ? formatMicros(v.estimate.totalMicros, v.estimate.currency) : '—'}
+              </TD>
+            </TR>
+          ))}
+        </TBody>
+      </Table>
+      <p className="text-sm text-muted-foreground">
+        Each contact is given one variant by a fixed rule from the campaign and the contact, so the
+        split is close to the shares but rarely exact. Each variant is checked by its own template
+        (a marketing template needs marketing consent), and its contacts are priced at its
+        category’s rates once.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * A campaign's variants side by side (ADR-405): each template and share, and once submitted each
+ * variant's counts with the same denominators as the campaign's results. Descriptive only.
+ */
+function VariantsCard({ view }: { view: View }) {
+  const b = view.variantB;
+  if (!b) return null;
+  const rows = view.variantResults;
+  const templateOf = (label: 'A' | 'B') =>
+    label === 'A' ? (view.template?.name ?? '—') : (b.template?.name ?? '—');
+  const shareOf = (label: 'A' | 'B') => (label === 'A' ? 100 - b.sharePercent : b.sharePercent);
+  const line = (label: string, cell: (a: CampaignAnalytics) => string) => (
+    <TR key={label}>
+      <TD>{label}</TD>
+      {(rows ?? []).map((r) => (
+        <TD key={r.variant} className="text-right">
+          {cell(r.analytics)}
+        </TD>
+      ))}
+    </TR>
+  );
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Variants</CardTitle>
+        <CardDescription>
+          Variant A ({shareOf('A')}% of the audience) sends {templateOf('A')}; variant B (
+          {shareOf('B')}%) sends {templateOf('B')}. These are descriptive counts side by side: HyFib
+          picks no winner and computes no significance, and differences between small groups can be
+          chance.
+        </CardDescription>
+      </CardHeader>
+      {rows ? (
+        <CardContent>
+          <Table>
+            <THead>
+              <TR>
+                <TH>Count</TH>
+                {rows.map((r) => (
+                  <TH key={r.variant} className="text-right">
+                    Variant {r.variant}
+                  </TH>
+                ))}
+              </TR>
+            </THead>
+            <TBody>
+              {line('Recipients', (a) => String(a.audience))}
+              {line('Not sent (skipped)', (a) => String(a.skipped))}
+              {line('Handed to WhatsApp', (a) => String(a.queued))}
+              {line('Sent', (a) => `${percent(a.sent, a.queued)} (${a.sent} of ${a.queued})`)}
+              {line(
+                'Delivered',
+                (a) => `${percent(a.delivered, a.sent)} (${a.delivered} of ${a.sent})`,
+              )}
+              {line('Read', (a) => `${percent(a.read, a.delivered)} (${a.read} of ${a.delivered})`)}
+              {line(
+                'Replied',
+                (a) => `${percent(a.replied, a.delivered)} (${a.replied} of ${a.delivered})`,
+              )}
+              {line(
+                'Opted out',
+                (a) => `${percent(a.optedOut, a.delivered)} (${a.optedOut} of ${a.delivered})`,
+              )}
+              {line(
+                'Failed or unknown',
+                (a) =>
+                  `${percent(a.failed + a.unknown, a.queued)} (${a.failed + a.unknown} of ${a.queued})`,
+              )}
+              {line('Clicked', () => 'Not measured')}
+              {line('Converted', () => 'Not measured')}
+            </TBody>
+          </Table>
+        </CardContent>
+      ) : null}
+    </Card>
   );
 }
 

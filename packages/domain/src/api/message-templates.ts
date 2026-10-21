@@ -10,11 +10,14 @@ import {
   sql,
   templateStatusEvents,
   TEMPLATE_STATUSES,
+  type TemplateEditState,
+  type TemplateEventSource,
   type TemplateStatus,
   type Tx,
 } from '@w360/db';
 import type { OutboundDeps } from '../messaging/outbound';
 import {
+  fromMetaComponents,
   sendSpecFor,
   type TemplateDefinition,
   type TemplateHeaderMedia,
@@ -59,6 +62,11 @@ export interface ApiMessageTemplate {
   unsupportedReason: string | null;
   /** Its content as HyFib represents it; null when HyFib cannot (`unsupportedReason`). */
   definition: TemplateDefinition | null;
+  /**
+   * An edit of it sent to Meta (ADR-404), while it is `sending` or once it `failed`, with the
+   * content sent and, when it failed, why (Meta's code and message); null when none is open.
+   */
+  edit: ApiMessageTemplateEdit | null;
   /** The file its header takes when sent (ADR-201), or null. */
   headerMedia: TemplateHeaderMedia | null;
   /** The active numbers of its WhatsApp Business account, which send it once approved. */
@@ -69,6 +77,14 @@ export interface ApiMessageTemplate {
   updatedAt: string;
 }
 
+/** An open edit of a template Meta has (ADR-404). */
+export interface ApiMessageTemplateEdit {
+  state: 'sending' | 'failed';
+  definition: TemplateDefinition | null;
+  error: string | null;
+  requestedAt: string;
+}
+
 /** A template with its latest status changes, newest first. */
 export type ApiMessageTemplateDetail = ApiMessageTemplate & { history: ApiMessageTemplateChange[] };
 
@@ -77,8 +93,11 @@ export interface ApiMessageTemplateChange {
   status: string;
   /** Meta's reason, or HyFib's, when one was given. */
   reason: string | null;
-  /** `submit`: sent for review; `sync`: read from Meta; `send`: refused by Meta on a send; `delete`. */
-  source: 'submit' | 'sync' | 'send' | 'delete';
+  /**
+   * `submit`: sent for review; `sync`: read from Meta; `send`: refused by Meta on a send; `delete`;
+   * `edit`: an edit sent to Meta (ADR-404).
+   */
+  source: TemplateEventSource;
   occurredAt: string;
 }
 
@@ -115,6 +134,10 @@ const templateColumns = {
   createdByApiKeyId: messageTemplates.createdByApiKeyId,
   version: messageTemplates.version,
   submittedAt: messageTemplates.submittedAt,
+  editState: messageTemplates.editState,
+  editComponents: messageTemplates.editComponents,
+  editError: messageTemplates.editError,
+  editRequestedAt: messageTemplates.editRequestedAt,
   lastSyncedAt: messageTemplates.lastSyncedAt,
   createdAt: messageTemplates.createdAt,
   updatedAt: messageTemplates.updatedAt,
@@ -137,6 +160,10 @@ type TemplateRow = {
   createdByApiKeyId: string | null;
   version: number;
   submittedAt: Date | null;
+  editState: TemplateEditState | null;
+  editComponents: unknown[] | null;
+  editError: string | null;
+  editRequestedAt: Date | null;
   lastSyncedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -165,6 +192,17 @@ export function toApiMessageTemplate(
     sendable: row.status === 'approved' && spec.supported,
     unsupportedReason: spec.supported ? null : spec.reason,
     definition: spec.supported ? spec.definition : null,
+    edit:
+      row.editState && row.editRequestedAt
+        ? {
+            state: row.editState,
+            definition: row.editComponents
+              ? fromMetaComponents(row.category, row.editComponents)
+              : null,
+            error: row.editError,
+            requestedAt: row.editRequestedAt.toISOString(),
+          }
+        : null,
     headerMedia: spec.supported ? spec.headerMedia : null,
     channels: numbers
       .filter((n) => n.whatsappAccountId === row.whatsappAccountId)

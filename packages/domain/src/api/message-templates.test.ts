@@ -80,6 +80,10 @@ const row = (overrides: Partial<Row> = {}): Row => ({
   createdByApiKeyId: null,
   version: 3,
   submittedAt: CREATED,
+  editState: null,
+  editComponents: null,
+  editError: null,
+  editRequestedAt: null,
   lastSyncedAt: UPDATED,
   createdAt: CREATED,
   updatedAt: UPDATED,
@@ -218,12 +222,37 @@ describe('message templates of every status through the API (ADR-294)', () => {
       sendable: true,
       unsupportedReason: null,
       definition,
+      edit: null,
       headerMedia: null,
       channels: [{ id: NUMBER, phone: '+91 80 4567 8901' }],
       submittedAt: '2026-10-01T09:00:00.000Z',
       lastSyncedAt: '2026-10-07T10:00:00.000Z',
       createdAt: '2026-10-01T09:00:00.000Z',
       updatedAt: '2026-10-07T10:00:00.000Z',
+    });
+    // An open edit (ADR-404): its state, the content sent and why it failed.
+    const changedDefinition: TemplateDefinition = {
+      ...definition,
+      body: { text: 'Hello {{1}}, order {{2}} is on its way.', examples: ['Asha', 'A-1'] },
+    };
+    expect(
+      toApiMessageTemplate(
+        row({
+          editState: 'failed',
+          editComponents: toMetaComponents(changedDefinition),
+          editError: 'Meta refused the edit (code 100): Invalid parameter',
+          editRequestedAt: UPDATED,
+        }),
+        numbers,
+      ),
+    ).toMatchObject({
+      definition,
+      edit: {
+        state: 'failed',
+        definition: changedDefinition,
+        error: 'Meta refused the edit (code 100): Invalid parameter',
+        requestedAt: '2026-10-07T10:00:00.000Z',
+      },
     });
     // A draft, a rejected template: their content, but no send.
     for (const status of ['draft', 'rejected', 'paused'] as const) {

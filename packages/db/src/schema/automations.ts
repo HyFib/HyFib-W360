@@ -286,12 +286,20 @@ export const AUTOMATION_ENROLLMENT_END_REASONS = [
   'marketing_not_allowed',
   /** Failed: its batch made no progress after the sweep signalled it 3 times. */
   'stalled',
+  /** An API key stopped it (migration 0315, ADR-403). */
+  'stopped_by_api',
+  /** The key that started it was revoked, or expired, since (ADR-403). */
+  'api_key_revoked',
+  'api_key_expired',
+  /** The company's plan no longer includes the API, or a scope enrolling needs (ADR-403). */
+  'api_not_in_plan',
+  'api_scope_missing',
 ] as const;
 export type AutomationEnrollmentEndReason = (typeof AUTOMATION_ENROLLMENT_END_REASONS)[number];
 
 /**
- * Members' enrolments of contacts or a segment in an automation started by a member or through the
- * API (migration 0311, ADR-401): who, which automation, whom, the inputs (cleared at the end), the
+ * Enrolments of contacts or a segment in an automation started by a member or through the API, by
+ * members (migration 0311, ADR-401) or API keys (0315, ADR-403): who, which automation, whom, the inputs (cleared at the end), the
  * counts and the position of the last contact handled.
  */
 export const automationEnrollments = appSchema.table('automation_enrollments', {
@@ -315,9 +323,14 @@ export const automationEnrollments = appSchema.table('automation_enrollments', {
   nextBatchAt: tz('next_batch_at'),
   /** Sweep signals since the last batch handled (ADR-401); at 3 the next sweep fails it. */
   resignalCount: smallint('resignal_count').notNull().default(0),
-  createdByMembershipId: uuid('created_by_membership_id').notNull(),
-  createdByUserId: text('created_by_user_id').notNull(),
+  /** The member who started it, or null when a key did (exactly one of the two, 0315). */
+  createdByMembershipId: uuid('created_by_membership_id'),
+  createdByUserId: text('created_by_user_id'),
+  /** The API key that started it (migration 0315, ADR-403). */
+  createdByApiKeyId: uuid('created_by_api_key_id'),
   stoppedByMembershipId: uuid('stopped_by_membership_id'),
+  /** The API key that stopped it (migration 0315, ADR-403). */
+  stoppedByApiKeyId: uuid('stopped_by_api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
   endedAt: tz('ended_at'),

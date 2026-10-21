@@ -39,6 +39,7 @@ import {
   runCampaignTick,
   syncTemplates,
   toApiCampaignReview,
+  type ApiCampaignDetail,
   type ApiCampaignRecipient,
   type ApiContext,
   type ApiScope,
@@ -680,6 +681,7 @@ describe('listing a campaign’s recipients (ADR-127)', () => {
       queuedAt: expect.any(String),
       repliedAt: expect.any(String),
       optedOutAt: null,
+      variant: 'A',
     });
     // A STOP is a reply and the opt-out it records.
     expect(byContact.get(bina)).toMatchObject({
@@ -705,6 +707,7 @@ describe('listing a campaign’s recipients (ADR-127)', () => {
       queuedAt: null,
       repliedAt: null,
       optedOutAt: null,
+      variant: 'A',
     });
     expect(byContact.get(farah)).toMatchObject({
       message: { ...(await message(farah)), status: 'unknown_outcome' },
@@ -926,12 +929,13 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
     });
     expect(paused).not.toHaveProperty('results');
     // The answer is the campaign as GET /campaigns/{id} reads it, without the results, settings
-    // and version that call adds (ADR-186).
+    // and version that call adds (ADR-186), and its variants (ADR-405).
     const reader = await apiKey(s.c, ['campaigns.read']);
     const {
       results: _results,
       settings: _settings,
       version: _version,
+      variants: _variants,
       ...read
     } = await apiGetCampaign(deps(), reader, flash);
     expect(paused).toEqual(read);
@@ -1089,6 +1093,7 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
       results: _results,
       settings: _settings,
       version: _version,
+      variants: _variants,
       ...completed
     } = await apiGetCampaign(deps(), reader, done);
     expect(completed.status).toBe('completed');
@@ -1211,12 +1216,13 @@ describe('resuming campaigns keys paused (ADR-176)', () => {
     expect(resumed).toMatchObject({ id: flash, status: 'running', pauseReason: null });
     expect(resumed).not.toHaveProperty('results');
     // The answer is the campaign as GET /campaigns/{id} reads it, without the results, settings
-    // and version that call adds (ADR-186).
+    // and version that call adds (ADR-186), and its variants (ADR-405).
     const reader = await apiKey(s.c, ['campaigns.read']);
     const {
       results: _results,
       settings: _settings,
       version: _version,
+      variants: _variants,
       ...read
     } = await apiGetCampaign(deps(), reader, flash);
     expect(resumed).toEqual(read);
@@ -1417,6 +1423,7 @@ describe('campaign drafts through the API (ADR-186)', () => {
     maxMessages: null,
     budget: null,
     stopAfterHours: 24,
+    variantB: null,
   };
 
   it("create drafts with their settings once per Idempotency-Key, checked as members' drafts are, naming the key; members submit and start them", async () => {
@@ -1860,6 +1867,8 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       frequencyCap: { count: 2, days: 7 },
       // The fixture's number was never read from Meta (ADR-400): no figure to compare with.
       messagingLimit: { status: 'unknown', limit: null, checkedAt: null, figure: null },
+      // No variant B (ADR-405).
+      variants: null,
     });
     // The same review members read, in the API's words; reading it changed nothing.
     expect(reviewed).toEqual(
@@ -2982,5 +2991,96 @@ describe("listing a segment's contacts through the API (ADR-208)", () => {
     for (const id of [recent.id, theirs.id]) {
       expect((await refused(apiListSegmentContacts(deps(), key, id, {}))).code).toBe('not_found');
     }
+  });
+});
+
+describe('A/B variants through the API (ADR-405)', () => {
+  it('creates a draft with variant B, reviews and reads each variant, and names each recipient’s', async () => {
+    const s = await setup();
+    const key = await apiKey(
+      s.c,
+      ['campaigns.read', 'campaigns.write', 'contacts.read'],
+      'A/B drafts',
+    );
+    for (let i = 0; i < 30; i += 1)
+      await s.contact(`+9198250000${String(i).padStart(2, '0')}`, `Ab${i}`);
+    const variantB = {
+      templateId: s.templateId,
+      variables: { header: [], body: [{ source: 'static', value: 'friend' }], buttons: [] },
+      sharePercent: 40,
+    };
+    const created = await apiCreateCampaign(
+      writeDeps(),
+      key,
+      {
+        name: 'API A/B',
+        channelId: s.c.channelAccountId,
+        templateId: s.templateId,
+        variables: { header: [], body: [{ source: 'name', fallback: 'there' }], buttons: [] },
+        audience: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+        variantB,
+      },
+      null,
+    );
+    const draft = (created.body as { data: ApiCampaignDetail }).data;
+    expect(draft.settings?.variantB).toEqual(variantB);
+    expect(draft.variants).toBeNull();
+    // An edit that leaves variant B out keeps it; null removes it, and it can be given again.
+    const renamed = await apiUpdateCampaign(writeDeps(), key, draft.id, { name: 'API A/B test' });
+    expect(renamed.settings?.variantB).toEqual(variantB);
+    const removed = await apiUpdateCampaign(writeDeps(), key, draft.id, { variantB: null });
+    expect(removed.settings?.variantB).toBeNull();
+    const restored = await apiUpdateCampaign(writeDeps(), key, draft.id, { variantB });
+    expect(restored.settings?.variantB).toEqual(variantB);
+    // A share off the steps is refused, naming the field.
+    expect(
+      (
+        await refusal(
+          apiUpdateCampaign(writeDeps(), key, draft.id, {
+            variantB: { ...variantB, sharePercent: 42 },
+          }),
+        )
+      ).code,
+    ).toBe('validation_failed');
+
+    const review = await apiReviewCampaign(writeDeps(), key, draft.id);
+    expect(review.problems).toEqual([]);
+    expect(review.variants?.map((v) => [v.variant, v.sharePercent])).toEqual([
+      ['A', 60],
+      ['B', 40],
+    ]);
+    expect((review.variants ?? []).reduce((n, v) => n + (v.total ?? 0), 0)).toBe(30);
+
+    await apiSubmitCampaign(submitDeps(), key, draft.id, { expectedVersion: restored.version });
+    await s.campaigns.approveCampaign(s.owner, draft.id, {}, {});
+    expect(await s.tick(draft.id)).toMatchObject({ outcome: 'progress', queued: 30 });
+
+    const detail = await apiGetCampaign(deps(), key, draft.id);
+    expect(detail.variants?.map((v) => v.variant)).toEqual(['A', 'B']);
+    const [a, b] = detail.variants!;
+    expect(a).toMatchObject({ templateId: s.templateId, sharePercent: 60 });
+    expect(b).toMatchObject({ templateId: s.templateId, sharePercent: 40 });
+    expect(a!.results.audience + b!.results.audience).toBe(detail.results!.audience);
+    expect(a!.results.queued + b!.results.queued).toBe(30);
+
+    const listed = await apiListCampaignRecipients(deps(), key, draft.id, { limit: '100' });
+    expect(listed.data).toHaveLength(30);
+    const recorded = new Map(
+      (
+        await fx.query<{ id: string; variant: string }>(
+          `SELECT id, variant FROM app.campaign_recipients WHERE campaign_id = $1`,
+          [draft.id],
+        )
+      ).map((r) => [r.id, r.variant]),
+    );
+    for (const r of listed.data) expect(r.variant).toBe(recorded.get(r.id));
+    expect(listed.data.filter((r) => r.variant === 'B')).toHaveLength(b!.results.audience);
+
+    // A campaign without variant B reads as before: no variants, every recipient A.
+    const plain = await s.draft('Plain');
+    await s.run(plain);
+    expect((await apiGetCampaign(deps(), key, plain)).variants).toBeNull();
+    const plainRecipients = await apiListCampaignRecipients(deps(), key, plain, { limit: '100' });
+    expect(plainRecipients.data.every((r) => r.variant === 'A')).toBe(true);
   });
 });

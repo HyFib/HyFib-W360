@@ -17138,3 +17138,486 @@ the refresh went on reading every remaining number for up to 40 seconds, throwin
 earlier read); that 0313's grant had no test (now asserted); that an attempt failing after Meta's
 failure relabelled it as a store failure (Meta's kind and code are kept); and wording and test
 gaps. All were fixed.
+
+## ADR-403 API keys enrol contacts or a segment in an automation (P4-01) (2026-10-21)
+
+Context: since ADR-401 a member enrols the contacts the Contacts page's filters match, or a saved
+segment, in an automation started by a member or through the API, at most 10,000, in paced batches
+of 50. A key could only start runs one contact at a time (ADR-077) or 50 per call (ADR-161), so an
+integration with a list of thousands paged through it and sent each start itself, without the
+snapshot, the one-running rule, the pacing or the sweep. ADR-401 left "enrolling through the public
+API" out of scope and P4-01's Remaining listed it.
+
+Decision:
+
+- **Four operations, ADR-401's enrolment:** `POST /api/v1/automations/{id}/enrollments` starts one
+  (201 with it); `GET /automations/{id}/enrollments` pages the automation's enrolments, newest
+  first, on keyset pages (`limit`, `cursor`); `GET /automations/{id}/enrollments/{enrollmentId}`
+  reads one; `POST …/{enrollmentId}/stop` stops one. The enrolment is the same row, snapshot, job,
+  batches, pacing, sweep, refusals and end as a member's: the shared steps moved out of the member
+  service (`snapshotEnrollment`, `matchingContactIds`, `loadEnrollmentSegment`,
+  `stopRunningEnrollment`, `selectEnrollmentPage`, `readEnrollmentDetail`), so the two cannot drift.
+- **Whom: a saved segment (`segmentId`) or `contacts.conditions`.** For the contacts, the call takes
+  what `POST /contacts/search` takes, written the same way, but only the conditions ADR-401's
+  `contactFilterSchema` holds: one `tag` condition with op `has` (the tag filter) and one `consent`
+  condition for purpose `marketing` (the consent filter: `opted_in`, `opted_out`, `not_recorded`
+  as `marketing_unknown`). Anything else, a second tag included, is refused (422, naming
+  `contacts.conditions.<n>`) with "save a segment with them and enrol it": no second filter language,
+  and no condition silently dropped. The search text is not offered (it compares numbers by how a
+  member sees them, which a key has no notion of). A tag the app would not keep is refused: the
+  Contacts page's filter ignored one, which would take every contact (it now fails closed, below).
+  At least one condition is required: none is refused (422, naming `contacts.conditions`) and
+  points to a segment, so a call never enrols every contact, up to 10,000, without being asked to. The mapped filter goes through the
+  same conditions (`contactFilterConditionsFor`, the member function's body without a member).
+  Supporting every search condition was not chosen: the snapshot, the audit (`filter.tag`,
+  `filter.consent`) and members' pages describe ADR-401's filter, and segments already carry the
+  whole language.
+- **Scopes, before anything is read:** `automations.start` (refused while the company is suspended,
+  as starts are) and `contacts.read`; `campaigns.read` for a segment, as reading segments needs
+  (ADR-125), with `conversations.read` or `orders.read` for a segment whose conditions read
+  conversations or store orders, as `GET /segments/{id}/contacts` needs (ADR-126, ADR-231); and
+  `messages.send_marketing` when the automation's live version sends a marketing template, checked
+  as API starts check it (`sendingChannel`, now exported). Each within the plan's scopes (ADR-092:
+  `not_in_plan`). Reads need `automations.start` only (also while suspended) and stops
+  `automations.start` with an active company, as runs' reads and stops do.
+- **ADR-401's checks, unchanged:** the automation's checks of a start (404 another company's or an
+  unknown one; 412 paused, unavailable, inactive number), the inputs as a start validates them (422
+  naming `inputs.<name>`), a segment not archived (404; a segment with a problem 412 saying it, as
+  reading its contacts does), 1 to 10,000 contacts (422 otherwise). An optional `expectedCount`
+  (1 to 10,000), when given, is checked against the snapshot exactly as a member's count is (409
+  "These contacts now number …", enrolling nobody), for an integration that counted first
+  (`GET /segments/{id}`, `POST /contacts/search`).
+- **409 when one is running, clearly:** before the snapshot the call looks for a running enrolment
+  of the automation and refuses with 409, reason `enrollment_running`, its message naming that
+  enrolment's id, so an integration can wait for it or stop it. Two calls at once still meet
+  ADR-401's partial unique index, which gives the same 409 (without the id). Stopping an enrolment
+  that has ended is refused with 409, reason `enrollment_ended`, as members' stops are refused; GET
+  says how it ended. Both reasons are new in the error schema.
+- **Idempotency and limits:** the POST needs an `Idempotency-Key` and runs in one transaction with
+  it, so a retry answers as the first call did and a key reused for another body is refused
+  (`idempotency_key_reused`). The POST is one request against the key's and company's limits;
+  batches count none (they are not requests). No per-key safeguard was added: the API has the key's
+  and company's request rates and monthly counts (ADR-061, ADR-068, ADR-097) and nothing per key
+  for background work; ADR-401's one-running-enrolment-per-automation and 10,000-contact cap bound
+  what one key can queue, and the plan's runs bound what starts. The stop takes no key: stopping an
+  ended one changes nothing.
+- **Who started and stopped it (migration 0315):** `created_by_api_key_id` and
+  `stopped_by_api_key_id`, composite foreign keys to `app.api_keys` (keys are never deleted, so
+  enrolments keep naming them), with a check that exactly one of member and key started it (and
+  the member's user with the member) and the stopper check extended (`stopped_by_api` with the key);
+  the runtime role may update only the stopper. A key's enrolment is audited as the key
+  (`automation.enrollment_started` and `automation.enrollment_stopped`, actor `api_key`, with the
+  request id; never the inputs). Keys read every enrolment of the company, members' included, as
+  ids and counts (`startedBy` member or api, `apiKeyId`, `stoppedBy`, `stoppedByApiKeyId`, the
+  counts, refusals by reason, `stalledSince`; `segmentId` only to a key holding `campaigns.read`,
+  null otherwise), never a member's name or the inputs; members with
+  `automations.read` see keys' enrolments on the automation's page and the enrolment's page
+  ("started … through the API with key <name>", "(key <name>)" for a key's stop), and a run page
+  says "an enrolment through the API with key “<name>”".
+- **Each batch re-checks the key as a fresh request would,** in place of ADR-401's re-check of the
+  member's roles, under the enrolment's row lock: the key exists and is not revoked
+  (`api_key_revoked`), has not expired by the database's now (`api_key_expired`; the same instant
+  the batch paces by), the plan still includes the API (`api_not_in_plan`, monthly requests 0) and
+  the key and the plan still give every scope enrolling needs (`api_scope_missing`; key scopes never
+  change, ADR-052, so this is the plan narrowing them), and `messages.send_marketing` for a
+  marketing automation (`marketing_not_allowed`, as for a member without `campaigns.send`). A failed
+  re-check ends it as ADR-401 ends one whose member lost permission: `stopped` with the reason, the
+  contacts not handled not started, runs already started going on, audited once. The company's
+  suspension is checked before the batch, as for members: the job is deferred. Not re-checked: the
+  month's request count (batches are not requests), the key's or company's allowed networks (no
+  client address), and `conversations.read`/`orders.read` for a segment's conditions (the segment was
+  read when the snapshot was taken; nothing reads it again). A rotated key expires when its 72-hour
+  overlap ends (ADR-052): 10,000 contacts take about nine minutes at the default rate, so only a
+  stalled or suspended enrolment meets that; the enrolment is not moved to the new key, which would
+  let a rotation extend what the old key started.
+- **Jobs act for the company:** a key's enrolment job is signed with no user (`actorUserId: null`),
+  so `authorizeJob` checks the company (deferred while suspended) and no member; the sweep's due
+  list returns the enrolment's user, now null for keys. Runs it starts record the enrolment only
+  (`enrollment_id`; `api_key_id` stays null, so 0311's check is unchanged).
+- **Webhooks: runs of a key's enrolment do not carry the key.** They reach endpoints as ADR-401's
+  do, with `trigger: "api"`, `apiKeyId: null` and `run.enrollmentId`; the enrolment the POST
+  returned ties them to the key. Carrying the key in `apiKeyId` was not chosen: endpoints narrowed
+  to keys (`runApiKeyIds`, ADR-319) asked for the runs a key starts one by one, and would suddenly
+  receive up to 10,000 runs per enrolment; and `GET /automation-runs/{id}` would have to start
+  reading enrolment runs. Nothing changes in the payload, the capture or the filters; additive by
+  being no change.
+- **Per-contact outcomes are not listed** (in the API or the app): the enrolment gives refusals by
+  reason. Paging `automation_enrollment_contacts` by position is cheap (a unique index), but each
+  row names a contact and a run that `GET /automation-runs/{id}` does not read (key runs only), so
+  the right shape (contacts with `contacts.read`, runs readable) is a slice of its own.
+
+- **The Contacts page's tag filter fails closed** (`contactFilterConditionsFor`): a tag the app
+  would not keep (empty after normalising, over 40 characters, a comma or a control character) now
+  adds `false`, matching nobody, where it was skipped and so matched every contact. For members,
+  the Contacts page, the count and bulk tag and field edits (ADR-213, ADR-238), the contacts export
+  and ADR-401's enrolment with such a tag in the address or form now find nobody (an enrolment or a
+  bulk edit is refused as having no contact) instead of acting on everyone. No contact can carry
+  such a tag, so no real filter changes. Segments do not use this filter (`segmentWhere`).
+- **Docs read by integrators:** the run payload's `trigger`, `apiKeyId` and `enrollmentId`, the
+  `automation.run_started` description, `runTriggers` and every `runApiKeyIds` description say an
+  enrolment is by a member or an API key, and that a key's enrolment's runs carry no key, so a list
+  of keys never matches them. The Settings label "API or a member's enrolment" stays: a member's
+  enrolment is still one of its meanings.
+
+Not built: an enrolment's contacts listed with their outcomes; enrolling contacts by id; the
+search text or other search conditions (save a segment); scheduling an enrolment; moving a rotated
+key's enrolments to its successor.
+
+Review (before merge): an independent review found no High or Medium issue. Low: integrator docs
+still called every enrolment a member's (fixed, above); `{"contacts": {}}` enrolled every contact
+unasked (now refused, and `expectedCount` added); the Contacts filter skipped an invalid tag and so
+matched everyone, a fail-open older than this slice (now fails closed); a rollback past 0315 shows
+the new end reasons blank (DEPLOYMENT says so; the page now falls back to the reason's code). Nits:
+scopes are checked before conditions (403 before 422), `segmentId` is given only with
+`campaigns.read`, key names are quoted alike on all three pages, two stale comments, and the
+FK's brief lock on `app.api_keys` noted in DEPLOYMENT. Overwriting the stopper follows 0311's
+pattern and stays.
+
+## ADR-404 Editing a template Meta already has (P3-03) (2026-10-21)
+
+Context: a template could change only while it was a draft Meta never received (ADR-295); once
+submitted, a member who needed a correction deleted it and created another under a new name, or
+edited it in WhatsApp Manager, and every campaign, automation and store rule naming it had to be
+pointed at the replacement. Meta's OpenAPI description (`business-messaging-api_v23.0.yaml`, path
+`/{Version}/{TEMPLATE_ID}`) defines the call, research M-201:
+
+- `post`, summary "Edit template", operationId `editTemplate`; its request body schema lists
+  `category` (example `MARKETING`), `components` (the creation shape: `HEADER` with `format: TEXT`,
+  `BODY` with `example.body_text`, `FOOTER`, `BUTTONS` with `QUICK_REPLY`), `language` and `name`,
+  none marked required; its example sends all four;
+- its `200` answer is `{ "success": true }` (schema `success: boolean`);
+- the same path's `get` (operationId `getTemplateByIdDefaultFields`, "Get template by ID (default
+  fields)") answers `id`, `name`, `language`, `status`, `category` and `components`.
+
+The description says nothing of how often a template can be edited, which statuses allow an edit,
+whether the category may change in one, or what status Meta gives an edited template; research
+M-096 found no limits either. HyFib assumes none of them.
+
+Decision:
+
+- **Who and what:** a member with `templates.submit` (owners, administrators, marketers; the
+  permission that sends content to Meta for review) edits a template Meta has (one with a Meta id)
+  on its page, in the draft editor with the draft's validation (`templates/definition.ts`). Name and
+  language cannot change (not in the editor, not sent). **The category stays**: the description's
+  example sends a category but nothing confirms Meta accepts a change on an edit or what it does to
+  an approved template's review, so the editor shows it fixed and the service refuses a different
+  one (422). The request (`EditTemplateRequest`) carries the category Meta last reported, unchanged,
+  and the components; not name or language, which the path already names. Whether Meta accepts the
+  components without the category is not confirmed, so sending the unchanged one was the safer
+  reading of the example.
+- **Statuses:** HyFib refuses only what it must: a template Meta does not have (412; change the
+  draft), one deleted or being deleted (409), one whose edit is still on its way (412), content its
+  editor cannot represent such as a photo header or an authentication template (`unsupported`; edit
+  it in WhatsApp Manager), the content Meta has already (412), and a category change (422). Any
+  Meta status (approved, rejected, paused, in review, …) may be edited; Meta's refusal is recorded
+  and shown with its code and message (`editRefusalText`: "Meta refused the edit (code N): …").
+  The Rejected notice now says the template can be edited and sent to Meta.
+- **Where it is used, before confirming:** the Send edit to Meta button opens a confirmation that
+  lists the unfinished campaigns (draft to paused), the published automations (active or paused,
+  whose live version has a template step naming it) and the store's order message and cart
+  reminder rules that send it (`templateUsage`, at most 50 of each), and says that until Meta takes
+  the edit sends use the content Meta has, and afterwards the content Meta approves.
+  `templates.submit` reads the list (it names campaigns and automations the member may not
+  otherwise open; the edit affects them, so the member must see them).
+- **Refused while a campaign using it is sending (`running`)**: a running campaign queues its
+  recipients over minutes to hours, and an edit Meta takes mid-run would split the audience between
+  two contents and, if Meta then reviews the template again (unconfirmed, but a status other than
+  approved stops the send worker's approval check), skip or fail the rest of the run. The member
+  pauses the campaign (or waits for it to finish), which they can see in the usage list, edits,
+  then resumes it knowingly. Paused, scheduled and draft campaigns are only listed. The check reads
+  the campaigns in the edit's transaction without locking them, so a campaign launched at the same
+  instant can still start; the confirmation shows its status either way.
+- **Written ahead, one at a time, paced:** in one transaction the template records
+  `edit_state = 'sending'`, the components sent, when, who (the member, or null for a key, which the
+  audit log names), its version moves on, an `edit_requested` status change (source `edit`) is
+  written and a `template.edit` job queued (singleton key `<id>:edit:<version>`). Its `status`,
+  `category` and `components` stay what Meta reports. Another edit, and a deletion, wait for Meta's
+  answer (412). The job re-reads the row under the company's scope; while Meta throttles the
+  account it defers as submissions do (ADR-399, `management_deferred_until`, queue
+  `template.edit` in `PAUSE_DEFERRAL_QUEUES`), and a rate limit whose own response paused the
+  account defers too (see the second review below for other retryable answers).
+- **Meta's answer:** `success: true` makes the edit; the job then reads the template by id
+  (`GET /{template-id}`, default fields) unless that answer paused the account, and stores the
+  status, category and components Meta reports, with `edited` (naming the member who asked) and,
+  when the status changed, that status (source `edit`, which reaches webhook endpoints as
+  `template.status_changed` like any Meta status). No status is assumed: when the read fails or is
+  skipped, the stored status stays and a sync is requested. A refusal (`permanent` or `auth`) makes
+  the edit `failed` with Meta's code and message, keeps the content so the member can change it and
+  send again (the editor starts from it), records `edit_failed` and `template.edit_failed`, and for
+  `auth` asks for an access check (ADR-137). A connection that failed before sending is retried;
+  anything else that may have reached Meta (`unknown`, or `retryable` with an HTTP status) leaves
+  the edit `sending` with "Waiting for Meta to confirm the edit." and requests a sync. Any answer
+  other than `success: true` is read as `unknown`.
+- **Lost answers:** the template sync compares Meta's components with the content sent, as the
+  editor reads them (`sameTemplateContent`: key order, type case and an example given as text or a
+  list do not matter; JSON otherwise). Equal: the edit is made (`edited`, source `sync`). Not equal
+  10 minutes after the request, or after its deferral when later (`editReconciliation`): `failed`
+  with "HyFib could not confirm the edit: Meta's template does not show the new content. Check it in
+  WhatsApp Manager, or edit it again." A template Meta no longer lists fails its edit. Nothing is
+  sent again automatically. `ops.template_sync_due` (migration 0316) syncs every 5 minutes an account
+  with an edit sending, so the window is reached; as for a submission, an edit whose job is still
+  retrying a connection failure after 10 minutes is called unconfirmed and its later job skips it.
+- **Audit:** `template.edit_requested` (the member, or the key with `source: api`),
+  `template.edited` and `template.edit_failed` (system entries naming `requestedByUserId`).
+- **Public API:** keys already submit and delete templates (ADR-296), so `POST
+/api/v1/message-templates/{id}/edit` (`editMessageTemplate`) takes `{ definition }` with the
+  `templates.submit` scope (its description now says so), answers the template with its edit, once
+  per optional `Idempotency-Key`, and the same refusals (503 while Meta limits management requests).
+  Templates give `edit` (`state`, the content sent, `error`, `requestedAt`, or null) and history
+  `source` may be `edit`. No new scope, so no scope migration.
+- **Migration 0316:** five nullable columns on `app.message_templates` (`edit_state` checked to
+  `sending` or `failed`, `edit_components` jsonb array within 32 KiB, `edit_error` within 1,000
+  characters, `edit_requested_at`, `edit_requested_by_user_id` referencing `auth.users`) and a check
+  that a state has its content and time; UPDATE on them for `w360_app`, SELECT on `edit_state` only
+  for `w360_definer`; `template_status_events.source` also takes `edit` (check replaced and
+  validated in the migration: the table is append-only and small); `ops.template_sync_due` recreated
+  as 0310 did (dropped by its owner, created by the migration role with a pinned search path,
+  granted to `w360_app` before ownership moves back). Row security unchanged. The columns are
+  exported with the template and deleted with it. Expand only; the release before never names them.
+- **Graph stand-in (tests only):** `POST /{template-id}` accepts only `category` and `components`,
+  applies them and answers `success: true`, or refuses with a test's Graph error, applies then drops
+  the connection, or drops it; `GET /{template-id}` answers the default fields or a test's error;
+  `/__stand-in/template-edit` queues an answer for e2e. What status an edited template gets is the
+  test's choice, since Meta's is not confirmed.
+
+Not built: changing the category, editing media-header, authentication or other templates HyFib's
+editor cannot represent, an edit of several language versions at once, and any verification against
+Meta (the Graph stand-in only); the per-template edit limits Meta may apply are reported as Meta
+reports them.
+
+Review (before merge): an independent review found no High issue and three Mediums in the edit's
+lifecycle, all fixed in migration 0316 (not applied anywhere before the fix) and the code:
+
+- **Sent at most once (M1):** a job run again after `success: true` whose settle failed, or after
+  the worker died, posted the same content again, and a refusal of that second post marked an edit
+  Meta had as failed; an old retrying job could also send a newer edit queued after it. Now each
+  edit has an id (`edit_id`) that its job's reference carries (`<template id>:<edit id>`), and a job
+  whose edit is no longer the template's open one does nothing. Before the request the job commits
+  `edit_attempted_at` (the database's time) in its own transaction; a run that finds it set sends
+  nothing and requests a sync, which settles the edit from Meta's components. Only answers that
+  prove Meta did nothing clear it (amended by the second review below). So a refusal only ever
+  answers the edit's single attempt.
+- **A late-applied edit is reconciled (M2):** the sync now also confirms a `failed` edit whose
+  content Meta's template shows (`edited`, source `sync`), so an edit Meta applied after the window,
+  or after an answer HyFib read as a failure, no longer stays failed with a false message (or
+  blocks sending the same content again as "the content Meta already has"). The job, and a success
+  answer arriving late, settle a failed edit as made too. The job sends only while the window has
+  at least a minute left (`TEMPLATE_EDIT_SEND_MARGIN_MS`, on the database's clock); later it settles
+  the edit as not sent ("HyFib could not send the edit to Meta within 10 minutes of the request.
+  Send it again.").
+- **An edit cannot silently break what sends the template (M3):** automations compare a template's
+  header, body and link value counts with the values their step stores, and an asking step its
+  quick-reply buttons' positions and titles (`template_changed`); campaigns and store rules pause
+  or skip on the same counts. HyFib now computes the template's shape before and after
+  (`templateShape`: header, body and link value counts, link button positions, quick-reply
+  positions and titles) and, when an edit changes it while an unfinished campaign, a published
+  automation or a store rule uses the template, refuses it, naming up to three of them: "This edit
+  changes the template's variables or buttons, which … rely on. Change those first so they no longer
+  use it, or add a new template instead." Wording edits (texts, footer, a static link, a link's
+  address before its value) stay allowed while it is used.
+- **Campaigns about to start (L1):** the campaign check now reads campaigns using the template that
+  are `scheduled` or `running` under a share lock in the edit's transaction (a runner starting one
+  holds its row, so the edit waits for it) and refuses while any exists. The campaign runner does
+  not also read `edit_state`: an edit that changes the shape is refused while any unfinished
+  campaign uses the template, a wording edit keeps every campaign's stored values valid, and
+  holding a campaign for an edit would need a new pause reason (a constraint change) for a case the
+  refusals already cover; a campaign scheduled after an edit was sent sends the content Meta has at
+  each send, as the confirmation says.
+- **No duplicate status change (L2):** settling an edit locks the template and compares Meta's
+  status with the status stored then, so a sync between the request and the answer is not recorded
+  again (nor sent again as `template.status_changed`).
+- **Unconfirmed points stated as such (L3):** leaving `name` and `language` out of the request is
+  HyFib's reading (the spec's only example sends all four fields), and settling a lost answer
+  relies on Meta's listing showing the new components before Meta approves them, which is not
+  confirmed; if it does not, every lost answer ends as "could not confirm" and the member checks
+  WhatsApp Manager (RUNBOOKS), and an edit Meta applies later is still confirmed by a later sync.
+- **One clock (L4):** `edit_requested_at` and `edit_attempted_at` are the database's `now()`, and
+  the sync judges the window against the database's time (`databaseNow`), not the web server's or
+  the worker's.
+- **Grants tested (L5):** an integration test asserts `UPDATE` on the seven edit columns for
+  `w360_app` only, and `SELECT` on `edit_state` alone for `w360_definer`, with no `UPDATE`.
+- **Where it is used:** the list is safe to show because every role that may submit templates
+  (owner, administrator, marketer) reads campaigns, automations and commerce (a unit test pins the
+  role matrix); a member whose company took one of those permissions away sees "a campaign", "an
+  automation" or "a store" instead of its name. The refusal of a shape change names them by name
+  (no role that may submit templates lacks those permissions today).
+
+Second review (before merge): no High issue; four Mediums and the rest fixed:
+
+- **Retryable answers that pause the account:** a 5xx or a transient code (1, 2, 131000) does not
+  prove Meta left the edit alone, so only a rate limit (HTTP 429 or a rate-limit code,
+  `isRateLimited`) clears the attempt: deferred after the pause when it paused the account, retried
+  when it did not. Any other retryable answer that paused the account keeps the attempt, says
+  "Waiting for Meta to confirm the edit.", requests a sync and defers the job, whose next run only
+  asks for a sync. The deferral is stored on the database's clock (its now plus the wait the
+  worker sees), as the window is judged.
+- **Names in a refusal:** a shape-change refusal now masks names as the usage list does: a member
+  sees a campaign's, automation's or store's name only with `campaigns.read`, `automations.read` or
+  `commerce.read`; a key sees campaign names only with the `campaigns.read` scope, and never
+  automation or store names, which no scope reads ("a campaign", "an automation", "a store").
+- **Runs on older versions:** each automation run keeps its version, so the usage now also counts
+  automations with runs in progress (running or waiting, any mode) on a version that sends the
+  template, whatever version is live ("automation … (N runs in progress)"), and a shape change is
+  refused while any exist.
+- **After the request (documented, not refused):** the checks hold when the edit is requested.
+  While a shape-changing edit is `sending` (up to Meta's answer, or 10 minutes for a lost one), a
+  member can still launch or resume a campaign, publish an automation or save a store rule that
+  uses the template; if Meta takes the edit, those stop on the changed shape (a campaign pauses as
+  `template_not_approved`, an automation step ends `template_changed`) and must be pointed at the
+  edited template's values or another template. Refusing those actions would add a check to four
+  other features for a window of minutes; RUNBOOKS says what to do.
+- **Failed edits stay due for an hour:** `ops.template_sync_due` also syncs every 5 minutes an
+  account with an edit that failed within the last hour, so an edit Meta applies late is confirmed
+  within minutes rather than at the 6-hourly sync; later than an hour, the routine sync confirms
+  it. The hour counts from the failure (`edit_failed_at`, migration 0316, the database's time),
+  so a pause before it does not use it up (third review); the definer reads that column and
+  `edit_state` only.
+- **The shape is broader than each sender needs (accepted):** quick-reply titles and positions
+  matter only to automation asking steps and store cash-on-delivery rules, and link positions to
+  link values; campaigns and other steps compare counts only. HyFib refuses any shape change while
+  anything uses the template rather than compute each user's reliance, so some harmless edits (a
+  quick reply renamed while only a campaign uses the template) are refused too; the member changes
+  the users first or adds a new template.
+- **Credit for a late confirmation:** a failed edit the sync later confirms is credited to the
+  member who asked for it (`edited`, their name), even if the content reached Meta through
+  WhatsApp Manager instead; HyFib cannot tell the two apart.
+- **Rollback note:** DEPLOYMENT now gives a statement that works under forced row security.
+
+Third review (before merge): the production code was found sound. Fixed: the pinned-version runs
+integration test now delivers its customer's message with a WhatsApp id and writes the run's
+`next_step_at` as the table's checks require (started and stopped); the failed edit's fast sync
+counts its hour from the failure (`edit_failed_at`, the database's time) rather than the request,
+so a pause before it does not use it up; the runs in progress are grouped by version first, so
+each version's graph is tested once rather than once per run; `isRateLimited` also requires a
+retryable answer; a member's masked usage carries no ids of what they may not read (run counts
+stay); the rollback steps in DEPLOYMENT say how to reach `w360_definer`, which cannot log in.
+
+Codex's review of PR #105, with ADR-405 beside it, found that the campaign checks (the share-locked
+read of campaigns scheduled or sending, and the usage behind the variables refusal and the
+confirmation) matched a campaign's own template only, so a campaign sending the template as
+variant B was not counted; both now also match `app.campaign_variants`, with an integration test.
+
+## ADR-405 A/B template variants for campaigns (P3-04, P5-08, P5-09) (2026-10-21)
+
+Context: P3-04 listed "A/B variants" as remaining. A campaign sent one template to its whole
+frozen audience (ADR-021), so a company that wanted to compare two messages ran two campaigns over
+hand-split audiences, with two approvals, two frequency-cap passes and results it compared by eye.
+
+Decision:
+
+- **Two variants, a model open to more.** A draft may add variant B: a second template, with its
+  own variable mapping, sent from the campaign's number. The campaign's own template and mapping
+  are variant A. B's share of the recipients is chosen from 10% to 90% in steps of 5
+  (`variantShareSchema`); A gets the rest. Variant B lives in `app.campaign_variants` (migration
+  0317), one row per variant after A, labelled B to Z (a check), unique per campaign and label, so
+  a third variant would need code but no new table; HyFib builds two. A campaign without a variant
+  row behaves exactly as before: no query result, wording, estimate or send changes (its
+  recipients are all A, the column's default).
+- **Assignment by a stable hash, recorded once.** When the audience is taken (`submitLockedDraft`,
+  where it is snapshotted), each contact falls into one variant by its bucket: the first 32 bits of
+  the MD5 of "campaign id:contact id" (uuids in lowercase, as PostgreSQL writes them) modulo 100;
+  buckets below B's share are B (`variantBucket` in TypeScript, `variantBucketSql` in SQL, the same
+  function; an integration test compares every recorded variant with the TypeScript one). MD5 is
+  used for its spread only. `insertSnapshot` takes one `AudienceArm` per variant (its rules and its
+  bucket condition) and writes its label in `campaign_recipients.variant`. The runtime role holds no
+  `UPDATE` on that column, so a recorded variant never changes: the runner reads it on every tick,
+  so a retry, a restart, a pause or a resume sends each recipient the same variant, and a contact
+  merge moves the row with its variant. A submission taken back to a draft and submitted again
+  gives each contact the same variant (same hash). Shares are nested: a contact in B at 20% is in B
+  at 50%. For the 10,000 deterministic ids of the unit test the observed share of B differs from the
+  chosen one by at most 0.89 percentage points (B at 50.89% for 50%; two other campaign ids give
+  at most 1.28 and 0.74 points), within three binomial standard deviations (at most 0.5 points at
+  that size); the test bounds it at 1.5.
+- **Every check per variant.** `evaluateReadiness` checks each variant's template with
+  `variantTemplateProblems`: chosen, approved by Meta, of the number's WhatsApp account, sendable,
+  its mapping complete with the company's fields. With B, each problem names its variant
+  ("Variant B: The template is not approved by Meta."), and so does "Variant B: no contact in its
+  share of the audience can receive the campaign now", which the review lists and submitting
+  refuses; without B the wording is unchanged. Each variant's contacts are classified by its own
+  template's category: consent purpose, the marketing opt-in when the company requires it, and the
+  fields its own mapping needs without a fallback; the frequency cap applies to marketing variants
+  (the review shows it when any variant is marketing, and the runner skips only a marketing
+  variant's recipients over it). The review's audience is the sum of the variants' disjoint parts.
+- **Costs per variant, never twice.** The review prices each variant's contacts who can receive it
+  at its own template's category (`estimateFromTable`, one rate table, integer micros) and adds them
+  (`combineEstimates`), so each recipient is priced once; it shows each variant's estimate beside
+  the total. The runner prices each queued recipient once, at its variant's category, so the
+  spending cap and the spent estimate add both variants. There is no wallet reservation to split:
+  Meta bills companies directly and no wallet funds are reserved for campaign sends (ADR-011,
+  ADR-023), and nothing here changes that; a re-check or a released send is priced again only when
+  it is queued again, as before.
+- **Four-eyes approval sees both.** The page of a campaign waiting for approval shows a Variants
+  card (both templates and the split) before the approver acts, and approving approves both:
+  `approveCampaign` and resuming refuse when a variant's template is no longer approved while that
+  variant has pending recipients (the refusal names it). The `campaign.submitted` audit records
+  each variant's label, category and share (no template names, as audits record none). The
+  approval email adds one line naming both templates, their shares and pending recipients, and
+  that approving approves both and no winner is picked (split into lines a notice takes, template
+  names being long at most). The messaging-limit notice (ADR-400) counts every variant's
+  recipients, as the number sends them all.
+- **Sending.** A tick loads both variants' templates and pauses the campaign
+  (`template_not_approved`, the event naming the variant) when a variant that still has pending
+  recipients can no longer be sent with its mapping (`variantSendable`); otherwise it sends each
+  recipient its recorded variant's template with that variant's variables, checked against its
+  variant's consent purpose. **A variant is checked only while it has pending recipients**
+  (`pendingByVariant`), by the runner, a resume and an approval alike: a variant that finished
+  never holds the other back (Meta pausing B's template after B's last send would otherwise pause
+  the campaign for good, B being no longer editable), and a B that got no recipients (a draft
+  submitted by a web server of the release before, whose snapshot gives everyone A) is ignored.
+  Without B, A's template is checked as before, pending or not. A recipient that becomes pending
+  again during a tick after its variant was skipped as finished waits for the next tick, which
+  then checks that variant. Pausing,
+  resuming, cancelling, retries, the send worker's checks and the exactly-once guards are
+  unchanged: they act on recipients and messages, whichever template they carry. Test sends take a
+  variant (A by default).
+- **Results, descriptive only.** `campaignVariantAnalytics` counts each variant as
+  `campaignAnalytics` counts the campaign, over its recipients only, so the variants add up to the
+  campaign's results. The page's Variants card gives recipients, skipped, handed to WhatsApp, and
+  sent, delivered, read, replied, opted out and failed with the same denominators as the results,
+  and clicks and conversions as not measured, as the campaign reports them. It claims no winner
+  and computes no significance, and says a difference between small groups can be chance. The
+  recipients page and the CSV export (a `variant` column added last) name each recipient's variant.
+- **API and webhooks (P5-08, P5-09), additive.** Keys create and edit drafts with `variantB`
+  (`{ templateId, variables, sharePercent }`, null removes it, left out keeps it); the detail's
+  `settings.variantB` gives it to keys with `campaigns.write`; `GET /campaigns/{id}/review` gives
+  `variants` (each variant's share, total, eligible and estimate); `GET /campaigns/{id}` gives
+  `variants` (each variant's template, share and results, null for a draft or without B);
+  `GET /campaigns/{id}/recipients` gives each recipient's `variant` ("A" or "B"), as does
+  `campaign.recipient_skipped` in `recipient.variant`. All described in the OpenAPI document with
+  schema tests. The campaign's top-level `templateId` and `templateName` (the list, the detail,
+  `campaign.status_changed`, `campaign.recipient_skipped`) stay variant A's, the campaign's own,
+  and now say so, pointing to `variants` and `recipient.variant`. `campaign.status_changed` keeps the campaign's results without a per-variant
+  breakdown (the detail gives it).
+- **Tenant rules.** `app.campaign_variants`: `tenant_id NOT NULL`, `UNIQUE (tenant_id, id)`,
+  composite foreign keys to the company's campaign and template (another company's template id
+  matches no row; the service, reading under the company's scope, answers 404 first), forced row
+  security, grants of `SELECT`, `INSERT`, `DELETE` and `UPDATE` of the template, mapping and share
+  only, exported (export spec), deleted with the company at step 705 (after messages, before
+  campaigns and templates). The recipients' column is added first, before the new table's foreign
+  key locks the campaigns (a runner tick takes the recipients, then the campaign), and its check
+  is added `NOT VALID` and validated by 0318.
+
+Known limits: the split is close to the share, not exact (a small audience can split far from it,
+and a variant nobody in its share can receive blocks submitting); the hash is fixed per campaign and
+contact, so a contact's variant cannot be rerolled; both variants send from the campaign's number.
+Not built: more than two variants, a per-variant schedule or audience, a winner or significance,
+per-variant results in `campaign.status_changed`, and any verification against Meta (the Graph
+stand-in only).
+
+Review (before merge): an independent review found one High issue: three existing integration
+tests compared recipients, the skipped-recipient webhook's body and the draft review with an exact
+`toEqual`, which the added `variant` and `variants` fields would have failed in CI; they and three
+more exact comparisons of the campaign detail (the pause, resume and cancel answers set against
+`GET /campaigns/{id}` without its added fields) now name the new fields. A Medium issue: a variant
+that finished before Meta paused its template paused the campaign for good, as the runner, a
+resume and an approval checked both templates unconditionally; each variant is now checked only
+while it has pending recipients (above), with integration tests. Low issues: a draft with variant B
+submitted by a web server of the release before could get stuck (now ignored, and DEPLOYMENT says
+to use variants after the web rollout); the top-level template fields did not say they are
+variant A's; the audit recorded only A's category, and an unread submission field was removed; and
+0317 took the campaigns' lock before the recipients' (now the reverse). All were fixed.
+
+Codex's review of PR #105: the campaign page counted each variant and the campaign apart in a
+read-committed transaction, so while recipients were being sent the variants could fail to add up
+to the results; it now reads them in one repeatable-read snapshot, as the API's detail does. The
+same review found that template edits did not see variant B's campaigns (ADR-404, fixed there).

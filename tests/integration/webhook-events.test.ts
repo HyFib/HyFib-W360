@@ -5700,13 +5700,13 @@ describe('campaign events (ADR-087)', () => {
     const bodyFor = (contactId: string) =>
       bodies.find((b) => (b.data.contact as { id: string }).id === contactId)?.data;
     expect(bodyFor(optedOut)).toEqual({
-      recipient: { id: await recipientOf(optedOut), skipReason: 'opted_out' },
+      recipient: { id: await recipientOf(optedOut), skipReason: 'opted_out', variant: 'A' },
       campaign,
       contact: { id: optedOut, phone: expect.stringMatching(/^\+/), name: 'Shopper 2' },
       channel,
     });
     expect(bodyFor(numberless)).toEqual({
-      recipient: { id: await recipientOf(numberless), skipReason: 'no_phone' },
+      recipient: { id: await recipientOf(numberless), skipReason: 'no_phone', variant: 'A' },
       campaign,
       contact: { id: numberless, phone: null, name: 'No number' },
       channel,

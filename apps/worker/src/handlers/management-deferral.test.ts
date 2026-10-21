@@ -41,6 +41,7 @@ describe('deferPausedWork', () => {
     const expected: [string, string][] = [
       ['template.submit', QUEUES.templateSubmit.name],
       ['template.delete', QUEUES.templateDelete.name],
+      ['template.edit', QUEUES.templateEdit.name],
       ['flow.sync', QUEUES.flowSync.name],
       ['flow.keys', QUEUES.flowKeys.name],
       ['commerce.sync', QUEUES.commerceSync.name],

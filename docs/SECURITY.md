@@ -134,6 +134,21 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   `tenant.settings.manage`. Adding a number to the suppression list needs `contacts.write`;
   removing one needs `tenant.settings.manage` (it re-enables messaging).
 - Deleting a template Meta already has needs `templates.submit` as well as `templates.write`.
+- Editing a template Meta already has (ADR-404) needs `templates.submit`, the permission that sends
+  content to Meta for review; the same members see, before confirming, the unfinished campaigns,
+  published automations and store rules that send it (names and statuses only), since the edit
+  changes what they send. The template is read and locked under row security in the member's
+  company (another company's answers 404), the edit is written ahead in that transaction with the
+  member named, and the signed `template.edit` job re-reads it in the company's scope. Keys need
+  the `templates.submit` scope (`POST /message-templates/{id}/edit`). Showing the usage is safe
+  only because every role with `templates.submit` (owner, administrator, marketer) also holds
+  `campaigns.read`, `automations.read` and `commerce.read` (a unit test pins this against the role
+  matrix); a member whose company removed one of those sees the item without its name, in the
+  list and in the refusal of an edit that changes the template's variables or buttons alike. A key
+  sees campaign names in that refusal only with the `campaigns.read` scope, and never automation or
+  store names (no scope reads them): "a campaign", "an automation", "a store" stand for them, and
+  the page carries no id of such an item. Audit:
+  `template.edit_requested`, `template.edited`, `template.edit_failed`.
 - A campaign's messaging-limit notice (ADR-400): members with `campaigns.read` see the sending
   number's messaging limit, as Meta last reported it, in a draft's review and on the page of a
   campaign not yet finished, though Settings → Channels shows it only to `channels.read` (ADR-398);
@@ -141,6 +156,13 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   `campaigns.read` also holds `channels.read`, and the limit is operational metadata of the
   company's own number (no credential, no contact), read only from that number under the company's
   scope.
+- A campaign's variant B (ADR-405) is edited as the draft is (`campaigns.write`, drafts only, by
+  members and by keys with `campaigns.write`); its template must be one of the company's own (read
+  under the company's scope, and `app.campaign_variants` has a composite foreign key to the
+  company's templates, so another company's template id is not found), and submitting checks it as
+  A's template is checked. The variant each recipient is given is written once with the snapshot:
+  the runtime role holds no `UPDATE` on `app.campaign_recipients.variant`, so a recorded variant
+  cannot be changed. Results per variant are counts, as the campaign's are.
 - Erasing a contact needs `contacts.delete` (also while the company is suspended).
 - Merging contacts (ADR-224) needs `contacts.write` and `contacts.delete` (owners and
   administrators, not while the company is suspended) and is audited with the counts.
@@ -916,6 +938,35 @@ Phase 5 rules (Public API, P5-08):
   naming its place in the list, and stops nothing (an integration test, run in CI), so a call never
   stops or reveals another company's runs beyond saying an id is not one of the company's. A call
   counts as one request against the key's limits.
+- Enrolling contacts in an automation through the API (ADR-403,
+  `POST /automations/{id}/enrollments`) needs `automations.start` (refused while the company is
+  suspended) and `contacts.read`, `campaigns.read` for a saved segment, the scopes that read a
+  segment's conditions on conversations (`conversations.read`) or store orders (`orders.read`), and
+  `messages.send_marketing` when the automation sends marketing templates, each also within the
+  plan's scopes (ADR-092). The scopes are checked before anything is read; the automation, the
+  segment and the inputs are then checked as a member's enrolment checks them (ADR-401), in the
+  key's company scope, so another company's automation or segment is not found (an integration
+  test, run in CI). The contacts are those of a tag and marketing consent (the Contacts page's
+  filters, written as `POST /contacts/search` writes them; any other condition is refused, and a tag
+  the app would not keep is refused rather than ignored, which would take every contact) or a
+  segment's members, at most 10,000, one running enrolment per automation, once per
+  `Idempotency-Key`; the call counts as one request. At least one condition is required, so a call
+  never takes every contact unasked, and an optional `expectedCount` refuses a snapshot of another
+  number (409). The Contacts page's own tag filter now fails closed on a tag the app would not keep
+  (matching nobody), for members' bulk edits, exports and enrolments too. The enrolment names its key
+  (`created_by_api_key_id`, a composite foreign key, exactly one of member and key by a check,
+  never updatable by the runtime role) and its jobs are signed with no user, so they act for the
+  company as live runs do. **Each batch re-checks the key as a fresh request would:** not revoked
+  (or gone), not expired by the database's clock, the plan still including the API and every scope
+  enrolling needs (`messages.send_marketing` for marketing); otherwise the enrolment ends as
+  `stopped` with `api_key_revoked`, `api_key_expired`, `api_not_in_plan`, `api_scope_missing` or
+  `marketing_not_allowed` and no further run starts. A suspended company's batch waits (the job is
+  deferred), as for a member's enrolment. The month's request count is not re-checked: batches are
+  not requests. Keys read (`automations.start`, also while suspended) and stop (`automations.start`,
+  active company) every enrolment of the company, members' included, by id and counts only: never
+  a member's name, the inputs or the contacts, and the segment's id only with `campaigns.read`; a stop is audited as the key and names it
+  (`stopped_by_api_key_id`). Members with `automations.read` see keys' enrolments on their pages,
+  naming the key, as run pages name a key.
 - Template sends to many numbers (ADR-163, `POST /messages/send-many`) need the scopes one send
   needs and check each number as one send does (erasure, the suppression list, consent for the
   template's category, the marketing frequency cap under the campaign runner's company lock), so a
@@ -1363,7 +1414,9 @@ Phase 5 rules (Public API, P5-08):
   granted only by members who hold it and refused while the company is suspended or restricted. The
   template is read and locked under row security in the key's company (another company's answers
   404); only a draft Meta never received is submitted, for a connected account, its content checked
-  again. The status change and the request to Meta are written in one transaction; the job is signed
+  again (an edit of a template Meta has, `POST /message-templates/{id}/edit`, ADR-404, needs the
+  same scope and is checked as the Templates page checks it). The status change and the request to
+  Meta are written in one transaction; the job is signed
   for the company with no member, and the worker checks its signature, kind and company before it
   calls Meta with the account's stored credential, which keys never see. The audit log names the key
   (unit tests; integration tests, run in CI only).
