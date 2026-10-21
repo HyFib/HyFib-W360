@@ -191,12 +191,18 @@ sweep is not running: nobody is emailed about late queues until it does, so star
   status are read from Meta about once a day: after the daily access check of its account finds
   Meta still admits the token, the same `whatsapp.access_check` job reads each active number whose
   facts were last read 20 hours ago or more, or never with the limit (stalest first, starting no
-  read after 40 seconds of the job; the rest are read first at the next check). Other checks of the
-  day (asked after a refused send, or every 30 minutes while a webhook subscription is not
-  confirmed) read nothing new within 20 hours.
+  read after 40 seconds of the job; the rest are read first at the next check). Every read records
+  `facts_attempted_at` (migration 0313), whatever its outcome, and a number is read again only 20
+  hours after it: the other checks of the day (asked after a refused send, or every 30 minutes
+  while a webhook subscription is not confirmed) read no number again, one whose reads fail
+  included, which is therefore tried once a day.
+- Facts are kept within their columns: a verified name over 200 characters is clipped, a status
+  over its column's length (32 or 64) is clipped, and a display number over 32 characters is not
+  kept (the stored one stays in a refresh; none at setup). A fact Meta leaves out of a refresh's
+  answer keeps its stored value; a missing messaging limit is shown as "not reported by Meta".
 - "Checked <time>" on Channels is the last read that completed. A failed read stores nothing, so
   the time stays; the worker logs `WhatsApp number’s facts could not be read from Meta` with the
-  number, the failure's kind and code, and the next check tries again. A failed read never marks
+  number, the failure's kind and code, and the first check 20 hours later tries again. A failed read never marks
   a number or account for reconnecting: only the access check decides that (ADR-137). A Checked
   time older than two days on an active number means its reads keep failing: read the worker log
   for that number (an unknown number at Meta answers code 100; an expired token makes the access
@@ -208,9 +214,14 @@ sweep is not running: nobody is emailed about late queues until it does, so star
   and is audited as `channel.messaging_limit_refused` (Graph's kind, status, code, subcode and
   clipped message) only when the number showed a limit or had never been asked; the same refusal
   on later days is not audited again. A successful refresh audits nothing.
-- `WhatsApp numbers’ facts could not be refreshed` (error) is a database or code error during the
-  refresh: the access check's outcome is already stored and the job is not retried for it; the
-  next check tries again. Investigate if it repeats.
+- `WhatsApp number’s facts could not be stored` (error, with the number and `err`): the read
+  succeeded but writing it failed (the database). The other numbers go on, the attempt is recorded
+  (`WhatsApp number’s facts refresh attempt could not be recorded` when that failed too) and the
+  number is tried again the next day. `err` is the serialized error without the query's values
+  (ADR-129).
+- `WhatsApp numbers’ facts could not be refreshed` (error, with `err`) is a database or code error
+  outside one number's write (loading the account): the access check's outcome is already stored and
+  the job is not retried for it; the next check tries again. Investigate if it repeats.
 
 ## 8. Data restoration
 

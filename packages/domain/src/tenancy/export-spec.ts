@@ -380,6 +380,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'default_team_id',
       'messaging_limit',
       'messaging_limit_checked_at',
+      'facts_attempted_at',
     ],
     omitted: { registration_pin_ciphertext: "The number's two-step verification PIN." },
   },

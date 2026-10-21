@@ -9,7 +9,7 @@ import {
   type TenantScope,
   type Tx,
 } from '@w360/db';
-import type { GraphClient, GraphResult } from './graph';
+import { GraphClient, PHONE_NUMBER_FACT_LIMITS, type GraphResult } from './graph';
 import { ManagementPauseSignal } from './management-pace';
 import {
   NUMBER_FACTS_BUDGET_MS,
@@ -19,6 +19,7 @@ import {
   numberFactsDue,
   readNumberFacts,
   refreshNumberFacts,
+  refreshedFactsColumns,
 } from './number-facts';
 
 type PhoneRead = Awaited<ReturnType<GraphClient['getPhoneNumber']>>;
@@ -138,14 +139,81 @@ describe('the shared read of a number’s facts (ADR-402)', () => {
   });
 });
 
+describe('a number’s facts bounded as they are parsed (ADR-402)', () => {
+  async function parsed(body: Record<string, unknown>) {
+    const graph = new GraphClient({
+      baseUrl: 'https://graph.test',
+      version: 'v26.0',
+      fetchImpl: () =>
+        Promise.resolve(
+          new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        ),
+    });
+    const result = await graph.getPhoneNumber('1234', 'token');
+    if (!result.ok) throw new Error('read failed');
+    return result.data;
+  }
+
+  it('keeps each fact within its column, and no cut phone number', async () => {
+    expect(PHONE_NUMBER_FACT_LIMITS).toEqual({
+      displayPhoneNumber: 32,
+      verifiedName: 200,
+      qualityRating: 32,
+      nameStatus: 64,
+      codeVerificationStatus: 64,
+    });
+    const long = await parsed({
+      display_phone_number: '+91 '.padEnd(33, '9'),
+      verified_name: 'N'.repeat(250),
+      quality_rating: 'Q'.repeat(40),
+      name_status: 'S'.repeat(70),
+      code_verification_status: 'C'.repeat(70),
+    });
+    expect(long).toEqual({
+      // A cut phone number would be another number: none is kept.
+      displayPhoneNumber: null,
+      verifiedName: 'N'.repeat(200),
+      qualityRating: 'Q'.repeat(32),
+      nameStatus: 'S'.repeat(64),
+      codeVerificationStatus: 'C'.repeat(64),
+      messagingLimit: null,
+    });
+    // An emoji is never split at the bound.
+    expect((await parsed({ verified_name: `${'N'.repeat(199)}😀` })).verifiedName).toBe(
+      'N'.repeat(199),
+    );
+    // At the bounds, as given; empty or not text, none.
+    const exact = await parsed({
+      display_phone_number: '9'.repeat(32),
+      verified_name: 'N'.repeat(200),
+      quality_rating: 'GREEN',
+      name_status: '',
+      code_verification_status: 7,
+    });
+    expect(exact).toMatchObject({
+      displayPhoneNumber: '9'.repeat(32),
+      verifiedName: 'N'.repeat(200),
+      qualityRating: 'GREEN',
+      nameStatus: null,
+      codeVerificationStatus: null,
+    });
+  });
+});
+
 describe('when a number’s facts are refreshed (ADR-402)', () => {
   const now = new Date('2026-10-16T10:00:00Z');
   const ago = (ms: number) => new Date(now.getTime() - ms);
 
   it('is due when never read, never asked for the limit, or read 20 hours ago or more', () => {
     expect(NUMBER_FACTS_REFRESH_AFTER_MS).toBe(20 * 3_600_000);
-    const due = (healthCheckedAt: Date | null, messagingLimitCheckedAt: Date | null) =>
-      numberFactsDue({ healthCheckedAt, messagingLimitCheckedAt }, now);
+    const due = (
+      healthCheckedAt: Date | null,
+      messagingLimitCheckedAt: Date | null,
+      factsAttemptedAt: Date | null = null,
+    ) => numberFactsDue({ healthCheckedAt, messagingLimitCheckedAt, factsAttemptedAt }, now);
     expect(due(null, null)).toBe(true);
     // Read before ADR-398: never asked for the limit.
     expect(due(ago(60_000), null)).toBe(true);
@@ -157,6 +225,47 @@ describe('when a number’s facts are refreshed (ADR-402)', () => {
     expect(due(ago(60_000), ago(60_000))).toBe(false);
     // A read time ahead of this clock is recent.
     expect(due(new Date(now.getTime() + 60_000), now)).toBe(false);
+    // Tried by a refresh within 20 hours (its reads failing): not tried again, however stale.
+    const stale = ago(3 * 86_400_000);
+    expect(due(stale, stale, ago(60_000))).toBe(false);
+    expect(due(null, null, ago(NUMBER_FACTS_REFRESH_AFTER_MS - 1))).toBe(false);
+    expect(due(stale, stale, ago(NUMBER_FACTS_REFRESH_AFTER_MS))).toBe(true);
+    // A successful refresh's attempt never makes a stale number due earlier, nor a fresh one due.
+    expect(due(ago(60_000), ago(60_000), ago(25 * 3_600_000))).toBe(false);
+  });
+
+  it('keeps a stored fact Meta left out, never an old limit, in a refresh only', () => {
+    const at = new Date('2026-10-16T10:00:00Z');
+    const tried = new Date('2026-10-16T09:59:59Z');
+    const partial = {
+      displayPhoneNumber: null,
+      verifiedName: null,
+      qualityRating: 'RED',
+      nameStatus: null,
+      codeVerificationStatus: null,
+      messagingLimit: null,
+    };
+    // Only what Meta gave, and the limit as not reported (ADR-398), are written.
+    expect(refreshedFactsColumns(partial, at, tried)).toEqual({
+      qualityRating: 'RED',
+      messagingLimit: null,
+      messagingLimitCheckedAt: at,
+      healthCheckedAt: at,
+      factsAttemptedAt: tried,
+    });
+    expect(refreshedFactsColumns({ ...facts, messagingLimit: 'TIER_2K' }, at, tried)).toEqual({
+      ...facts,
+      messagingLimit: 'TIER_2K',
+      messagingLimitCheckedAt: at,
+      healthCheckedAt: at,
+      factsAttemptedAt: tried,
+    });
+    // Setup still stores every fact as Meta gave it, nulls included.
+    expect(numberFactsColumns(partial, at)).toEqual({
+      ...partial,
+      messagingLimitCheckedAt: at,
+      healthCheckedAt: at,
+    });
   });
 
   it('audits a refused limit only when Channels changes to "not reported"', () => {
@@ -191,6 +300,7 @@ describe('refreshing an account’s numbers (ADR-402)', () => {
     phoneNumberId: `ph-${id}`,
     healthCheckedAt,
     messagingLimitCheckedAt: limitCheckedAt,
+    factsAttemptedAt: null,
   });
   /** The number's row as the write re-reads it, and its account's. */
   const current = (
@@ -198,6 +308,7 @@ describe('refreshing an account’s numbers (ADR-402)', () => {
       status: string;
       messagingLimit: string | null;
       limitCheckedAt: Date | null;
+      healthCheckedAt: Date | null;
     }> = {},
   ) => [
     [
@@ -206,6 +317,7 @@ describe('refreshing an account’s numbers (ADR-402)', () => {
         whatsappAccountId: ACCOUNT,
         messagingLimit: over.messagingLimit === undefined ? 'TIER_2K' : over.messagingLimit,
         messagingLimitCheckedAt: over.limitCheckedAt === undefined ? OLD : over.limitCheckedAt,
+        healthCheckedAt: over.healthCheckedAt === undefined ? OLD : over.healthCheckedAt,
       },
     ],
     [{ status: 'connected' }],
@@ -215,8 +327,15 @@ describe('refreshing an account’s numbers (ADR-402)', () => {
    * Runs the refresh against a database whose selects answer `selects` in order and a Graph
    * answering `answers` in order, and gives what was read and written.
    */
-  async function run(opts: { selects: unknown[][]; answers?: PhoneRead[]; clockStep?: number }) {
+  async function run(opts: {
+    selects: unknown[][];
+    answers?: PhoneRead[];
+    clockStep?: number;
+    /** Writes that throw, by their order among the updates (0 for the first). */
+    failingUpdates?: number[];
+  }) {
     const selects = [...opts.selects];
+    let updateCount = 0;
     const updates: { table: unknown; values: Record<string, unknown> }[] = [];
     const audits: Record<string, unknown>[] = [];
     let events = 0;
@@ -232,6 +351,11 @@ describe('refreshing an account’s numbers (ADR-402)', () => {
       select: () => query(),
       update: (table: unknown) => ({
         set: (values: Record<string, unknown>) => {
+          const index = updateCount;
+          updateCount += 1;
+          if (opts.failingUpdates?.includes(index)) {
+            throw new Error(`write ${index} failed`);
+          }
           updates.push({ table, values });
           return {
             where: () =>
@@ -296,6 +420,7 @@ describe('refreshing an account’s numbers (ADR-402)', () => {
         messagingLimit: 'TIER_10K',
         messagingLimitCheckedAt: NOW,
         healthCheckedAt: NOW,
+        factsAttemptedAt: NOW,
       });
       expect(u.values).not.toHaveProperty('status');
     }
@@ -353,10 +478,10 @@ describe('refreshing an account’s numbers (ADR-402)', () => {
       ],
       left: 0,
     });
-    // Only b's facts are written; nothing touches an account or a status.
-    expect(r.updates).toHaveLength(1);
-    expect(r.updates[0]!.table).toBe(channelAccounts);
-    expect(r.updates.some((u) => u.table === whatsappAccounts)).toBe(false);
+    // a's attempt, then b's facts; nothing touches an account or a status.
+    expect(r.updates.map((u) => u.table)).toEqual([channelAccounts, channelAccounts]);
+    expect(r.updates[0]!.values).toEqual({ factsAttemptedAt: NOW });
+    expect(r.updates[1]!.values).toMatchObject({ qualityRating: 'YELLOW', factsAttemptedAt: NOW });
     expect(r.audits).toEqual([]);
   });
 
@@ -474,5 +599,84 @@ describe('refreshing an account’s numbers (ADR-402)', () => {
       { channelAccountId: 'a', state: 'refreshed', limitRefused: true },
     ]);
     expect(again.audits).toEqual([]);
+  });
+
+  it('goes on with the other numbers when one number’s read cannot be stored, and records its attempt', async () => {
+    const r = await run({
+      selects: [[connected], [number('a', OLD), number('b', OLD)], ...current(), ...current()],
+      answers: [withLimit, withLimit],
+      // a's facts (a CHECK violation, say): its attempt is then recorded, and b is stored.
+      failingUpdates: [0],
+    });
+    expect(r.result.outcome).toBe('done');
+    expect(r.result.left).toBe(0);
+    expect(r.result.numbers).toEqual([
+      { channelAccountId: 'a', state: 'store_failed', error: new Error('write 0 failed') },
+      { channelAccountId: 'b', state: 'refreshed', limitRefused: false },
+    ]);
+    expect(r.updates.map((u) => u.values)).toEqual([
+      { factsAttemptedAt: NOW },
+      expect.objectContaining({ qualityRating: 'YELLOW', factsAttemptedAt: NOW }),
+    ]);
+    // Recording the attempt failing too is reported with it, and the next number still runs.
+    const both = await run({
+      selects: [[connected], [number('a', OLD), number('b', OLD)], ...current(), ...current()],
+      answers: [withLimit, withLimit],
+      failingUpdates: [0, 1],
+    });
+    expect(both.result.numbers).toEqual([
+      {
+        channelAccountId: 'a',
+        state: 'store_failed',
+        error: new Error('write 0 failed'),
+        attemptError: new Error('write 1 failed'),
+      },
+      { channelAccountId: 'b', state: 'refreshed', limitRefused: false },
+    ]);
+  });
+
+  it('keeps a read setup made after this read started', async () => {
+    const r = await run({
+      selects: [
+        [connected],
+        [number('a', OLD)],
+        ...current({ healthCheckedAt: new Date(NOW.getTime() + 1_000) }),
+      ],
+      answers: [withLimit],
+    });
+    expect(r.result.numbers).toEqual([{ channelAccountId: 'a', state: 'skipped' }]);
+    expect(r.updates).toEqual([]);
+    // A read stored at the same instant as this one started is not newer.
+    const same = await run({
+      selects: [[connected], [number('a', OLD)], ...current({ healthCheckedAt: NOW })],
+      answers: [withLimit],
+    });
+    expect(same.result.numbers[0]).toMatchObject({ state: 'refreshed' });
+  });
+
+  it('keeps the stored facts Meta left out of its answer', async () => {
+    const r = await run({
+      selects: [[connected], [number('a', OLD)], ...current()],
+      answers: [
+        {
+          ok: true,
+          data: {
+            displayPhoneNumber: null,
+            verifiedName: null,
+            qualityRating: 'RED',
+            nameStatus: null,
+            codeVerificationStatus: null,
+            messagingLimit: 'TIER_250',
+          },
+        },
+      ],
+    });
+    expect(r.updates[0]!.values).toEqual({
+      qualityRating: 'RED',
+      messagingLimit: 'TIER_250',
+      messagingLimitCheckedAt: NOW,
+      healthCheckedAt: NOW,
+      factsAttemptedAt: NOW,
+    });
   });
 });

@@ -17016,38 +17016,67 @@ Decision:
   `health_checked_at` and `messaging_limit_checked_at`; never a status). Setup now calls both, with
   unchanged behaviour (ADR-398's unit tests pass unchanged). Both reads go through the job's
   `pacedManagementCalls`, so the field-less read is never made after a pausing response (ADR-399).
+- **Facts bounded as they are parsed (`GraphClient.getPhoneNumber`, `PHONE_NUMBER_FACT_LIMITS`):**
+  each fact is kept within its column's check (0003), as HyFib bounds other text from Meta
+  (ADR-131): the verified name is clipped to 200 characters and the quality rating, name status
+  and code verification status to 32, 64 and 64 (a clipped status is still Meta's text, shown as
+  given); a display number longer than 32 characters is not kept at all (null), since a cut phone
+  number would show another number. An empty value is none. Setup gets the same protection: where
+  an over-long value used to fail its health step on the column's check, setup now stores the
+  bounded value (or no display number) and completes.
 - **Scheduling: piggy-backed on the daily access check, no new due list.** The worker's access-check
   handler now calls `checkAccessAndRefreshNumbers`: the access check as before, then, only when its
-  outcome is `healthy`, `refreshNumberFacts` for that account in the same job. No migration, no
-  definer function, no new queue: the access check's cadence (daily per connected account of an
+  outcome is `healthy`, `refreshNumberFacts` for that account in the same job. No definer function
+  and no new queue: the access check's cadence (daily per connected account of an
   active company), its due list's exclusions (paused accounts, accounts not connected) and its
   job's signed-envelope authorization apply. A number is refreshed when it is `active`, its account
   is `connected` with a token, and its facts were last read 20 hours ago or more, or never with the
   limit (`numberFactsDue`; a number set up before ADR-398 is read at the next check however recent
-  its health). 20 hours, below the check's 24, makes every daily check refresh, while the other
-  checks of the day (asked after a refused send, or every 30 minutes while a webhook subscription
-  is unconfirmed) read nothing new. Numbers are read stalest first, and no read starts once the job
+  its health), and no refresh read was made for it in the last 20 hours, whatever its outcome
+  (`facts_attempted_at`, below). 20 hours, below the check's 24, makes every daily check refresh,
+  while the other checks of the day (asked after a refused send, or every 30 minutes while a
+  webhook subscription is unconfirmed) read nothing again, a number whose reads fail included. Numbers are read stalest first, and no read starts once the job
   has run 40 seconds (`NUMBER_FACTS_BUDGET_MS`): the job expires after 120 seconds and a number's
   two reads may take 60 at the worker's 30-second Graph timeout; numbers left are the stalest at
   the next check. A separate cadence (its own due list and queue) was not needed: the account-level
   check already runs daily with the token in hand, and a separate job would repeat its
   authorization and pause handling for the same calls.
-- **Failures are the number's alone.** A failed read stores nothing and never changes the number's
+- **Failures are the number's alone.** A failed read stores nothing but its attempt and never changes the number's
   or the account's status, whatever its kind: an `auth` refusal of a number's read does not mark
   anything for reconnecting, since losing access stays the access check's decision under ADR-137's
   rules (which just admitted the token). The access check's outcome is stored before the refresh
   starts and is returned unchanged. Each failure is logged with the number, kind and code, and the
-  number, still due, is read again at the next check (normally the next day; a retryable failure is
-  not retried within the job, since the access check's job is not re-run for it). An error the
-  refresh throws (the database) is returned as `numbersError` and logged as an error without
+  number is read again at the first check 20 hours after the attempt (normally the next day; a
+  retryable failure is not retried within the job, since the access check's job is not re-run for
+  it). A number whose read cannot be stored (the write throws, for example on the database) is
+  that number's `store_failed` result: its attempt is still recorded in its own transaction, the
+  error is logged at error level, and the refresh goes on with the next number, so one number can
+  never hold back the account's others. An error the refresh throws outside a number's store (the
+  database while loading the account) is returned as `numbersError` and logged as an error without
   failing the job: a pg-boss retry would ask Meta for the access again, and the next check retries.
-  Before writing, the number is re-read under a row lock: one no longer active, moved, or whose
-  account is no longer connected is skipped.
-- **Nothing new is recorded for failures.** No refresh-error or attempt column: "Checked <time>"
-  already shows the last read that completed, which is what members need to judge how fresh the
-  quality and limit are, and an error code would add a migration and wording for an operator's
-  concern, which the worker log covers (RUNBOOKS: a Checked time older than two days on an active
-  number means its reads keep failing).
+  Errors are logged through the logger's `err` serializer (ADR-129), never their message as text: a
+  failed query's message repeats its parameters, here a number's name and phone number. Before
+  writing, the number is re-read under a row lock: one no longer active, moved, or whose account is
+  no longer connected is skipped, and so is one whose health setup read after this read started (a
+  setup finishing during the refresh keeps its newer read).
+- **The attempt is recorded, not the error (migration 0313):** `channel_accounts.facts_attempted_at`
+  is the time of the last refresh read made for the number (when it started), whatever its outcome,
+  written with the facts or alone after a failure; a pause met before or between a number's two
+  reads records nothing.
+  Without it a number Meta no longer has would be read twice at every access check of the day
+  (every 30 minutes while a webhook subscription is unconfirmed, about 96 reads a day), spending
+  the account's management allowance. No error column: "Checked <time>" already shows the last
+  read that completed, which is what members need to judge how fresh the quality and limit are,
+  and the worker log covers the error (RUNBOOKS: a Checked time older than two days on an active
+  number means its reads keep failing). The column: nullable, no default (nothing rewritten),
+  `UPDATE` for the runtime role only (which already selects the table), exported with the number
+  and deleted with it (whole rows). Expand only.
+- **A partial answer keeps what was stored (`refreshedFactsColumns`, the refresh only):** a fact
+  Meta leaves out, or gives in a form not kept (an over-long display number), keeps the stored
+  value, so a partial answer does not wipe a number's name or quality rating each day. The messaging
+  limit is the exception: an answer without it is "not reported by Meta" as ADR-398 defines it, and
+  keeping an older limit beside the new check time would show a limit Meta did not report. Setup
+  stores every fact as Meta gave it, as before.
 - **Pauses (ADR-399):** an account paused when the refresh starts is asked nothing (`paused`, the
   due numbers counted as left); a pause set by any response of the job, the access check's own
   included, stops the refresh before its next call, a number already read is stored, and a limit
@@ -17073,11 +17102,24 @@ Decision:
 - **Tenant isolation:** every read and write runs in `db.run(scope, …)` with the scope the signed
   access-check job was authorized for, names the company in each query besides row security, and
   reads only numbers of that account; the runtime role already selects and updates these columns
-  (0003, 0309). No grant changes.
+  (0003, 0309), and 0313 grants it `UPDATE` on the new one only.
 
 Known limits: the refresh is as fresh as the daily check, so a quality drop Meta signals by webhook
 shows up to a day later; an account whose check keeps failing (`not_checked`) or that stays paused
-gets no refresh until it succeeds; a quality rating or name longer than the columns' checks (32,
-200 characters) fails the write as it does at setup (not seen in research). Not built: an
-on-demand "refresh now", processing `phone_number_quality_update`, reading the limit from the WABA,
-and any verification against Meta (the Graph stand-in only).
+gets no refresh until it succeeds; a number whose read failed waits 20 hours, even should Meta
+answer again sooner. Not built: an on-demand "refresh now", processing
+`phone_number_quality_update`, reading the limit from the WABA, and any verification against Meta
+(the Graph stand-in only).
+
+Review (before merge): an independent review found no High issue. It found that a number whose
+read could not be stored (an over-long name failing the column's check) threw out of the loop and,
+read first every day as the stalest, held back the account's other numbers for good (fixed by the
+bounded parse and the per-number `store_failed` result above); that the job's two central claims,
+no refresh after any outcome but `healthy` and a refresh's error returned with the stored outcome,
+had no test (unit tests now stub the access check); that the error's message was logged as text,
+which for a failed query repeats its values (now through the `err` serializer); that a number whose
+reads fail was read again at every check of the day (fixed by `facts_attempted_at`, migration
+0313); that an e2e step's "Checked" assertion passed because of the fixture, not the refresh
+(dropped); that a partial answer wiped stored facts daily (kept in the refresh); and that a setup
+finishing during a refresh's read could be overwritten by an older read (now skipped). All were
+fixed.

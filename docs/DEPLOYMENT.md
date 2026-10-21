@@ -1872,6 +1872,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    written since 0311 was checked when written, and the rows before it have no enrolment, so it
    cannot fail on them. It runs in the same deployment, after 0311.
 
+   Migration 0313 (ADR-402) adds `app.channel_accounts.facts_attempted_at` (nullable, no default),
+   with `UPDATE` on it for the runtime role only. Expand only and backward compatible: nothing is
+   rewritten, no function or policy changes, and web servers and workers of the release before
+   never name the column. Roll out workers before web as usual. From the first worker of this
+   release, each healthy daily access check also reads the account's active numbers whose facts
+   are 20 hours old or more (one or two `GET /{phone-number-id}` each, paced, at most 40 seconds a
+   job), so the first day reads every active number once, numbers active before 0309 included;
+   expect that many more Graph requests that day. Rolling an image back leaves the column in place
+   and unused, and an older worker stops the refresh.
+
    Migration 0314 (ADR-401) builds `automation_runs_enrollment_idx` on
    `app.automation_runs (tenant_id, enrollment_id) WHERE enrollment_id IS NOT NULL` with
    `CREATE INDEX CONCURRENTLY` (`-- migrate:no-transaction`, as 0053), after 0311 and 0312, so runs

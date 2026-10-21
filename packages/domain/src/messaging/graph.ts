@@ -164,6 +164,25 @@ const num = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) ? value : null;
 
 /** The fields of a phone number its health read asks for, besides its messaging limit. */
+/**
+ * The most characters of a number's facts HyFib keeps: the columns' checks (0003). A longer
+ * display number is not kept at all (null), since a cut phone number would show another number;
+ * the name and the three statuses are clipped, as HyFib clips other text from Meta (ADR-131), so
+ * an over-long value can never fail the write that stores it (ADR-402).
+ */
+export const PHONE_NUMBER_FACT_LIMITS = {
+  displayPhoneNumber: 32,
+  verifiedName: 200,
+  qualityRating: 32,
+  nameStatus: 64,
+  codeVerificationStatus: 64,
+} as const;
+
+/** A fact Meta gave as text, clipped to `max` characters; null when absent, empty or not text. */
+function boundedFact(value: unknown, max: number): string | null {
+  return typeof value === 'string' && value.length > 0 ? clipText(value, max) : null;
+}
+
 const PHONE_NUMBER_FIELDS =
   'display_phone_number,verified_name,quality_rating,name_status,code_verification_status';
 
@@ -769,12 +788,18 @@ export class GraphClient {
       },
       (json) => ({
         displayPhoneNumber:
-          typeof json.display_phone_number === 'string' ? json.display_phone_number : null,
-        verifiedName: typeof json.verified_name === 'string' ? json.verified_name : null,
-        qualityRating: typeof json.quality_rating === 'string' ? json.quality_rating : null,
-        nameStatus: typeof json.name_status === 'string' ? json.name_status : null,
-        codeVerificationStatus:
-          typeof json.code_verification_status === 'string' ? json.code_verification_status : null,
+          typeof json.display_phone_number === 'string' &&
+          json.display_phone_number.length > 0 &&
+          json.display_phone_number.length <= PHONE_NUMBER_FACT_LIMITS.displayPhoneNumber
+            ? json.display_phone_number
+            : null,
+        verifiedName: boundedFact(json.verified_name, PHONE_NUMBER_FACT_LIMITS.verifiedName),
+        qualityRating: boundedFact(json.quality_rating, PHONE_NUMBER_FACT_LIMITS.qualityRating),
+        nameStatus: boundedFact(json.name_status, PHONE_NUMBER_FACT_LIMITS.nameStatus),
+        codeVerificationStatus: boundedFact(
+          json.code_verification_status,
+          PHONE_NUMBER_FACT_LIMITS.codeVerificationStatus,
+        ),
         messagingLimit: withLimit
           ? parseMessagingLimit(json.whatsapp_business_manager_messaging_limit)
           : null,

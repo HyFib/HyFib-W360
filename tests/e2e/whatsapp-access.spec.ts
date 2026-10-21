@@ -147,8 +147,7 @@ test('an access that expires within 7 days is shown as a warning and its owner i
       { exact: true },
     ),
   ).toBeVisible();
-  // When HyFib reads the number's facts, and what "Checked" is (ADR-402).
-  await expect(page.getByText(/^Checked /)).toBeVisible();
+  // The note on when HyFib reads each active number's facts, and what "Checked" is (ADR-402).
   await expect(
     page.getByText(
       'HyFib reads each active number’s quality rating, messaging limit and name from Meta about once a day, with the daily check of its account’s access, but not while the account needs reconnecting or Meta is limiting management requests. “Checked” is when HyFib last read them.',

@@ -106,6 +106,11 @@ export const channelAccounts = appSchema.table('channel_accounts', {
    */
   messagingLimit: text('messaging_limit'),
   messagingLimitCheckedAt: tz('messaging_limit_checked_at'),
+  /**
+   * When the daily refresh last tried to read the number's facts, whatever the outcome: a number
+   * is tried again only 20 hours after it (ADR-402, migration 0313).
+   */
+  factsAttemptedAt: tz('facts_attempted_at'),
 });
 
 export const channelOnboardingSessions = appSchema.table('channel_onboarding_sessions', {

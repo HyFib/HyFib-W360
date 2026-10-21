@@ -106,7 +106,9 @@ async function age(n: Company) {
   await fx.query(
     `UPDATE app.channel_accounts
         SET health_checked_at = now() - interval '25 hours',
-            messaging_limit_checked_at = now() - interval '25 hours'
+            messaging_limit_checked_at = now() - interval '25 hours',
+            facts_attempted_at = CASE WHEN facts_attempted_at IS NOT NULL
+                                      THEN now() - interval '25 hours' END
       WHERE id = $1`,
     [n.channelAccountId],
   );
@@ -350,9 +352,20 @@ describe('the daily refresh of each active number’s facts (ADR-402)', () => {
     expect(account!.status).toBe('connected');
     expect(account!.token_checked_at).not.toBeNull();
     expect(await audits(c, 'channel.messaging_limit_refused')).toEqual([]);
+    // The attempt is recorded: the other checks of the day do not read the failing number again.
+    const [attempt] = await fx.query<{ tried: boolean }>(
+      `SELECT facts_attempted_at > now() - interval '1 minute' AS tried
+         FROM app.channel_accounts WHERE id = $1`,
+      [c.channelAccountId],
+    );
+    expect(attempt).toEqual({ tried: true });
+    const sameDay = fx.standIn.state.requests.length;
+    expect((await run(c)).numbers).toEqual({ outcome: 'done', numbers: [], left: 0 });
+    expect(reads(c, sameDay)).toEqual([]);
 
-    // A read Meta refuses for now (a rate limit without a pause): no second read, still due, and
-    // read again at the next check.
+    // A read Meta refuses for now (a rate limit without a pause), at the next day's check: no
+    // second read, and read again the day after.
+    await age(c);
     fx.standIn.state.phoneNumberErrors.set(c.phoneNumberId, {
       status: 400,
       code: 80007,
@@ -368,9 +381,32 @@ describe('the daily refresh of each active number’s facts (ADR-402)', () => {
     ]);
     expect(reads(c, limited)).toEqual([WITH_LIMIT]);
     fx.standIn.state.phoneNumberErrors.clear();
+    await age(c);
     expect((await run(c)).numbers?.numbers).toEqual([
       { channelAccountId: c.channelAccountId, state: 'refreshed', limitRefused: false },
     ]);
+  });
+
+  it('stores an over-long name clipped to its column, and a number’s facts never block another’s', async () => {
+    const c = await fx.company();
+    const second = await fx.addNumber(c);
+    known(c, 'YELLOW', 'TIER_10K');
+    known(second, 'GREEN', 'TIER_2K');
+    // Meta gives the first number a name and a display number longer than their columns hold.
+    fx.standIn.state.numbers.set(c.phoneNumberId, {
+      display_phone_number: '+91 '.padEnd(40, '9'),
+      verified_name: 'N'.repeat(250),
+    });
+    const result = await run(c);
+    expect(result.numbersError).toBeUndefined();
+    expect(result.numbers?.numbers.every((n) => n.state === 'refreshed')).toBe(true);
+    expect(await numberRow(c)).toMatchObject({
+      verified_name: 'N'.repeat(200),
+      // A cut phone number would be another number: the stored one is kept.
+      display_phone_number: '+91 90000 00000',
+      quality_rating: 'YELLOW',
+    });
+    expect(await numberRow(second)).toMatchObject({ quality_rating: 'GREEN' });
   });
 
   it('asks Graph nothing for the numbers of a paused account', async () => {

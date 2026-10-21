@@ -7,6 +7,7 @@ import {
   whatsappAccounts,
   type Database,
   type TenantScope,
+  type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
 import { checkWhatsAppAccess, graphFailureText, type AccessCheckDeps } from './access';
@@ -97,10 +98,40 @@ export const NUMBER_FACTS_NOTE =
   'HyFib reads each active number’s quality rating, messaging limit and name from Meta about once a day, with the daily check of its account’s access, but not while the account needs reconnecting or Meta is limiting management requests. “Checked” is when HyFib last read them.';
 
 /**
- * A number's facts are refreshed when they were last read this long ago or more. Shorter than the
- * daily access check's 24 hours, so every daily check refreshes them, and long enough that the
- * other checks (asked after a refused send, or every 30 minutes while a webhook subscription is not
- * confirmed) do not read them again.
+ * What a refresh stores (ADR-402): as `numberFactsColumns`, except that a fact Meta left out (or
+ * gave in a form HyFib does not keep, such as a display number longer than its column) keeps the
+ * value stored before, so a partial answer does not wipe the number's name or quality rating each
+ * day. The messaging limit is the exception: a read that asked for it and got none is "not reported
+ * by Meta", as ADR-398 defines it, and keeping an older limit beside the new check time would show
+ * a limit Meta did not report. `attemptedAt` is when the read started. Setup stores
+ * `numberFactsColumns` unchanged.
+ */
+export function refreshedFactsColumns(facts: PhoneNumberFacts, checkedAt: Date, attemptedAt: Date) {
+  const columns: Partial<typeof channelAccounts.$inferInsert> = {
+    messagingLimit: facts.messagingLimit,
+    messagingLimitCheckedAt: checkedAt,
+    healthCheckedAt: checkedAt,
+    factsAttemptedAt: attemptedAt,
+  };
+  for (const key of [
+    'displayPhoneNumber',
+    'verifiedName',
+    'qualityRating',
+    'nameStatus',
+    'codeVerificationStatus',
+  ] as const) {
+    const fact = facts[key];
+    if (fact !== null) columns[key] = fact;
+  }
+  return columns;
+}
+
+/**
+ * A number's facts are refreshed when they were last read this long ago or more, and a number is
+ * tried again this long after its last refresh read, whatever its outcome. Shorter than the daily
+ * access check's 24 hours, so every daily check refreshes them, and long enough that the other
+ * checks (asked after a refused send, or every 30 minutes while a webhook subscription is not
+ * confirmed) neither read them again nor retry a number whose reads fail.
  */
 export const NUMBER_FACTS_REFRESH_AFTER_MS = 20 * 60 * 60_000;
 
@@ -113,14 +144,21 @@ export const NUMBER_FACTS_BUDGET_MS = 40_000;
 
 /**
  * Whether an active number's facts are due a refresh: never read, never asked for the limit (a
- * number set up before ADR-398), or last read `NUMBER_FACTS_REFRESH_AFTER_MS` ago or more.
+ * number set up before ADR-398), or last read `NUMBER_FACTS_REFRESH_AFTER_MS` ago or more; and
+ * not tried by a refresh within that time (a number whose reads fail is tried once a window).
  */
 export function numberFactsDue(
-  number: { healthCheckedAt: Date | null; messagingLimitCheckedAt: Date | null },
+  number: {
+    healthCheckedAt: Date | null;
+    messagingLimitCheckedAt: Date | null;
+    factsAttemptedAt: Date | null;
+  },
   now: Date,
 ): boolean {
-  if (!number.healthCheckedAt || !number.messagingLimitCheckedAt) return true;
-  return now.getTime() - number.healthCheckedAt.getTime() >= NUMBER_FACTS_REFRESH_AFTER_MS;
+  const old = (at: Date | null) =>
+    at === null || now.getTime() - at.getTime() >= NUMBER_FACTS_REFRESH_AFTER_MS;
+  const stale = number.messagingLimitCheckedAt === null || old(number.healthCheckedAt);
+  return stale && old(number.factsAttemptedAt);
 }
 
 /**
@@ -144,12 +182,16 @@ export interface NumberFactsDeps {
 
 /**
  * One number's refresh: `refreshed` (its facts stored, `limitRefused` when without the limit after
- * a refusal); `failed` (nothing stored, the number and its account unchanged); `skipped` (the
- * number or its account changed during the read, nothing stored).
+ * a refusal); `failed` (Meta's answer was a failure: nothing stored but the attempt, the number and
+ * its account unchanged); `store_failed` (storing the read threw, for example the database:
+ * nothing stored, the error kept for the worker's log, and `attemptError` when recording the
+ * attempt threw too); `skipped` (the number or its account changed during the read, or setup read
+ * it more recently: nothing stored).
  */
 export type NumberRefreshResult =
   | { channelAccountId: string; state: 'refreshed'; limitRefused: boolean }
   | { channelAccountId: string; state: 'failed'; kind: GraphFailureKind; error: string }
+  | { channelAccountId: string; state: 'store_failed'; error: unknown; attemptError?: unknown }
   | { channelAccountId: string; state: 'skipped' };
 
 /**
@@ -168,9 +210,10 @@ export interface NumberFactsRefresh {
 /**
  * Refreshes the facts of an account's active numbers that are due (ADR-402), in the company's scope,
  * stalest first. A failure is the number's result only: it never changes the number's or the
- * account's status (losing access stays the access check's decision, ADR-137) and stores nothing,
- * so "Checked" keeps the time of the last read that completed. `startedAt` is when the job started
- * (for the time budget).
+ * account's status (losing access stays the access check's decision, ADR-137) and stores nothing
+ * but the attempt, so "Checked" keeps the time of the last read that completed; a number whose
+ * read could not be stored does not stop the others. `startedAt` is when the job started (for the
+ * time budget).
  */
 export async function refreshNumberFacts(
   deps: NumberFactsDeps,
@@ -200,6 +243,7 @@ export async function refreshNumberFacts(
           phoneNumberId: channelAccounts.phoneNumberId,
           healthCheckedAt: channelAccounts.healthCheckedAt,
           messagingLimitCheckedAt: channelAccounts.messagingLimitCheckedAt,
+          factsAttemptedAt: channelAccounts.factsAttemptedAt,
         })
         .from(channelAccounts)
         .where(
@@ -236,8 +280,27 @@ export async function refreshNumberFacts(
   const ran = await untilPaused(async () => {
     for (const number of due) {
       if (deps.clock.now().getTime() - startedAt.getTime() >= NUMBER_FACTS_BUDGET_MS) return;
+      const readAt = deps.clock.now();
+      // A pause stops the loop here (`ManagementPauseSignal`), before anything is recorded.
       const read = await readNumberFacts(deps.graph, call, number.phoneNumberId, token);
-      numbers.push(await storeNumberFacts(deps, scope, whatsappAccountId, number.id, read));
+      const target = { scope, whatsappAccountId, channelAccountId: number.id, readAt };
+      try {
+        numbers.push(await storeNumberFacts(deps, target, read));
+      } catch (error) {
+        // One number that cannot be stored never stops the others; its attempt is still recorded,
+        // so it is not read first again at every check.
+        const failed: NumberRefreshResult = {
+          channelAccountId: number.id,
+          state: 'store_failed',
+          error,
+        };
+        try {
+          await deps.db.run(scope, (tx) => recordAttempt(tx, target));
+        } catch (attemptError) {
+          failed.attemptError = attemptError;
+        }
+        numbers.push(failed);
+      }
     }
   });
   const left = due.length - numbers.length;
@@ -245,15 +308,41 @@ export async function refreshNumberFacts(
   return { outcome: 'done', numbers, left };
 }
 
-/** Stores one number's read, when the number is still active on the still connected account. */
+interface RefreshTarget {
+  scope: TenantScope;
+  whatsappAccountId: string;
+  channelAccountId: string;
+  /** When the number's read started. */
+  readAt: Date;
+}
+
+/** Records a refresh read of a number that is still active, whatever its outcome. */
+async function recordAttempt(tx: Tx, target: RefreshTarget): Promise<void> {
+  await tx
+    .update(channelAccounts)
+    .set({ factsAttemptedAt: target.readAt })
+    .where(
+      and(
+        eq(channelAccounts.tenantId, target.scope.tenantId),
+        eq(channelAccounts.id, target.channelAccountId),
+        eq(channelAccounts.status, 'active'),
+      ),
+    );
+}
+
+/**
+ * Stores one number's read, when the number is still active on the still connected account and
+ * setup has not read it since this read started (a setup finishing meanwhile keeps its newer read).
+ * A failed read stores only the attempt.
+ */
 async function storeNumberFacts(
   deps: NumberFactsDeps,
-  scope: TenantScope,
-  whatsappAccountId: string,
-  channelAccountId: string,
+  target: RefreshTarget,
   read: NumberFactsRead,
 ): Promise<NumberRefreshResult> {
+  const { scope, whatsappAccountId, channelAccountId, readAt } = target;
   if (!read.ok) {
+    await deps.db.run(scope, (tx) => recordAttempt(tx, target));
     return {
       channelAccountId,
       state: 'failed',
@@ -275,6 +364,7 @@ async function storeNumberFacts(
         whatsappAccountId: channelAccounts.whatsappAccountId,
         messagingLimit: channelAccounts.messagingLimit,
         messagingLimitCheckedAt: channelAccounts.messagingLimitCheckedAt,
+        healthCheckedAt: channelAccounts.healthCheckedAt,
       })
       .from(channelAccounts)
       .where(where)
@@ -282,7 +372,8 @@ async function storeNumberFacts(
     if (
       !current ||
       current.status !== 'active' ||
-      current.whatsappAccountId !== whatsappAccountId
+      current.whatsappAccountId !== whatsappAccountId ||
+      (current.healthCheckedAt !== null && current.healthCheckedAt > readAt)
     ) {
       return { channelAccountId, state: 'skipped' as const };
     }
@@ -293,7 +384,10 @@ async function storeNumberFacts(
         and(eq(whatsappAccounts.tenantId, tenantId), eq(whatsappAccounts.id, whatsappAccountId)),
       );
     if (account?.status !== 'connected') return { channelAccountId, state: 'skipped' as const };
-    await tx.update(channelAccounts).set(numberFactsColumns(read.facts, checkedAt)).where(where);
+    await tx
+      .update(channelAccounts)
+      .set(refreshedFactsColumns(read.facts, checkedAt, readAt))
+      .where(where);
     if (read.limitRefusal && limitRefusalAuditDue(current)) {
       // Channels now says "not reported by Meta"; the audit says why, as ADR-398's does.
       await recordSystemAudit(tx, tenantId, {
