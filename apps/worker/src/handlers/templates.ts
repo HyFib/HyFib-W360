@@ -4,6 +4,7 @@ import type { TenantScope } from '@w360/db';
 import {
   authorizeJob,
   findTemplateSyncsDue,
+  isManagementPaused,
   processTemplateDelete,
   processTemplateSubmit,
   syncTemplates,
@@ -13,6 +14,7 @@ import {
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
+import { deferPausedWork } from './management-deferral';
 
 type TemplateKind = 'template.submit' | 'template.delete' | 'template.sync';
 
@@ -40,6 +42,18 @@ function templateHandler(
     if (!rt.graph) throw new RetryableJobError('Meta is not configured');
     const deps = { db: rt.db, keyring: rt.keyring, graph: rt.graph, clock: rt.clock };
     const outcome = await run(deps, auth.scope, auth.envelope.ref);
+    if (isManagementPaused(outcome)) {
+      // Meta throttles the account's management calls (ADR-399): nothing was sent and nothing failed.
+      await deferPausedWork(rt, {
+        jobId: job.id,
+        kind: kind,
+        tenantId: auth.scope.tenantId,
+        actorUserId: auth.envelope.actorUserId,
+        ref: auth.envelope.ref,
+        pausedUntil: outcome.paused,
+      });
+      return;
+    }
     rt.logger.info({ jobId: job.id, kind, ref: auth.envelope.ref, outcome }, 'template job');
     if (outcome === 'retry')
       throw new RetryableJobError(`${kind}: provider temporarily unavailable`);

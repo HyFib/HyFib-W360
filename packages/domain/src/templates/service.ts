@@ -26,6 +26,14 @@ import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import type { GraphClient, RemoteTemplate } from '../messaging/graph';
 import { requestAccessCheck } from '../messaging/access';
+import {
+  activeManagementPause,
+  assertManagementOpen,
+  managementResumeAt,
+  noteManagementUsage,
+  refusedForPause,
+  type ManagementPaused,
+} from '../messaging/management-pace';
 import { credentialAad } from '../messaging/credentials';
 import { parseInput } from '../validation';
 import {
@@ -323,6 +331,21 @@ async function enqueueTemplateJob(
   if (priority !== undefined) await deps.jobs.raisePriority(tx, queue, singletonKey, priority);
 }
 
+/**
+ * Refuses a member's or key's management action on the account while Meta throttles its management
+ * calls (ADR-399): a deletion at Meta is then not queued. `timeZone` as for `writeSubmitTemplate`.
+ */
+export async function assertTemplateAccountOpen(
+  tx: Tx,
+  tenantId: string,
+  whatsappAccountId: string,
+  at: Date,
+  timeZone = 'UTC',
+): Promise<void> {
+  const waba = await templateAccount(tx, tenantId, whatsappAccountId);
+  assertManagementOpen(waba.managementPausedUntil, at, timeZone);
+}
+
 /** The company's WhatsApp Business account (404 for none). */
 async function templateAccount(tx: Tx, tenantId: string, whatsappAccountId: string) {
   const [waba] = await tx
@@ -330,6 +353,7 @@ async function templateAccount(tx: Tx, tenantId: string, whatsappAccountId: stri
       id: whatsappAccounts.id,
       status: whatsappAccounts.status,
       name: whatsappAccounts.name,
+      managementPausedUntil: whatsappAccounts.managementPausedUntil,
     })
     .from(whatsappAccounts)
     .where(
@@ -355,6 +379,8 @@ export async function writeSubmitTemplate(
   >,
   actorUserId: string | null,
   at: Date,
+  /** The company's time zone, for the time a pause ends (the API, which has none, gives UTC). */
+  timeZone = 'UTC',
 ): Promise<void> {
   if (!isEditableDraft(row)) {
     throw new AppError('precondition_failed', 'This template has already been sent to Meta.');
@@ -369,11 +395,15 @@ export async function writeSubmitTemplate(
       'Reconnect this WhatsApp account before submitting templates.',
     );
   }
+  // Meta throttles the account's management calls: say so rather than queue a create (ADR-399).
+  assertManagementOpen(waba.managementPausedUntil, at, timeZone);
   const [updated] = await tx
     .update(messageTemplates)
     .set({
       status: 'submitting',
       submittedAt: at,
+      // A new request: an earlier deferral for a pause no longer applies (ADR-399).
+      managementDeferredUntil: null,
       submitError: null,
       version: sql`${messageTemplates.version} + 1`,
     })
@@ -433,7 +463,12 @@ export async function writeDeleteTemplateAtMeta(
 ): Promise<void> {
   await tx
     .update(messageTemplates)
-    .set({ status: 'pending_deletion', version: sql`${messageTemplates.version} + 1` })
+    .set({
+      status: 'pending_deletion',
+      // A new request: an earlier deferral for a pause no longer applies (ADR-399).
+      managementDeferredUntil: null,
+      version: sql`${messageTemplates.version} + 1`,
+    })
     .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, templateId)));
   await insertStatusEvent(tx, tenantId, {
     templateId,
@@ -627,7 +662,15 @@ export function createTemplatesService(deps: TemplateDeps) {
       assertCan(ctx, 'templates.submit');
       await db.run(ctx.scope, async (tx) => {
         const row = await loadForUpdate(tx, ctx, templateId);
-        await writeSubmitTemplate(tx, deps, ctx.tenant.id, row, ctx.user.id, clock.now());
+        await writeSubmitTemplate(
+          tx,
+          deps,
+          ctx.tenant.id,
+          row,
+          ctx.user.id,
+          clock.now(),
+          ctx.tenant.timezone,
+        );
         await recordAudit(
           tx,
           ctx,
@@ -655,6 +698,13 @@ export function createTemplatesService(deps: TemplateDeps) {
           await writeDeleteLocalTemplate(tx, ctx.tenant.id, templateId, ctx.user.id, now);
         } else {
           assertCan(ctx, 'templates.submit');
+          await assertTemplateAccountOpen(
+            tx,
+            ctx.tenant.id,
+            row.whatsappAccountId,
+            now,
+            ctx.tenant.timezone,
+          );
           await writeDeleteTemplateAtMeta(tx, deps, ctx.tenant.id, templateId, ctx.user.id, now);
         }
         await recordAudit(
@@ -680,6 +730,8 @@ export function createTemplatesService(deps: TemplateDeps) {
         if (waba.status !== 'connected') {
           throw new AppError('precondition_failed', 'Reconnect this WhatsApp account first.');
         }
+        // Meta throttles the account's management calls: no sync is queued (ADR-399).
+        assertManagementOpen(waba.managementPausedUntil, clock.now(), ctx.tenant.timezone);
         await requestSyncTx(tx, ctx.tenant.id, whatsappAccountId, clock.now());
         // A member waits for it, so it goes before the sweep's routine syncs (ADR-178).
         await enqueueTemplateJob(
@@ -757,7 +809,10 @@ export interface TemplateWorkerDeps {
   clock: Clock;
 }
 
-/** The WhatsApp account's id at Meta and its decrypted token (null unless connected). */
+/**
+ * The WhatsApp account's id at Meta, its decrypted token and until when Meta throttles its
+ * management calls (ADR-399), or null unless it is connected.
+ */
 export async function wabaCredential(
   tx: Tx,
   tenantId: string,
@@ -769,6 +824,7 @@ export async function wabaCredential(
       wabaId: whatsappAccounts.wabaId,
       status: whatsappAccounts.status,
       credential: whatsappAccounts.credentialCiphertext,
+      managementPausedUntil: whatsappAccounts.managementPausedUntil,
     })
     .from(whatsappAccounts)
     .where(
@@ -776,12 +832,51 @@ export async function wabaCredential(
     );
   if (!waba || waba.status !== 'connected' || !waba.credential) return null;
   return {
+    whatsappAccountId,
     wabaId: waba.wabaId,
     token: keyring.decryptString(waba.credential, credentialAad(tenantId, whatsappAccountId)),
+    managementPausedUntil: waba.managementPausedUntil,
   };
 }
 
-export type TemplateJobOutcome = 'done' | 'skipped' | 'retry';
+/** `paused`: Meta throttles the account's management calls; nothing was sent (ADR-399). */
+export type TemplateJobOutcome = 'done' | 'skipped' | 'retry' | ManagementPaused;
+
+/**
+ * A template's submission or deletion deferred because Meta throttles the account's management
+ * calls (ADR-399): records when its job runs again, while the template still waits for it, so the
+ * sync's confirmation window and the deletion's keep count from then (no time spent deferred
+ * counts against the request), and gives the job's `paused` outcome.
+ */
+async function deferTemplateWork(
+  deps: TemplateWorkerDeps,
+  scope: TenantScope,
+  templateId: string,
+  status: 'submitting' | 'pending_deletion',
+  pausedUntil: Date,
+): Promise<ManagementPaused> {
+  await deps.db.run(scope, (tx) =>
+    tx
+      .update(messageTemplates)
+      .set({ managementDeferredUntil: managementResumeAt(pausedUntil) })
+      .where(
+        and(
+          eq(messageTemplates.tenantId, scope.tenantId),
+          eq(messageTemplates.id, templateId),
+          eq(messageTemplates.status, status),
+        ),
+      ),
+  );
+  return { paused: pausedUntil };
+}
+
+/**
+ * The later of a request's time and the time its deferred job runs again (ADR-399). The deferral
+ * belongs to the row's current request: recording a new request clears it.
+ */
+export function requestClockStart(requestedAt: Date, deferredUntil: Date | null): Date {
+  return deferredUntil && deferredUntil > requestedAt ? deferredUntil : requestedAt;
+}
 
 /** Worker: sends the create request for a template marked `submitting`. */
 export async function processTemplateSubmit(
@@ -847,12 +942,19 @@ export async function processTemplateSubmit(
     );
     return 'done';
   }
+  const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
+  if (paused) return deferTemplateWork(deps, scope, templateId, 'submitting', paused);
   const result = await deps.graph.createTemplate(credential.wabaId, credential.token, {
     name: row.name,
     language: row.language,
     category: row.category,
     components: row.components,
   });
+  const pausedBy = await noteManagementUsage(deps, scope, credential, result);
+  // Meta refused it for now and paused the account: submitted again after the pause, no retry spent.
+  if (refusedForPause(result, pausedBy)) {
+    return deferTemplateWork(deps, scope, templateId, 'submitting', pausedBy);
+  }
   if (result.ok) {
     const status = mapProviderTemplateStatus(result.data.status ?? 'PENDING');
     await settle(
@@ -942,10 +1044,17 @@ export async function processTemplateDelete(
     );
     return 'done';
   }
+  const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
+  if (paused) return deferTemplateWork(deps, scope, templateId, 'pending_deletion', paused);
   const result = await deps.graph.deleteTemplate(credential.wabaId, credential.token, {
     name: row.name,
     hsmId,
   });
+  const pausedBy = await noteManagementUsage(deps, scope, credential, result);
+  // Meta refused it for now and paused the account: deleted after the pause, no `delete_failed`.
+  if (refusedForPause(result, pausedBy)) {
+    return deferTemplateWork(deps, scope, templateId, 'pending_deletion', pausedBy);
+  }
   if (!result.ok && result.kind === 'retryable' && result.httpStatus === undefined) return 'retry';
   await deps.db.run(scope, async (tx) => {
     const now = deps.clock.now();
@@ -989,15 +1098,18 @@ export async function processTemplateDelete(
 }
 
 /**
- * Of the given templates pending deletion, those whose deletion was asked for since `since` and has
- * not failed: the last deletion event of each is the request itself (ADR-111).
+ * Of the given templates pending deletion (with when a deferred deletion job runs again), those
+ * whose deletion was asked for since `since` and has not failed: the last deletion event of each is
+ * the request itself (ADR-111). A deletion deferred for a pause after it was asked counts from when
+ * its job runs again (ADR-399).
  */
 async function deletionsAskedSince(
   tx: Tx,
   tenantId: string,
-  templateIds: string[],
+  deferredUntil: ReadonlyMap<string, Date | null>,
   since: Date,
 ): Promise<Set<string>> {
+  const templateIds = [...deferredUntil.keys()];
   if (templateIds.length === 0) return new Set();
   const last = await tx
     .selectDistinctOn([templateStatusEvents.templateId], {
@@ -1020,7 +1132,11 @@ async function deletionsAskedSince(
     );
   return new Set(
     last
-      .filter((e) => e.status === 'pending_deletion' && e.occurredAt >= since)
+      .filter(
+        (e) =>
+          e.status === 'pending_deletion' &&
+          requestClockStart(e.occurredAt, deferredUntil.get(e.templateId) ?? null) >= since,
+      )
       .map((e) => e.templateId),
   );
 }
@@ -1081,17 +1197,33 @@ export async function settleTemplateDeletion(
 
 async function listAllTemplates(
   deps: TemplateWorkerDeps,
-  wabaId: string,
-  token: string,
+  scope: TenantScope,
+  credential: { whatsappAccountId: string; wabaId: string; token: string },
 ): Promise<
-  { ok: true; templates: RemoteTemplate[] } | { ok: false; kind: string; detail: string }
+  | { ok: true; templates: RemoteTemplate[] }
+  | { ok: false; kind: string; detail: string }
+  | { ok: false; paused: Date }
 > {
+  const { wabaId, token } = credential;
   let fields: string = SYNC_FIELDS;
   const templates: RemoteTemplate[] = [];
   let after: string | null = null;
   for (let page = 0; page < SYNC_MAX_PAGES; page += 1) {
     const result = await deps.graph.listTemplates(wabaId, token, { after, fields });
+    const pausedUntil = await noteManagementUsage(deps, scope, credential, result);
     if (!result.ok) {
+      // The response paused the account: no further call, not even the fallback below, and a
+      // refusal for now is not a failure; the sync runs again after the pause (ADR-399).
+      if (
+        pausedUntil &&
+        (result.kind === 'retryable' ||
+          (page === 0 &&
+            fields === SYNC_FIELDS &&
+            result.kind === 'permanent' &&
+            result.code === 100))
+      ) {
+        return { ok: false, paused: pausedUntil };
+      }
       // Unknown extra fields are rejected with code 100: fall back to the default fields once.
       if (
         page === 0 &&
@@ -1112,6 +1244,8 @@ async function listAllTemplates(
     templates.push(...result.data.templates);
     after = result.data.after;
     if (!after) return { ok: true, templates };
+    // Meta throttles the account from now on: the rest of the listing waits for the pause.
+    if (pausedUntil) return { ok: false, paused: pausedUntil };
   }
   return { ok: false, kind: 'permanent', detail: `more than ${SYNC_MAX_PAGES} pages of templates` };
 }
@@ -1132,8 +1266,13 @@ export async function syncTemplates(
     wabaCredential(tx, scope.tenantId, whatsappAccountId, deps.keyring),
   );
   if (!credential) return 'skipped';
-  const listing = await listAllTemplates(deps, credential.wabaId, credential.token);
+  // While Meta throttles the account's management calls nothing is asked; the sweep signals the
+  // sync again once the pause has ended (ADR-399).
+  const paused = activeManagementPause(credential.managementPausedUntil, startedAt);
+  if (paused) return { paused };
+  const listing = await listAllTemplates(deps, scope, credential);
   if (!listing.ok) {
+    if ('paused' in listing) return { paused: listing.paused };
     if (listing.kind === 'retryable' || listing.kind === 'unknown') return 'retry';
     await deps.db.run(scope, async (tx) => {
       await tx
@@ -1178,7 +1317,11 @@ export async function syncTemplates(
     const deletionsInProgress = await deletionsAskedSince(
       tx,
       scope.tenantId,
-      local.filter((l) => l.status === 'pending_deletion').map((l) => l.id),
+      new Map(
+        local
+          .filter((l) => l.status === 'pending_deletion')
+          .map((l) => [l.id, l.managementDeferredUntil] as const),
+      ),
       new Date(now.getTime() - DELETION_KEEP_MS),
     );
     const byKey = new Map(local.map((l) => [`${l.name}|${l.language}`, l]));
@@ -1276,9 +1419,13 @@ export async function syncTemplates(
     for (const row of local) {
       if (seen.has(row.id)) continue;
       if (row.status === 'submitting') {
+        // Counted from the later of the submission and its deferred job's run, so a pause Meta
+        // imposed before the create was sent does not fail it (ADR-399).
         if (
           row.submittedAt &&
-          now.getTime() - row.submittedAt.getTime() > SUBMIT_CONFIRM_WINDOW_MS
+          now.getTime() -
+            requestClockStart(row.submittedAt, row.managementDeferredUntil).getTime() >
+            SUBMIT_CONFIRM_WINDOW_MS
         ) {
           await tx
             .update(messageTemplates)

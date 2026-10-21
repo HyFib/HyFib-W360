@@ -62,6 +62,14 @@ export const whatsappAccounts = appSchema.table('whatsapp_accounts', {
   webhooksCheckError: text('webhooks_check_error'),
   webhooksMissingSince: tz('webhooks_missing_since'),
   webhooksRestoredAt: tz('webhooks_restored_at'),
+  /**
+   * The latest management usage Meta reported for the account in `x-business-use-case-usage`
+   * (ADR-399, migration 0310): when it was read, the highest of its three percentages, and until
+   * when Meta throttles management calls (set while its minutes to regain access are above 0).
+   */
+  managementUsageReadAt: tz('management_usage_read_at'),
+  managementUsagePercent: smallint('management_usage_percent'),
+  managementPausedUntil: tz('management_paused_until'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

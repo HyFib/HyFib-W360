@@ -18,6 +18,7 @@ import { deletionRecipients, formatCompanyTime } from '../tenancy/deletion';
 import { credentialAad } from './credentials';
 import { emitTenantEvent } from './events';
 import type { GraphClient, GraphResult } from './graph';
+import { activeManagementPause, pacedManagementCalls, untilPaused } from './management-pace';
 
 /**
  * Checking each company's WhatsApp access before sends fail (ADR-137, P2-12). The minute sweep lists
@@ -266,9 +267,11 @@ export interface AccessCheckDeps {
 /**
  * `healthy`: Meta admits the token. `lost`: it no longer does; the account needs reconnecting.
  * `not_checked`: the request failed; nothing changed for the company. `skipped`: the account is not
- * connected (any more), or was reconnected with another token during the check.
+ * connected (any more), or was reconnected with another token during the check. `paused`: Meta
+ * throttles the account's management calls, so nothing was asked; the account stays due and the
+ * sweep signals the check again once the pause ends (ADR-399).
  */
-export type AccessCheckOutcome = 'healthy' | 'lost' | 'not_checked' | 'skipped';
+export type AccessCheckOutcome = 'healthy' | 'lost' | 'not_checked' | 'skipped' | 'paused';
 
 /**
  * The account's webhook subscription, checked once Meta admits the token (ADR-138): `subscribed`:
@@ -292,10 +295,11 @@ function failureText(result: Extract<GraphResult<unknown>, { ok: false }>): stri
 /** Lists the account's subscribed apps and subscribes HyFib's app again when it is not among them. */
 async function checkSubscription(
   deps: AccessCheckDeps,
+  call: ReturnType<typeof pacedManagementCalls>,
   wabaId: string,
   token: string,
 ): Promise<SubscriptionFinding> {
-  const listed = await deps.graph.listSubscribedApps(wabaId, token);
+  const listed = await call(() => deps.graph.listSubscribedApps(wabaId, token));
   if (!listed.ok) return { state: 'not_checked', error: failureText(listed) };
   if (listed.data.appIds.includes(deps.meta.appId)) return { state: 'subscribed' };
   // An app whose id could not be read, or a page that follows, may be HyFib's: only a complete list
@@ -303,7 +307,7 @@ async function checkSubscription(
   if (!listed.data.complete) return { state: 'not_checked', error: 'unknown: incomplete_app_list' };
   // The call onboarding makes; a disconnection racing it changes nothing, since disconnecting does
   // not unsubscribe the app at Meta.
-  const restored = await deps.graph.subscribeApp(wabaId, token);
+  const restored = await call(() => deps.graph.subscribeApp(wabaId, token));
   return restored.ok ? { state: 'restored' } : { state: 'missing', error: failureText(restored) };
 }
 
@@ -331,7 +335,12 @@ export async function checkWhatsAppAccess(
   deps: AccessCheckDeps,
   scope: TenantScope,
   whatsappAccountId: string,
-): Promise<{ outcome: AccessCheckOutcome; error?: string; webhooks?: SubscriptionFinding }> {
+): Promise<{
+  outcome: AccessCheckOutcome;
+  error?: string;
+  webhooks?: SubscriptionFinding;
+  pausedUntil?: Date;
+}> {
   const tenantId = scope.tenantId;
   const where = and(
     eq(whatsappAccounts.tenantId, tenantId),
@@ -347,6 +356,7 @@ export async function checkWhatsAppAccess(
           wabaId: whatsappAccounts.wabaId,
           status: whatsappAccounts.status,
           credential: whatsappAccounts.credentialCiphertext,
+          managementPausedUntil: whatsappAccounts.managementPausedUntil,
         })
         .from(whatsappAccounts)
         .where(where),
@@ -354,13 +364,25 @@ export async function checkWhatsAppAccess(
   );
   if (!account || account.status !== 'connected' || !account.credential)
     return { outcome: 'skipped' };
+  // While Meta throttles the account's management calls nothing is asked (ADR-399).
+  const pausedUntil = activeManagementPause(account.managementPausedUntil, startedAt);
+  if (pausedUntil) return { outcome: 'paused', pausedUntil };
   const token = deps.keyring.decryptString(account.credential, aad);
   const debug = await deps.graph.debugToken(token, deps.meta.appId, deps.meta.appSecret);
-  // The webhook subscription is checked only with a token Meta admits (ADR-138).
-  const subscription =
+  const call = pacedManagementCalls(deps, scope, {
+    whatsappAccountId,
+    wabaId: account.wabaId,
+  });
+  // The webhook subscription is checked only with a token Meta admits (ADR-138). A pause Meta
+  // reports while listing leaves the restoration for the next check.
+  const checked =
     debug.ok && !assessGrant(debug.data, deps.meta.appId, account.wabaId)
-      ? await checkSubscription(deps, account.wabaId, token)
+      ? await untilPaused(() => checkSubscription(deps, call, account.wabaId, token))
       : null;
+  const subscription: SubscriptionFinding | null =
+    checked && 'paused' in checked
+      ? { state: 'not_checked', error: 'paused: Meta is limiting management requests' }
+      : checked;
 
   return deps.db.run(scope, async (tx) => {
     // The account as it is now: a disconnection or a reconnection during the check wins.

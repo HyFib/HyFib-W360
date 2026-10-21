@@ -5,15 +5,18 @@ import {
   authorizeJob,
   findDueCommerceWork,
   giveUpCommerceSync,
+  isManagementPaused,
   processCommerceSync,
   processPaymentAccountCheck,
   processPaymentLink,
   queueDailyCommerceSync,
   type CommerceJobOutcome,
+  type ManagementPaused,
   type CommerceWorkerDeps,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
+import { deferPausedWork } from './management-deferral';
 
 type CommerceKind = 'commerce.sync' | 'commerce.link' | 'commerce.account';
 
@@ -29,7 +32,7 @@ function commerceHandler(
     deps: CommerceWorkerDeps,
     scope: TenantScope,
     ref: string,
-  ) => Promise<CommerceJobOutcome | 'no_meta'>,
+  ) => Promise<CommerceJobOutcome | ManagementPaused | 'no_meta'>,
 ) {
   return async ([job]: Job<unknown>[]): Promise<void> => {
     if (!job) return;
@@ -52,6 +55,18 @@ function commerceHandler(
     };
     const outcome = await run(deps, auth.scope, auth.envelope.ref);
     if (outcome === 'no_meta') throw new RetryableJobError('Meta is not configured');
+    if (isManagementPaused(outcome)) {
+      // Meta throttles the account's management calls (ADR-399): nothing failed.
+      await deferPausedWork(rt, {
+        jobId: job.id,
+        kind: kind,
+        tenantId: auth.scope.tenantId,
+        actorUserId: auth.envelope.actorUserId,
+        ref: auth.envelope.ref,
+        pausedUntil: outcome.paused,
+      });
+      return;
+    }
     rt.logger.info({ jobId: job.id, kind, ref: auth.envelope.ref, outcome }, 'commerce job');
     if (outcome === 'retry') {
       throw new RetryableJobError(`${kind}: provider unavailable or the row is busy`);

@@ -33,6 +33,12 @@ export const commerceSyncs = appSchema.table('commerce_syncs', {
   state: text('state', { enum: COMMERCE_SYNC_STATES }).notNull().default('idle'),
   error: text('error'),
   requestedAt: tz('requested_at'),
+  /**
+   * When work this row waits for, deferred because Meta throttled the account's management calls,
+   * runs again (ADR-399, migration 0310). Windows that give up on a request count from the later of
+   * the request and this time, so time spent deferred for a pause is never counted against it.
+   */
+  managementDeferredUntil: tz('management_deferred_until'),
   finishedAt: tz('finished_at'),
   version: integer('version').notNull().default(1),
   createdAt: tz('created_at').notNull().defaultNow(),

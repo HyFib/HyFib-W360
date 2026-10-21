@@ -5,6 +5,7 @@ import {
   authorizeJob,
   findDueFlowWork,
   giveUpFlowSync,
+  isManagementPaused,
   processFlowKeys,
   processFlowSync,
   type FlowJobOutcome,
@@ -12,6 +13,7 @@ import {
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
+import { deferPausedWork } from './management-deferral';
 
 type FlowKind = 'flow.sync' | 'flow.keys';
 
@@ -44,6 +46,18 @@ function flowHandler(
       appBaseUrl: rt.config.APP_BASE_URL,
     };
     const outcome = await run(deps, auth.scope, auth.envelope.ref);
+    if (isManagementPaused(outcome)) {
+      // Meta throttles the account's management calls (ADR-399): nothing failed.
+      await deferPausedWork(rt, {
+        jobId: job.id,
+        kind: kind,
+        tenantId: auth.scope.tenantId,
+        actorUserId: auth.envelope.actorUserId,
+        ref: auth.envelope.ref,
+        pausedUntil: outcome.paused,
+      });
+      return;
+    }
     rt.logger.info({ jobId: job.id, kind, ref: auth.envelope.ref, outcome }, 'flow job');
     if (outcome === 'retry') throw new RetryableJobError(`${kind}: Meta temporarily unavailable`);
   };

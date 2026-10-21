@@ -11,7 +11,11 @@ import type { Tx } from '@w360/db';
  */
 export interface EnqueueOptions {
   singletonKey?: string;
-  startAfter?: Date;
+  /**
+   * When the job may start: an instant, or a number of seconds after the database's own now (pg-boss
+   * casts a positive number to an interval added to `job_now()`), which no worker clock skews.
+   */
+  startAfter?: Date | number;
   /** Fairness group (for example a phone number id); see pg-boss group concurrency. */
   group?: { id: string; tier?: string };
   priority?: number;

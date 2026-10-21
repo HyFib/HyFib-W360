@@ -1,5 +1,117 @@
 # Progress
 
+## 2026-10-16 — Pacing WhatsApp management calls by Meta's usage header (P2-02, ADR-399)
+
+Status: **Implemented (migration 0310); unit tests run locally, integration tests in CI only; no
+live Meta traffic.** Meta's `x-business-use-case-usage` header is read on every Graph response;
+each WhatsApp account keeps its latest management reading, and while Meta reports minutes to
+regain access, background management work waits for the pause and members' management actions say
+that Meta is limiting management requests until then. This closes P2-02's remainder.
+
+### Completed
+
+- **Parse (`messaging/usage-header.ts`):** `parseBusinessUseCaseUsage` keeps, per WABA id, the
+  `whatsapp_business_management` entry's three percentages and minutes to regain access; bounded
+  (16,384 characters, 32 ids, 16 entries an id, digit ids), lenient (malformed JSON, wrong shapes,
+  negative, non-finite or unreadable numbers give nothing or zero; numeric text read; rounded up;
+  capped at 100 percent and 1,440 minutes). `GraphClient.request` attaches it as an optional `usage`
+  to both arms of `GraphResult` without changing any classification; the raw header is never logged.
+- **Record (`messaging/management-pace.ts`, migration 0310):** `app.whatsapp_accounts` gains
+  `management_usage_read_at`, `management_usage_percent` (0 to 100) and `management_paused_until`;
+  UPDATE on them for `w360_app`, SELECT on the pause for `w360_definer`. Readings are looked up by
+  the account's own WABA id and written in the company's scope only while the row still has that id
+  and no newer reading; other ids are ignored. Exported with the account (`export-spec.ts`).
+- **Pace:** template syncs, submissions and deletions; flow operations and key uploads; catalog
+  reads; access checks (subscribed-apps listing and restoration); and number setup (subscribe,
+  register, and both of ADR-398's health reads: once the first pauses the account, the field-less
+  second read is not made and the step is deferred) check the pause first and ask Graph nothing while it lasts, returning `paused`.
+  Syncs and access checks stay due and `ops.template_sync_due` / `ops.whatsapp_access_checks_due`
+  leave paused accounts out; the other jobs are queued again for 30 seconds after the pause
+  (`deferPausedJob`), and `ops.flow_work_due` / `ops.commerce_work_due` leave paused accounts out
+  too. No retry, dead letter or alert is spent. The deferred job's key is `paused:<id of the
+deferring job>` (`pausedJobKey`), and a deferral that was not queued fails the job for a retry
+  (`deferPausedWork` in `apps/worker/src/handlers/management-deferral.ts`, which picks each kind's
+  own queue). `pacedManagementCalls` records each response, makes no further call in the job once
+  one pauses the account, and defers at once when a call refused for now (`retryable`) carried the
+  pause itself (`refusedForPause`; template submissions and deletions apply the same rule); a
+  permanent or credential refusal stays a failure. A template listing refused with code 100 while
+  pausing is not retried with fewer fields until after the pause. A high percentage alone does not
+  defer (ADR-399 says why); a rate-limit error without the header is retried as before.
+- **Deferred time does not age a request:** a submission, deletion, flow operation or catalog read
+  that defers records on its row when its deferred job runs (`management_deferred_until`, 0310), and
+  the sync's 10-minute confirmation window, the 8-hour deletion keep and the sweep's 30-minute
+  give-ups count from the later of the request and that time (`requestClockStart`); the flow and
+  commerce due lists wait for it too. Members still see the request's own time. Each new request
+  on the row clears the deferral, so it never hides or extends a later request. A deferred job is
+  queued with a delay in seconds from the database's now (at least 30), never an absolute time, so
+  a worker whose clock lags the database's does not re-defer in a loop.
+- **Flow keys:** a previous key is retired only while the active key has no upload pending, and 24
+  hours after the later of the rotation and the active key's latest successful upload
+  (`previousKeyRetirementCutoff` in `flows/worker.ts`, evaluated after the new numbers' upload rows
+  are written); a failed upload does not hold it back. A pause near a day long could otherwise erase
+  the old private key before the new public key reached Meta (found by Codex on PR #100).
+- **Dead letters:** `ops.dead_letter_work_live` (0089) is recreated in 0310 to see a waiting
+  deferral of a setup or a deletion, so the dead-letter sweep does not settle work a deferred job
+  will still do.
+- **Members:** "Refresh from Meta", submitting and deleting templates (page and API), flow changes,
+  flow keys and catalog reads answer `provider_unavailable` (503) with the end of the pause in the
+  company's time zone (UTC for the API, with `details.pausedUntil`); nothing is queued. The OpenAPI
+  document lists the 503 on submit and delete.
+- **Show:** Settings → Channels gives each connected number's account one line: "Meta management
+  usage N% (read …)" and, while paused, when Meta stops limiting management requests
+  (`managementUsageView` in `listChannels`).
+- **Left out on purpose:** sends, read receipts and media (`whatsapp` type); Embedded Signup's
+  synchronous calls (no account row yet); company deletion's `unsubscribe` (one best-effort call;
+  deferring it would hold back erasure).
+- **Research:** row M-200 records what was confirmed (units, via search snippets of Meta's
+  rate-limiting page; developers.facebook.com did not resolve from the session) and what was not
+  (the 100-percent threshold, WhatsApp applicability).
+
+### Verification
+
+- Ran here: `eslint . --max-warnings=0`, `prettier --check .`, `pnpm typecheck` (every package,
+  the integration and e2e suites included), `pnpm test` (the unit project: 175 files, 1,873 tests) and
+  `pnpm build`, all passing; the pglast parse of migration 0310. Not run here: the integration and
+  e2e suites (no PostgreSQL or browsers in this environment; CI runs them).
+- New unit tests: 15 in `usage-header.test.ts` (parser and Graph client, the length bound through a
+  fake `fetch`), 23 in `management-pace.test.ts` (pacing decision, paced calls and refusals that
+  pause, the deferral's key, its delay in seconds and its failure to queue, the request clock, the
+  Channels view), 4 in
+  `apps/worker/src/handlers/management-deferral.test.ts` (each kind's queue, the template sync that
+  is not queued, a deferral not queued, kinds that are not paced), and one more in
+  `api/message-template-drafts.test.ts` (the API's 503 and nothing written), and 3 in
+  `flows/key-retirement.test.ts` (when a previous flow key may be retired); an existing API test
+  now expects the account read.
+- Manual mutation testing: 15/15 for the parser, pacing decision, client and view; 9/11 for the
+  first review's fixes; 6/8 for the second review's (the deferral delay and the clearing of the
+  deferral by a new request); 3/5 for the flow key retirement. 33/39 in all: the six survivors (the
+  sync's request clock, the flow give-up's deferral condition, the clearing in a flow operation and
+  a catalog read request, and the retirement's reads of the pending upload and the latest upload)
+  are exercised only by the integration tests, in CI.
+- `tests/integration/flows.test.ts`: a previous key 25 hours after a rotation kept, with its
+  private key and no Graph call, while a pause defers its successor's upload; kept for 24 hours after
+  the upload succeeds, then retired. The due-list assertions of `management-usage.test.ts` read the
+  lists with every other company's rows made not due in a rolled-back transaction (`dueFor`, as
+  `dueAmong` in `whatsapp-access.test.ts`), so neither a list's limit nor the run order decides them
+  (CI's first run failed an access-check assertion that a shared database of over 500 never-checked
+  accounts pushed past the limit).
+- `tests/integration/management-usage.test.ts` (stand-in extended with `usageHeader` and
+  `usageHeaderValue`): readings stored for the right account and company only, a header naming
+  another WABA ignored, malformed headers harmless, a refused call's reading stored, a paused sync
+  and submission asking nothing, the deferred job's `startAfter`, the sweep's due lists, the
+  member's refusal, Channels, number setup making no second health read once the first pauses the
+  account (ADR-398), a submission and a deletion deferred past their 10-minute and 8-hour windows
+  and done after the pause, flow and catalog give-ups waiting for the deferred job, the flow and
+  commerce due lists with paused and unpaused accounts, refusals that pause (submission, deletion,
+  catalog read, setup step; a flow operation stopped by its first call's pause), the dead-letter
+  check seeing a deferral, and the grants and function owners of 0310 (4,000-character malformed
+  header: Node refuses 16 KiB of headers before the parser). **Written and
+  type-checked; they run only in CI (no PostgreSQL here).**
+
+### Not built
+
+Deferring on high usage, pacing by `x-app-usage`, and any check against live Meta traffic.
+
 ## 2026-10-16 — Each WhatsApp number's messaging limit on Channels (P2-10, ADR-398)
 
 Status: **Implemented; its database and browser tests run in CI only.** "Messaging limits display"

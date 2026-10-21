@@ -182,6 +182,18 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
                             {formatDateTime(ch.webhooksCheckedAt, ctx.tenant.timezone)}
                           </div>
                         ) : null}
+                        {ch.accountStatus === 'connected' && ch.managementUsage ? (
+                          <div className="max-w-sm text-xs text-muted-foreground">
+                            Meta management usage {ch.managementUsage.percent}% (read{' '}
+                            {formatDateTime(ch.managementUsage.readAt, ctx.tenant.timezone)})
+                            {ch.managementUsage.pausedUntil
+                              ? `; Meta is limiting management requests until ${formatDateTime(
+                                  ch.managementUsage.pausedUntil,
+                                  ctx.tenant.timezone,
+                                )}`
+                              : ''}
+                          </div>
+                        ) : null}
                         {ch.accountStatus === 'connected' && ch.accessExpiresAt ? (
                           <div className="text-xs text-muted-foreground">
                             Access {ch.accessExpired ? 'expired' : 'expires'}{' '}
