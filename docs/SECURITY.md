@@ -140,7 +140,10 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   changes what they send. The template is read and locked under row security in the member's
   company (another company's answers 404), the edit is written ahead in that transaction with the
   member named, and the signed `template.edit` job re-reads it in the company's scope. Keys need
-  the `templates.submit` scope (`POST /message-templates/{id}/edit`). Audit:
+  the `templates.submit` scope (`POST /message-templates/{id}/edit`). Showing the usage is safe
+  only because every role with `templates.submit` (owner, administrator, marketer) also holds
+  `campaigns.read`, `automations.read` and `commerce.read` (a unit test pins this against the role
+  matrix); a member whose company removed one of those sees the item without its name. Audit:
   `template.edit_requested`, `template.edited`, `template.edit_failed`.
 - A campaign's messaging-limit notice (ADR-400): members with `campaigns.read` see the sending
   number's messaging limit, as Meta last reported it, in a draft's review and on the page of a

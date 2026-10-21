@@ -442,7 +442,12 @@ edit is sending) settles it: Meta's template showing the new content confirms it
 minutes after the request (or after a deferral while Meta limited management requests), it is
 "Meta did not take the edit" with "HyFib could not confirm the edit". Tell the member to check the
 template in WhatsApp Manager and, if the new content is not there, send the edit again (the editor
-starts from it); nothing is resent automatically. Check the `template.edit` and `template.sync`
+starts from it); nothing is resent automatically. Whether Meta's listing shows new content before
+Meta approves it is not confirmed (research M-201): if it does not, a lost answer always ends as
+"could not confirm", and a later sync still confirms the edit once Meta lists the content. HyFib
+also sends an edit without the template's name and language, which Meta's only example includes;
+if Meta refuses edits for that, its message says so and the refusal is shown as usual. An edit is
+sent at most once: a job run again after its attempt only asks for a sync. Check the `template.edit` and `template.sync`
 queues on Operations → Queues.
 
 **Meta refused a template edit.** The page and the API (`edit.error`) give Meta's code and message
@@ -452,7 +457,12 @@ tell the member what Meta's message says (for example a limit on edits, or conte
 take), that the template keeps the content and status Meta has, and that they can change the
 content and send it again, or make a new template. A credential error (190 and similar) also starts
 an access check; reconnect the account if Channels says so. An edit is refused in HyFib while a
-campaign using the template is sending: pause the campaign, edit, then resume it.
+campaign using the template is scheduled or sending: wait, or pause or cancel it, then edit. An edit
+that changes the template's variables or buttons (how many values the header, body or a link take,
+or the quick-reply buttons and their titles) is refused while an unfinished campaign, a published
+automation or a store message uses the template, because each stores values for the old shape and
+would stop: change those to another template first, or add a new template. Wording-only edits stay
+allowed.
 
 **A template send failed with 132015 / 132016.** Meta paused or disabled the template; HyFib marks it
 and requests a sync. Improve the template (quality) or use another one; do not resend blindly.

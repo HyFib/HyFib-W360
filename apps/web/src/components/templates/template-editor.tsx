@@ -58,10 +58,12 @@ const STORE_EVENT_LABEL: Record<string, string> = {
 function UsageList({ usage }: { usage: TemplateUsage }) {
   const items = [
     ...usage.campaigns.map(
-      (c) => `Campaign “${c.name}” (${CAMPAIGN_STATUS_LABEL[c.status] ?? c.status})`,
+      (c) =>
+        `${c.name ? `Campaign “${c.name}”` : 'A campaign'} (${CAMPAIGN_STATUS_LABEL[c.status] ?? c.status})`,
     ),
     ...usage.automations.map(
-      (a) => `Automation “${a.name}” (${a.status === 'active' ? 'live' : 'paused'})`,
+      (a) =>
+        `${a.name ? `Automation “${a.name}”` : 'An automation'} (${a.status === 'active' ? 'live' : 'paused'})`,
     ),
     ...usage.storeRules.map(
       (r) =>
@@ -533,7 +535,7 @@ export function TemplateEditor({
           {atMeta ? (
             <ConfirmDialog
               title="Send this edit to Meta?"
-              description="Meta reviews the new content. Until Meta takes it, sends use the content Meta has now; afterwards every send, including the ones below, uses the content Meta approves. Meta decides how often a template can be edited and may refuse the edit."
+              description="Meta reviews the new content. Until Meta takes it, sends use the content Meta has now; afterwards every send, including the ones below, uses the content Meta approves. Changing the variables or buttons is refused while anything below uses the template; wording is not. Meta decides how often a template can be edited and may refuse the edit."
               confirmLabel="Send edit to Meta"
               onConfirm={sendEdit}
               trigger={

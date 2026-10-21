@@ -1133,25 +1133,31 @@ describe('editing a template Meta has through the API (ADR-404)', () => {
   });
 
   it('writes the edit ahead: sending, the content sent, who asked, its change and the job in one transaction', async () => {
-    const run = recorder([[{ n: 0 }], connected, [{ version: 5 }]]);
+    const run = recorder([[], connected]);
     await writeEditTemplate(run.tx, run, TENANT, approved, delayed, 'user-1', NOW);
+    // Campaigns scheduled or sending, read under a share lock (none here).
     expect(run.steps[0]?.[1]).toBe('campaigns');
-    expect(run.steps[0]?.[2]).toContain('"running"');
-    expect(run.steps[2]).toEqual([
+    expect(run.steps[0]?.[2]).toContain('("scheduled", "running")');
+    expect(run.steps[0]?.[3]).toBe('share');
+    const update = run.steps[2] as [string, string, Record<string, unknown>, string];
+    expect(update).toEqual([
       'update',
       'message_templates',
       {
+        editId: expect.stringMatching(/^[0-9a-f-]{36}$/),
         editState: 'sending',
         editComponents: toMetaComponents(delayed),
         editError: null,
-        editRequestedAt: NOW,
+        // The database's time, against which the window is judged.
+        editRequestedAt: 'now()',
         editRequestedByUserId: 'user-1',
+        editAttemptedAt: null,
         managementDeferredUntil: null,
         version: VERSION_PLUS_ONE,
       },
       THIS_TEMPLATE,
-      'returning',
     ]);
+    const editId = update[2].editId as string;
     expect(run.steps[3]?.[2]).toMatchObject({
       status: 'edit_requested',
       source: 'edit',
@@ -1162,18 +1168,25 @@ describe('editing a template Meta has through the API (ADR-404)', () => {
       'enqueue',
       true,
       QUEUES.templateEdit.name,
-      { signed: { kind: 'template.edit', tenantId: TENANT, actorUserId: 'user-1', ref: TEMPLATE } },
-      { singletonKey: `${TEMPLATE}:edit:5` },
+      {
+        signed: {
+          kind: 'template.edit',
+          tenantId: TENANT,
+          actorUserId: 'user-1',
+          ref: `${TEMPLATE}:${editId}`,
+        },
+      },
+      { singletonKey: `${TEMPLATE}:edit:${editId}` },
     ]);
     expect(run.unread()).toBe(0);
   });
 
-  it('refuses while a campaign sends it, a disconnected account, a pause, and writes nothing', async () => {
-    const sending = recorder([[{ n: 1 }]]);
+  it('refuses while a campaign is scheduled or sends it, a disconnected account, a pause, and writes nothing', async () => {
+    const sending = recorder([[{ id: 'campaign-1' }]]);
     await expect(
       writeEditTemplate(sending.tx, sending, TENANT, approved, delayed, null, NOW),
     ).rejects.toMatchObject({ code: 'precondition_failed' });
-    const disconnected = recorder([[{ n: 0 }], [{ ...connected[0], status: 'disconnected' }]]);
+    const disconnected = recorder([[], [{ ...connected[0], status: 'disconnected' }]]);
     await expect(
       writeEditTemplate(disconnected.tx, disconnected, TENANT, approved, delayed, null, NOW),
     ).rejects.toMatchObject({
@@ -1181,10 +1194,7 @@ describe('editing a template Meta has through the API (ADR-404)', () => {
       publicMessage: 'Reconnect this WhatsApp account before editing templates.',
     });
     const pausedUntil = new Date(NOW.getTime() + 5 * 60_000);
-    const paused = recorder([
-      [{ n: 0 }],
-      [{ ...connected[0], managementPausedUntil: pausedUntil }],
-    ]);
+    const paused = recorder([[], [{ ...connected[0], managementPausedUntil: pausedUntil }]]);
     await expect(
       writeEditTemplate(paused.tx, paused, TENANT, approved, delayed, null, NOW),
     ).rejects.toMatchObject({ code: 'provider_unavailable' });
@@ -1235,7 +1245,8 @@ describe('editing a template Meta has through the API (ADR-404)', () => {
     for (const words of [
       'Scope: `templates.submit`.',
       'Its name, language and category stay',
-      'while one of the company’s campaigns using it is sending',
+      'while one of the company’s campaigns using it is scheduled or sending',
+      'when it changes the template’s variables or buttons',
       'HyFib does not limit which statuses can be edited or how often: Meta decides',
       'its code and message in `edit.error`',
       'With an `Idempotency-Key`, a retry answers the first response',

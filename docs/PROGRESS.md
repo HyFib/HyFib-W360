@@ -120,12 +120,29 @@ P3-03's "editing approved templates (`POST /{template-id}`)".
   confirmation by content, the request's category and fields, `success: true` only, the member and
   job key written ahead, validation before reads, deletion while sending, the refusal text).
 
+### Review fixes (before merge)
+
+An independent review found no High issue; its three Mediums and the rest are fixed (ADR-404's
+review section): an edit is sent at most once (`edit_id` in the job's reference, an attempt
+committed before the request, a run after it only asks for a sync); a failed edit Meta applied late
+is confirmed by the sync, and the job sends only with a minute of the window left; an edit that
+changes the template's variables or buttons is refused while an unfinished campaign, a published
+automation or a store rule uses it; scheduled campaigns are refused too, read under a share lock; a
+settle compares with the status stored then (no duplicate change); the window is on the database's
+clock; 0316's grants have a test; unconfirmed points (leaving out `name` and `language`, the
+listing before approval) are stated as such; DEPLOYMENT says how to clear edits left sending after
+a rollback; SECURITY states, and a unit test pins, why the usage list may name what uses a
+template. No existing exact assertion needed changing: the integration and e2e tests that read API
+templates, template history, template pages or template webhooks use `toMatchObject`, pick fields,
+or read objects the slice did not extend. Hand mutations of the new branches: 14/14 caught (13/14
+first; the survivor, refusing only with two or more users, led to a test with one).
+
 ### Test commands and results (local, 2026-10-21)
 
 | Command                                        | Result                                                                        |
 | ---------------------------------------------- | ----------------------------------------------------------------------------- |
 | `eslint`, `prettier --check`, `pnpm typecheck` | clean                                                                         |
-| `pnpm test` (unit)                             | 1,975 of 1,975 passed (180 files)                                             |
+| `pnpm test` (unit)                             | 1,981 of 1,981 passed (180 files)                                             |
 | `pnpm build`                                   | passed                                                                        |
 | migration parse (pglast)                       | 0316 parses                                                                   |
 | `pnpm test:integration`, `pnpm test:e2e`       | not run here: the local PostgreSQL and browsers are unavailable; CI runs them |

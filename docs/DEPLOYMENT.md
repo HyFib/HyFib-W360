@@ -1924,8 +1924,12 @@ IS NOT NULL`); the columns and checks can stay.
    out workers before web as usual: a web server of this release queues `template.edit` jobs, which
    only a worker of this release consumes (a job queued before then waits for it, and an edit whose
    job waits more than 10 minutes is called unconfirmed by the sync and can be sent again). Rolling
-   back leaves the columns unused; edits left `sending` stay so until a worker of this release
-   returns.
+   back leaves the columns unused; an edit left `sending` stays so until a worker of this release
+   returns, and meanwhile keeps its account due for a template sync every 5 minutes (the recreated
+   `ops.template_sync_due` stays), spending Meta's management allowance. To stop that after a
+   rollback, settle such edits as failed: `UPDATE app.message_templates SET edit_state = 'failed',
+edit_error = 'Not sent: HyFib was rolled back. Send the edit again.' WHERE edit_state =
+'sending';` (as the owner role); members can send them again once the release returns.
 
    Migration 0317 (ADR-405) first adds the column `app.campaign_recipients.variant` (`NOT NULL
 DEFAULT 'A'`, a constant default, so nothing is rewritten) with its check added `NOT VALID`, so

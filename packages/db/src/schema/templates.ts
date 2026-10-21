@@ -72,11 +72,15 @@ export const messageTemplates = appSchema.table('message_templates', {
    * Meta's answer (written ahead), `failed` when Meta refused it or never confirmed it; null when
    * none is open. The content sent, when and by which member (null for an API key) it was asked.
    */
+  /** The open edit's id, which its job carries (a job for an older edit does nothing). */
+  editId: uuid('edit_id'),
   editState: text('edit_state', { enum: TEMPLATE_EDIT_STATES }),
   editComponents: jsonb('edit_components').$type<unknown[]>(),
   editError: text('edit_error'),
   editRequestedAt: tz('edit_requested_at'),
   editRequestedByUserId: text('edit_requested_by_user_id'),
+  /** When the job committed its one attempt to send the edit (the database's time). */
+  editAttemptedAt: tz('edit_attempted_at'),
   lastSyncedAt: tz('last_synced_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),

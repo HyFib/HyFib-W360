@@ -45,7 +45,7 @@ import {
   validateDefinition,
   type TemplateDefinition,
 } from './definition';
-import { reconcileTemplateEdit, templateUsage, writeEditTemplate } from './edit';
+import { databaseNow, reconcileTemplateEdit, templateUsage, writeEditTemplate } from './edit';
 import { templateEditBlocker } from './edit-model';
 import {
   enqueueTemplateJob,
@@ -619,7 +619,23 @@ export function createTemplatesService(deps: TemplateDeps) {
               ),
             );
           if (!row) throw notFound('Template');
-          return templateUsage(tx, ctx.tenant.id, templateId);
+          const usage = await templateUsage(tx, ctx.tenant.id, templateId);
+          // Every role that submits templates reads these (a unit test pins it); a company's own
+          // permission choices could differ, so names are shown only to members who may read them.
+          return {
+            campaigns: usage.campaigns.map((c) => ({
+              ...c,
+              name: can(ctx, 'campaigns.read') ? c.name : null,
+            })),
+            automations: usage.automations.map((a) => ({
+              ...a,
+              name: can(ctx, 'automations.read') ? a.name : null,
+            })),
+            storeRules: usage.storeRules.map((r) => ({
+              ...r,
+              storeName: can(ctx, 'commerce.read') ? r.storeName : null,
+            })),
+          };
         },
         { accessMode: 'read only' },
       );
@@ -1277,6 +1293,8 @@ export async function syncTemplates(
 
   await deps.db.run(scope, async (tx) => {
     const now = deps.clock.now();
+    // An edit's window is judged on the database's clock, which set its request time (ADR-404).
+    const dbNow = await databaseNow(tx);
     const local = await tx
       .select()
       .from(messageTemplates)
@@ -1366,13 +1384,7 @@ export async function syncTemplates(
           });
         }
         // An edit whose answer was lost: Meta's content confirms it, or the window ends (ADR-404).
-        await reconcileTemplateEdit(
-          tx,
-          scope.tenantId,
-          { ...existing, status: changed ? status : existing.status },
-          remote,
-          now,
-        );
+        await reconcileTemplateEdit(tx, scope.tenantId, existing, remote, now, dbNow);
       } else if (category && components) {
         const id = uuidv7();
         await tx.insert(messageTemplates).values({
@@ -1449,7 +1461,7 @@ export async function syncTemplates(
           source: 'sync',
           at: now,
         });
-        await reconcileTemplateEdit(tx, scope.tenantId, row, null, now);
+        await reconcileTemplateEdit(tx, scope.tenantId, row, null, now, dbNow);
       }
     }
     await tx

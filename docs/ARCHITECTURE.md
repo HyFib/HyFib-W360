@@ -323,7 +323,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `templates/shared.ts`. A member with `templates.submit` (or a key with that scope, `POST
 /message-templates/{id}/edit`) sends new content in the draft editor after seeing where the
   template is used (`templateUsage`: unfinished campaigns, published automations, store rules);
-  name, language and category stay, and an edit is refused while a campaign using it is `running`.
+  name, language and category stay; an edit is refused while a campaign using it is `scheduled` or
+  `running` (read under a share lock), and one that changes its shape (`templateShape`) while
+  anything uses it. The job carries the edit's id and commits one attempt before posting.
   Written ahead on the template (`edit_state = 'sending'`, `edit_components`, who and when, an
   `edit_requested` status change, migration 0316) and sent by the `template.edit` queue (paced by
   ADR-399, deferred like a submission): `POST /{template-id}` with the unchanged category and the

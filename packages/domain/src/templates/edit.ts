@@ -1,4 +1,4 @@
-import { AppError } from '@w360/core';
+import { AppError, uuidv7 } from '@w360/core';
 import {
   and,
   asc,
@@ -36,6 +36,8 @@ import {
   editRefusalText,
   editTemplateRequest,
   SENDING_CAMPAIGN_STATUSES,
+  TEMPLATE_EDIT_CONFIRM_WINDOW_MS,
+  TEMPLATE_EDIT_SEND_MARGIN_MS,
   templateEditRefusal,
 } from './edit-model';
 import {
@@ -64,10 +66,13 @@ const USAGE_LIMIT = 50;
 
 /** Where a template is used, as a member sees it before editing it. */
 export interface TemplateUsage {
-  /** Campaigns not finished yet that send it, `running` ones sending it now. */
-  campaigns: { id: string; name: string; status: CampaignStatus }[];
+  /**
+   * Campaigns not finished yet that send it, `running` ones sending it now. A name is null for a
+   * member who may not read campaigns (as for automations and stores below).
+   */
+  campaigns: { id: string; name: string | null; status: CampaignStatus }[];
   /** Published automations (active or paused) whose live version has a step sending it. */
-  automations: { id: string; name: string; status: string }[];
+  automations: { id: string; name: string | null; status: string }[];
   /** Order message and cart reminder rules of the company's stores that send it. */
   storeRules: { id: string; storeName: string | null; event: string; enabled: boolean }[];
 }
@@ -136,10 +141,36 @@ export async function templateUsage(
   return { campaigns: campaignRows, automations: automationRows, storeRules: ruleRows };
 }
 
-/** How many of the company's campaigns using the template are sending it now. */
-async function sendingCampaignCount(tx: Tx, tenantId: string, templateId: string) {
-  const [row] = await tx
-    .select({ n: sql<number>`count(*)::int` })
+const STORE_EVENT_NAMES: Record<string, string> = {
+  order_placed: 'new order',
+  cod_confirmation: 'cash on delivery confirmation',
+  order_shipped: 'order shipped',
+  order_delivered: 'order delivered',
+  order_cancelled: 'order cancelled',
+  cart_reminder: 'cart reminder',
+  cart_second_reminder: 'second cart reminder',
+};
+
+/** What uses the template, as a refusal names it ("campaign “Diwali”", …). */
+export function usageLabels(usage: TemplateUsage): string[] {
+  return [
+    ...usage.campaigns.map((c) => (c.name ? `campaign “${c.name}”` : 'a campaign')),
+    ...usage.automations.map((a) => (a.name ? `automation “${a.name}”` : 'an automation')),
+    ...usage.storeRules.map(
+      (r) =>
+        `${r.storeName ? `the ${r.storeName} ` : 'a store’s '}${STORE_EVENT_NAMES[r.event] ?? r.event} message`,
+    ),
+  ];
+}
+
+/**
+ * The company's campaigns using the template that are scheduled or sending, read under a share
+ * lock: a runner starting one holds its row, so the edit waits for it, and a campaign that has not
+ * started cannot start before the edit's transaction ends.
+ */
+async function sendingCampaigns(tx: Tx, tenantId: string, templateId: string) {
+  return tx
+    .select({ id: campaigns.id })
     .from(campaigns)
     .where(
       and(
@@ -147,17 +178,19 @@ async function sendingCampaignCount(tx: Tx, tenantId: string, templateId: string
         eq(campaigns.templateId, templateId),
         inArray(campaigns.status, [...SENDING_CAMPAIGN_STATUSES]),
       ),
-    );
-  return Number(row?.n ?? 0);
+    )
+    .for('share');
 }
 
 /**
  * Sends a locked template Meta has an edit, as the Templates page and the API do (ADR-404): the
- * content is checked as the editor checks drafts (422), the edit as `templateEditRefusal` decides,
- * for a connected account (412) Meta is not throttling (503). Written ahead: the template records
- * the content sent, when, by whom (`actorUserId`, null for a key) and `edit_state = 'sending'`,
- * with an `edit_requested` status change, before the `template.edit` job is queued. Its status,
- * category and content stay what Meta reports until Meta answers.
+ * content is checked as the editor checks drafts (422), the edit as `templateEditRefusal` decides
+ * (campaigns scheduled or sending, and what still sends the template when its variables or buttons
+ * change), for a connected account (412) Meta is not throttling (503). Written ahead: the template
+ * records a new edit id, the content sent, when (the database's time), by whom (`actorUserId`,
+ * null for a key) and `edit_state = 'sending'`, with an `edit_requested` status change, before the
+ * `template.edit` job is queued with the edit's id. Its status, category and content stay what
+ * Meta reports until Meta answers.
  */
 export async function writeEditTemplate(
   tx: Tx,
@@ -183,11 +216,10 @@ export async function writeEditTemplate(
   if (issues.length > 0) {
     throw new AppError('validation_failed', issues[0]?.message ?? 'Invalid template', { issues });
   }
-  const refusal = templateEditRefusal(
-    row,
-    definition,
-    await sendingCampaignCount(tx, tenantId, row.id),
-  );
+  const refusal = await templateEditRefusal(row, definition, {
+    sendingCampaigns: (await sendingCampaigns(tx, tenantId, row.id)).length,
+    users: async () => usageLabels(await templateUsage(tx, tenantId, row.id)),
+  });
   if (refusal) throw refusal;
   const waba = await templateAccount(tx, tenantId, row.whatsappAccountId);
   if (waba.status !== 'connected') {
@@ -200,20 +232,23 @@ export async function writeEditTemplate(
   assertManagementOpen(waba.managementPausedUntil, at, timeZone);
   const category = row.category === 'MARKETING' ? 'MARKETING' : 'UTILITY';
   const request = editTemplateRequest(category, definition);
-  const [updated] = await tx
+  const editId = uuidv7();
+  await tx
     .update(messageTemplates)
     .set({
+      editId,
       editState: 'sending',
       editComponents: request.components,
       editError: null,
-      editRequestedAt: at,
+      // The database's time: the window that gives up on it is judged on the database's clock.
+      editRequestedAt: sql`now()`,
       editRequestedByUserId: actorUserId,
+      editAttemptedAt: null,
       // A new request: an earlier deferral for a pause no longer applies (ADR-399).
       managementDeferredUntil: null,
       version: sql`${messageTemplates.version} + 1`,
     })
-    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, row.id)))
-    .returning({ version: messageTemplates.version });
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, row.id)));
   await insertStatusEvent(tx, tenantId, {
     templateId: row.id,
     status: 'edit_requested',
@@ -227,18 +262,34 @@ export async function writeEditTemplate(
     'template.edit',
     tenantId,
     actorUserId,
-    row.id,
-    `${row.id}:edit:${updated?.version ?? 0}`,
+    templateEditRef(row.id, editId),
+    `${row.id}:edit:${editId}`,
   );
+}
+
+/** A `template.edit` job's reference: the template and the edit it sends. */
+export function templateEditRef(templateId: string, editId: string): string {
+  return `${templateId}:${editId}`;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The template and edit a `template.edit` job's reference names, or null for any other text. */
+export function parseTemplateEditRef(ref: string): { templateId: string; editId: string } | null {
+  const [templateId, editId, ...rest] = ref.split(':');
+  if (rest.length > 0 || !templateId || !editId) return null;
+  return UUID_RE.test(templateId) && UUID_RE.test(editId) ? { templateId, editId } : null;
 }
 
 /** The edit columns cleared once an edit is settled as made. */
 const EDIT_CLEARED = {
+  editId: null,
   editState: null,
   editComponents: null,
   editError: null,
   editRequestedAt: null,
   editRequestedByUserId: null,
+  editAttemptedAt: null,
   managementDeferredUntil: null,
 } as const;
 
@@ -247,34 +298,66 @@ const knownCategory = (category: string) =>
     ? category
     : null;
 
+/** The open edit a settle applies to: its template, its id, and who asked. */
+interface EditRef {
+  id: string;
+  name: string;
+  language: string;
+  editId: string;
+  editRequestedByUserId: string | null;
+}
+
+/**
+ * Locks the template and gives its status and edit state now, when its open edit is still `editId`
+ * in one of `states`; null otherwise (another edit, or none).
+ */
+async function lockOpenEdit(
+  tx: Tx,
+  tenantId: string,
+  templateId: string,
+  editId: string,
+  states: readonly ('sending' | 'failed')[],
+) {
+  const [current] = await tx
+    .select({ status: messageTemplates.status, editState: messageTemplates.editState })
+    .from(messageTemplates)
+    .where(
+      and(
+        eq(messageTemplates.tenantId, tenantId),
+        eq(messageTemplates.id, templateId),
+        eq(messageTemplates.editId, editId),
+        inArray(messageTemplates.editState, [...states]),
+      ),
+    )
+    .for('update');
+  return current ?? null;
+}
+
 /**
  * Settles an edit as made, in the caller's transaction: the edit columns are cleared and, when
  * Meta's template was read, its status, category and components stored as Meta reports them;
  * the status history gets an `edited` change naming the member who asked, and one for the status
- * Meta reports when it differs; the audit log a `template.edited` entry. False when the edit was
- * no longer the one sending (`requestedAt`).
+ * Meta reports when it differs from the status stored now (the row is locked first, so a sync in
+ * between is not repeated); the audit log a `template.edited` entry. False when the open edit is
+ * no longer this one in one of `states`.
  */
 async function settleEditMade(
   tx: Tx,
   tenantId: string,
-  row: {
-    id: string;
-    name: string;
-    language: string;
-    status: string;
-    editRequestedAt: Date;
-    editRequestedByUserId: string | null;
-  },
+  row: EditRef,
   remote: RemoteTemplate | null,
   source: 'edit' | 'sync',
   reason: string,
+  states: readonly ('sending' | 'failed')[],
   at: Date,
 ): Promise<boolean> {
+  const current = await lockOpenEdit(tx, tenantId, row.id, row.editId, states);
+  if (!current) return false;
   const status = remote ? mapProviderTemplateStatus(remote.status) : null;
   const category = remote ? knownCategory(remote.category) : null;
   const components =
     remote && JSON.stringify(remote.components).length <= 30_000 ? remote.components : null;
-  const updated = await tx
+  await tx
     .update(messageTemplates)
     .set({
       ...EDIT_CLEARED,
@@ -285,16 +368,7 @@ async function settleEditMade(
       ...(components ? { components } : {}),
       version: sql`${messageTemplates.version} + 1`,
     })
-    .where(
-      and(
-        eq(messageTemplates.tenantId, tenantId),
-        eq(messageTemplates.id, row.id),
-        eq(messageTemplates.editState, 'sending'),
-        eq(messageTemplates.editRequestedAt, row.editRequestedAt),
-      ),
-    )
-    .returning({ id: messageTemplates.id });
-  if (updated.length === 0) return false;
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, row.id)));
   await insertStatusEvent(tx, tenantId, {
     templateId: row.id,
     status: 'edited',
@@ -303,7 +377,7 @@ async function settleEditMade(
     actorUserId: row.editRequestedByUserId,
     at,
   });
-  if (status && status !== row.status) {
+  if (status && status !== current.status) {
     await insertStatusEvent(tx, tenantId, {
       templateId: row.id,
       status,
@@ -327,33 +401,26 @@ async function settleEditMade(
 }
 
 /**
- * Settles an edit as failed, in the caller's transaction: `failed` with the reason members read,
- * the content kept so it can be changed and sent again, an `edit_failed` status change and a
- * `template.edit_failed` audit entry. False when the edit was no longer the one sending.
+ * Settles a sending edit as failed, in the caller's transaction: `failed` with the reason members
+ * read, the content kept so it can be changed and sent again (and so a sync can still confirm it,
+ * should Meta apply it late), an `edit_failed` status change and a `template.edit_failed` audit
+ * entry. False when the open edit is no longer this one, sending.
  */
 async function settleEditFailed(
   tx: Tx,
   tenantId: string,
-  row: { id: string; editRequestedAt: Date; editRequestedByUserId: string | null },
+  row: EditRef,
   error: string,
   eventReason: string,
   source: 'edit' | 'sync',
   auditMetadata: Record<string, unknown>,
   at: Date,
 ): Promise<boolean> {
-  const updated = await tx
+  if (!(await lockOpenEdit(tx, tenantId, row.id, row.editId, ['sending']))) return false;
+  await tx
     .update(messageTemplates)
     .set({ editState: 'failed', editError: error.slice(0, 1000), managementDeferredUntil: null })
-    .where(
-      and(
-        eq(messageTemplates.tenantId, tenantId),
-        eq(messageTemplates.id, row.id),
-        eq(messageTemplates.editState, 'sending'),
-        eq(messageTemplates.editRequestedAt, row.editRequestedAt),
-      ),
-    )
-    .returning({ id: messageTemplates.id });
-  if (updated.length === 0) return false;
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, row.id)));
   await insertStatusEvent(tx, tenantId, {
     templateId: row.id,
     status: 'edit_failed',
@@ -372,6 +439,14 @@ async function settleEditFailed(
   return true;
 }
 
+/** The database's time, in milliseconds (a computed value is read as a number, not a column). */
+export async function databaseNow(tx: Tx): Promise<Date> {
+  const res = await tx.execute<{ ms: number | string }>(
+    sql`select (extract(epoch from now()) * 1000)::float8 as ms`,
+  );
+  return new Date(Number(res.rows[0]?.ms));
+}
+
 export interface TemplateEditWorkerDeps {
   db: Database;
   keyring: Keyring;
@@ -382,19 +457,30 @@ export interface TemplateEditWorkerDeps {
 /** `paused`: Meta throttles the account's management calls; nothing was sent (ADR-399). */
 export type TemplateEditOutcome = 'done' | 'skipped' | 'retry' | ManagementPaused;
 
+const UNSENT_IN_TIME =
+  'HyFib could not send the edit to Meta within 10 minutes of the request. Send it again.';
+
 /**
- * Worker: sends the edit of a template whose edit is `sending` (`POST /{template-id}`), paced by
- * Meta's usage header (ADR-399). Meta's `success: true` makes the edit, and Meta's template is then
- * read again by id (`GET /{template-id}`) and stored as Meta reports it; when that read cannot be
- * made, a sync is requested instead and nothing is assumed. A refusal is recorded with Meta's code
- * and message. Only a connection that failed before sending is retried; a lost answer waits for the
- * sync, which finds the content sent in Meta's template or gives up after the window.
+ * Worker: sends the edit its reference names (`POST /{template-id}`), at most once, paced by
+ * Meta's usage header (ADR-399). Nothing happens unless the template's open edit is still that
+ * edit and `sending`. Before the request the job commits `edit_attempted_at` in its own
+ * transaction, and only while the window has a minute left (the database's clock); a job run again
+ * after an attempt (a retry after a crash, an expired job) sends nothing and asks for a sync, which
+ * confirms the edit from Meta's components or gives up after the window; a job too late settles
+ * the edit as not sent. Meta's `success: true` makes the edit, and Meta's template is then read
+ * again by id (`GET /{template-id}`) and stored as Meta reports it; when that read cannot be made,
+ * a sync is requested instead and nothing is assumed. A refusal is recorded with Meta's code and
+ * message. A connection that failed before sending, or a refusal for now that paused the account,
+ * clears the attempt (Meta has nothing) before the retry or deferral.
  */
 export async function processTemplateEdit(
   deps: TemplateEditWorkerDeps,
   scope: TenantScope,
-  templateId: string,
+  ref: string,
 ): Promise<TemplateEditOutcome> {
+  const target = parseTemplateEditRef(ref);
+  if (!target) return 'skipped';
+  const { templateId, editId } = target;
   const loaded = await deps.db.run(scope, async (tx) => {
     const [row] = await tx
       .select()
@@ -404,10 +490,10 @@ export async function processTemplateEdit(
       );
     if (
       !row ||
+      row.editId !== editId ||
       row.editState !== 'sending' ||
       !row.providerTemplateId ||
-      !row.editComponents ||
-      !row.editRequestedAt
+      !row.editComponents
     ) {
       return null;
     }
@@ -420,15 +506,21 @@ export async function processTemplateEdit(
     return {
       row: {
         ...row,
+        editId,
         providerTemplateId: row.providerTemplateId,
         editComponents: row.editComponents,
-        editRequestedAt: row.editRequestedAt,
       },
       credential,
     };
   });
   if (!loaded) return 'skipped';
   const { row, credential } = loaded;
+  const thisEdit = and(
+    eq(messageTemplates.tenantId, scope.tenantId),
+    eq(messageTemplates.id, templateId),
+    eq(messageTemplates.editId, editId),
+    eq(messageTemplates.editState, 'sending'),
+  );
   const fail = (error: string, eventReason: string, audit: Record<string, unknown>) =>
     deps.db.run(scope, (tx) =>
       settleEditFailed(
@@ -442,23 +534,30 @@ export async function processTemplateEdit(
         deps.clock.now(),
       ),
     );
+  const requestSync = () =>
+    deps.db.run(scope, (tx) =>
+      requestSyncTx(tx, scope.tenantId, row.whatsappAccountId, deps.clock.now()),
+    );
+  /** Meta has nothing of this attempt: a later run may send it. */
+  const clearAttempt = () =>
+    deps.db.run(scope, (tx) =>
+      tx.update(messageTemplates).set({ editAttemptedAt: null }).where(thisEdit),
+    );
   const defer = async (pausedUntil: Date): Promise<ManagementPaused> => {
     await deps.db.run(scope, (tx) =>
       tx
         .update(messageTemplates)
-        .set({ managementDeferredUntil: managementResumeAt(pausedUntil) })
-        .where(
-          and(
-            eq(messageTemplates.tenantId, scope.tenantId),
-            eq(messageTemplates.id, templateId),
-            eq(messageTemplates.editState, 'sending'),
-            eq(messageTemplates.editRequestedAt, row.editRequestedAt),
-          ),
-        ),
+        .set({ managementDeferredUntil: managementResumeAt(pausedUntil), editAttemptedAt: null })
+        .where(thisEdit),
     );
     return { paused: pausedUntil };
   };
 
+  if (row.editAttemptedAt) {
+    // An earlier run may have reached Meta: never sent twice; the sync settles it.
+    await requestSync();
+    return 'done';
+  }
   if (!credential) {
     await fail(
       'The WhatsApp account is not connected. Reconnect it and edit the template again.',
@@ -477,6 +576,38 @@ export async function processTemplateEdit(
   }
   const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
   if (paused) return defer(paused);
+
+  // The one attempt, committed before the request, while the window has a minute left.
+  const attempt = await deps.db.run(scope, async (tx) => {
+    const marked = await tx
+      .update(messageTemplates)
+      .set({ editAttemptedAt: sql`now()` })
+      .where(
+        and(
+          thisEdit,
+          sql`${messageTemplates.editAttemptedAt} is null`,
+          sql`greatest(${messageTemplates.editRequestedAt}, coalesce(${messageTemplates.managementDeferredUntil}, ${messageTemplates.editRequestedAt})) > now() - make_interval(secs => ${(TEMPLATE_EDIT_CONFIRM_WINDOW_MS - TEMPLATE_EDIT_SEND_MARGIN_MS) / 1000})`,
+        ),
+      )
+      .returning({ id: messageTemplates.id });
+    if (marked.length > 0) return 'marked' as const;
+    const [now] = await tx
+      .select({ attemptedAt: messageTemplates.editAttemptedAt })
+      .from(messageTemplates)
+      .where(thisEdit);
+    if (!now) return 'gone' as const;
+    return now.attemptedAt ? ('attempted' as const) : ('late' as const);
+  });
+  if (attempt === 'gone') return 'skipped';
+  if (attempt === 'attempted') {
+    await requestSync();
+    return 'done';
+  }
+  if (attempt === 'late') {
+    await fail(UNSENT_IN_TIME, 'not sent within the confirmation window', { kind: 'not_sent' });
+    return 'done';
+  }
+
   const result = await deps.graph.editTemplate(row.providerTemplateId, credential.token, {
     category: row.category,
     components: row.editComponents as Record<string, unknown>[],
@@ -504,6 +635,7 @@ export async function processTemplateEdit(
         remote
           ? `Meta accepted the edit and reports the template as ${remote.status}.`
           : 'Meta accepted the edit; its status is read at the next sync.',
+        ['sending', 'failed'],
         now,
       );
       if (settled && !remote) await requestSyncTx(tx, scope.tenantId, row.whatsappAccountId, now);
@@ -511,7 +643,8 @@ export async function processTemplateEdit(
     return 'done';
   }
   if (result.kind === 'retryable' && result.httpStatus === undefined) {
-    // The connection failed before the request was sent: safe to try again.
+    // The connection failed before the request was sent: Meta has nothing, safe to try again.
+    await clearAttempt();
     return 'retry';
   }
   if (result.kind === 'unknown' || result.kind === 'retryable') {
@@ -520,14 +653,7 @@ export async function processTemplateEdit(
       await tx
         .update(messageTemplates)
         .set({ editError: 'Waiting for Meta to confirm the edit.' })
-        .where(
-          and(
-            eq(messageTemplates.tenantId, scope.tenantId),
-            eq(messageTemplates.id, templateId),
-            eq(messageTemplates.editState, 'sending'),
-            eq(messageTemplates.editRequestedAt, row.editRequestedAt),
-          ),
-        );
+        .where(thisEdit);
       await requestSyncTx(tx, scope.tenantId, row.whatsappAccountId, deps.clock.now());
     });
     return 'done';
@@ -556,8 +682,10 @@ export async function processTemplateEdit(
 }
 
 /**
- * Sync: settles an edit still sending against Meta's listing (`editReconciliation`), in the sync's
- * transaction. `remote` null: Meta no longer lists the template, so the edit cannot have been made.
+ * Sync: settles an open edit against Meta's listing (`editReconciliation`), in the sync's
+ * transaction, the window judged on the database's time (`dbNow`). A sending or failed edit whose
+ * content Meta's template shows is made; a sending one without it fails after the window.
+ * `remote` null: Meta no longer lists the template, so a sending edit cannot have been made.
  */
 export async function reconcileTemplateEdit(
   tx: Tx,
@@ -565,10 +693,12 @@ export async function reconcileTemplateEdit(
   row: typeof messageTemplates.$inferSelect,
   remote: RemoteTemplate | null,
   now: Date,
+  dbNow: Date,
 ): Promise<void> {
-  if (row.editState !== 'sending' || !row.editRequestedAt || !row.editComponents) return;
-  const edit = { ...row, editRequestedAt: row.editRequestedAt };
+  if (!row.editState || !row.editId || !row.editRequestedAt || !row.editComponents) return;
+  const edit = { ...row, editId: row.editId };
   if (!remote) {
+    if (row.editState !== 'sending') return;
     await settleEditFailed(
       tx,
       tenantId,
@@ -590,7 +720,7 @@ export async function reconcileTemplateEdit(
     },
     remote.category,
     remote.components,
-    now,
+    dbNow,
   );
   if (outcome === 'confirmed') {
     await settleEditMade(
@@ -599,7 +729,10 @@ export async function reconcileTemplateEdit(
       edit,
       remote,
       'sync',
-      'Meta lists the edited content (its answer to the edit was lost).',
+      row.editState === 'failed'
+        ? 'Meta lists the edited content after the edit was reported as failed.'
+        : 'Meta lists the edited content (its answer to the edit was lost).',
+      ['sending', 'failed'],
       now,
     );
   } else if (outcome === 'unconfirmed') {

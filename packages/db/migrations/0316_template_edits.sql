@@ -2,18 +2,22 @@
 --
 -- Meta's OpenAPI description defines `POST /{TEMPLATE_ID}` (operationId `editTemplate`), whose
 -- body takes the same components as creation and whose answer is `{ "success": true }` (research
--- M-086, M-201). An edit is written ahead, as a submission is: the template records the content
--- sent (`edit_components`), when and by whom it was asked (`edit_requested_at`,
--- `edit_requested_by_user_id`: the member, or null for an API key, which the audit log names) and
--- `edit_state = 'sending'` before Meta hears of it, and a `template.edit` job sends it. One edit
--- at a time per template: another is refused while one is sending. Meta's answer settles it: on
--- success the template is read again from Meta and the edit columns are cleared; on a refusal
--- `edit_state` becomes `failed` with Meta's code and message in `edit_error`, and the content
--- stays so the member can change it and send again. A lost answer is settled by the template sync:
--- Meta's components showing the content sent confirm the edit; 10 minutes after the request (or
--- after a deferral for Meta's pause, `management_deferred_until`, ADR-399) without them it becomes
--- `failed`. The template's `status`, `category` and `components` keep mirroring what Meta reports;
--- nothing is assumed about the status an edit gives.
+-- M-086, M-201). An edit is written ahead, as a submission is: the template records the edit's id
+-- (`edit_id`, which its `template.edit` job carries, so a job for an older edit does nothing), the
+-- content sent (`edit_components`), when (`edit_requested_at`, the database's time) and by whom
+-- (`edit_requested_by_user_id`: the member, or null for an API key, which the audit log names) and
+-- `edit_state = 'sending'` before Meta hears of it. One edit at a time per template. The job
+-- commits `edit_attempted_at` (the database's time) in its own transaction before it sends the
+-- request, and only while the 10-minute window has a minute left; a job run again after an attempt
+-- never sends it again but asks for a sync. Meta's answer settles it: on success the template is
+-- read again from Meta and the edit columns are cleared; on a refusal `edit_state` becomes `failed`
+-- with Meta's code and message in `edit_error`, and the content stays so the member can change it
+-- and send again. The template sync settles a lost answer, and a late one: Meta's components
+-- showing the content sent confirm the edit, even one already `failed`; 10 minutes after the
+-- request (or after a deferral for Meta's pause, `management_deferred_until`, ADR-399), judged on
+-- the database's clock, a `sending` edit without them becomes `failed`. The template's `status`,
+-- `category` and `components` keep mirroring what Meta reports; nothing is assumed about the
+-- status an edit gives.
 --
 -- Template content written by the company and operational metadata: exported with the template,
 -- deleted with it (deletion step 730, batch).
@@ -22,18 +26,22 @@
 -- trivially for existing rows (all null). A web server or worker of the release before never names
 -- the columns, and never sees `edit` events (it reads them as text).
 ALTER TABLE app.message_templates
+  ADD COLUMN edit_id uuid,
   ADD COLUMN edit_state text CHECK (edit_state IN ('sending', 'failed')),
   ADD COLUMN edit_components jsonb
     CHECK (jsonb_typeof(edit_components) = 'array' AND pg_column_size(edit_components) <= 32768),
   ADD COLUMN edit_error text CHECK (char_length(edit_error) <= 1000),
   ADD COLUMN edit_requested_at timestamptz,
   ADD COLUMN edit_requested_by_user_id text REFERENCES auth.users (id),
+  ADD COLUMN edit_attempted_at timestamptz,
   ADD CONSTRAINT message_templates_edit_shape
-    CHECK (edit_state IS NULL OR (edit_components IS NOT NULL AND edit_requested_at IS NOT NULL));
+    CHECK (edit_state IS NULL
+           OR (edit_id IS NOT NULL AND edit_components IS NOT NULL AND edit_requested_at IS NOT NULL));
 
 -- The web app and the worker write the edit in the company's scope (the table's RLS applies); the
 -- runtime role already selects every column of the table (0005).
-GRANT UPDATE (edit_state, edit_components, edit_error, edit_requested_at, edit_requested_by_user_id)
+GRANT UPDATE (edit_id, edit_state, edit_components, edit_error, edit_requested_at,
+              edit_requested_by_user_id, edit_attempted_at)
   ON app.message_templates TO w360_app;
 -- The sweep's due list below reads whether an edit is sending, and nothing else of it.
 GRANT SELECT (edit_state) ON app.message_templates TO w360_definer;

@@ -17385,6 +17385,63 @@ editor cannot represent, an edit of several language versions at once, and any v
 Meta (the Graph stand-in only); the per-template edit limits Meta may apply are reported as Meta
 reports them.
 
+Review (before merge): an independent review found no High issue and three Mediums in the edit's
+lifecycle, all fixed in migration 0316 (not applied anywhere before the fix) and the code:
+
+- **Sent at most once (M1):** a job run again after `success: true` whose settle failed, or after
+  the worker died, posted the same content again, and a refusal of that second post marked an edit
+  Meta had as failed; an old retrying job could also send a newer edit queued after it. Now each
+  edit has an id (`edit_id`) that its job's reference carries (`<template id>:<edit id>`), and a job
+  whose edit is no longer the template's open one does nothing. Before the request the job commits
+  `edit_attempted_at` (the database's time) in its own transaction; a run that finds it set sends
+  nothing and requests a sync, which settles the edit from Meta's components. A connection that
+  failed before sending, and a refusal for now that paused the account, clear it (Meta has
+  nothing). So a refusal only ever answers the edit's single attempt.
+- **A late-applied edit is reconciled (M2):** the sync now also confirms a `failed` edit whose
+  content Meta's template shows (`edited`, source `sync`), so an edit Meta applied after the window,
+  or after an answer HyFib read as a failure, no longer stays failed with a false message (or
+  blocks sending the same content again as "the content Meta already has"). The job, and a success
+  answer arriving late, settle a failed edit as made too. The job sends only while the window has
+  at least a minute left (`TEMPLATE_EDIT_SEND_MARGIN_MS`, on the database's clock); later it settles
+  the edit as not sent ("HyFib could not send the edit to Meta within 10 minutes of the request.
+  Send it again.").
+- **An edit cannot silently break what sends the template (M3):** automations compare a template's
+  header, body and link value counts with the values their step stores, and an asking step its
+  quick-reply buttons' positions and titles (`template_changed`); campaigns and store rules pause
+  or skip on the same counts. HyFib now computes the template's shape before and after
+  (`templateShape`: header, body and link value counts, link button positions, quick-reply
+  positions and titles) and, when an edit changes it while an unfinished campaign, a published
+  automation or a store rule uses the template, refuses it, naming up to three of them: "This edit
+  changes the template's variables or buttons, which … rely on. Change those first so they no longer
+  use it, or add a new template instead." Wording edits (texts, footer, a static link, a link's
+  address before its value) stay allowed while it is used.
+- **Campaigns about to start (L1):** the campaign check now reads campaigns using the template that
+  are `scheduled` or `running` under a share lock in the edit's transaction (a runner starting one
+  holds its row, so the edit waits for it) and refuses while any exists. The campaign runner does
+  not also read `edit_state`: an edit that changes the shape is refused while any unfinished
+  campaign uses the template, a wording edit keeps every campaign's stored values valid, and
+  holding a campaign for an edit would need a new pause reason (a constraint change) for a case the
+  refusals already cover; a campaign scheduled after an edit was sent sends the content Meta has at
+  each send, as the confirmation says.
+- **No duplicate status change (L2):** settling an edit locks the template and compares Meta's
+  status with the status stored then, so a sync between the request and the answer is not recorded
+  again (nor sent again as `template.status_changed`).
+- **Unconfirmed points stated as such (L3):** leaving `name` and `language` out of the request is
+  HyFib's reading (the spec's only example sends all four fields), and settling a lost answer
+  relies on Meta's listing showing the new components before Meta approves them, which is not
+  confirmed; if it does not, every lost answer ends as "could not confirm" and the member checks
+  WhatsApp Manager (RUNBOOKS), and an edit Meta applies later is still confirmed by a later sync.
+- **One clock (L4):** `edit_requested_at` and `edit_attempted_at` are the database's `now()`, and
+  the sync judges the window against the database's time (`databaseNow`), not the web server's or
+  the worker's.
+- **Grants tested (L5):** an integration test asserts `UPDATE` on the seven edit columns for
+  `w360_app` only, and `SELECT` on `edit_state` alone for `w360_definer`, with no `UPDATE`.
+- **Where it is used:** the list is safe to show because every role that may submit templates
+  (owner, administrator, marketer) reads campaigns, automations and commerce (a unit test pins the
+  role matrix); a member whose company took one of those permissions away sees "a campaign", "an
+  automation" or "a store" instead of its name. The refusal of a shape change names them by name
+  (no role that may submit templates lacks those permissions today).
+
 ## ADR-405 A/B template variants for campaigns (P3-04, P5-08, P5-09) (2026-10-21)
 
 Context: P3-04 listed "A/B variants" as remaining. A campaign sent one template to its whole
