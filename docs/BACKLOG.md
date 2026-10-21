@@ -1753,7 +1753,15 @@ verification, app review, Embedded Signup configuration).
 
 AI copilot (budgets, retrieval with pgvector only when shipped, prompt-injection tests); Instagram and
 Messenger; SMS provider; calling (eligibility-gated); HubSpot, Salesforce, Zoho connectors; MCP
-server; SSO (SAML/OIDC via maintained implementation); agency/partner features.
+server **[hosted endpoint built, implemented]** (ADR-416, W-141: `POST /api/mcp`, the stateless
+JSON subset of Streamable HTTP for revision 2026-07-28 and, without sessions, 2025-11-25 and
+2025-06-18; nine tools over the public API's services, each needing its REST call's scopes and
+counted, limited and logged as that call through the REST pipeline: contacts, conversations and
+their messages, templates, campaigns, a text reply inside the 24-hour window and an approved
+template, both once per `idempotencyKey`; customer text marked untrusted; Settings shows the
+endpoint, scopes and a client configuration. Remaining: OAuth for assistants' connectors, SSE,
+resources and prompts, more tools, a self-hostable package (W-142), a run with a real assistant);
+SSO (SAML/OIDC via maintained implementation); agency/partner features.
 
 ## Phase 7 — hardening and rollout
 

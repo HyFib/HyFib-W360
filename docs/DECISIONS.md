@@ -18710,3 +18710,121 @@ link's `download` attribute saved a refusal as a file (removed); a failed export
 rest of the minute's billing sweep (the rest now runs, and the failure is logged and thrown at the
 end); and the sweep function had no specific grant check (added to the isolation suite). All were
 fixed.
+
+## ADR-416 A hosted MCP server over the public API (W-141, P5-08) (2026-10-21)
+
+Context: AI assistants that speak the Model Context Protocol can call tools a server lists. WATI
+hosts such a server (benchmark rows W-141 and W-142). HyFib's public API (ADR-052) already has
+everything such tools need: company keys with scopes, the plan's scopes and monthly requests,
+rate limits, idempotent sends with the 24-hour window and consent checks, and a request log. The
+matrix row W-141 asked for scoped, audited tools over it. The specification's latest revision,
+2026-07-28 (docs/research/mcp.md MCP-001), removed the `initialize` handshake, `ping`, sessions and
+the GET stream that the earlier revisions have, and lets a server serve both kinds of client
+(MCP-004).
+
+Decision:
+
+- **One endpoint, the stateless JSON subset of Streamable HTTP.** `POST /api/mcp` takes one
+  JSON-RPC message and answers one JSON object, or 202 with no body for a notification (MCP-010);
+  never an SSE stream. GET, DELETE and OPTIONS get 405 with `Allow: POST` (MCP-011); no session id
+  is minted or read. A batch (a JSON array) is refused with 400 and -32600, since no revision served
+  allows one (MCP-015), and so is a JSON-RPC response, since the server sends no requests.
+- **Dual-era, served statelessly** (`api/mcp-protocol.ts`). A request whose `_meta` carries
+  `io.modelcontextprotocol/protocolVersion` is served as 2026-07-28: the `MCP-Protocol-Version`
+  header must match it, `Mcp-Method` must equal the method exactly and `Mcp-Name` (for
+  `tools/call`, its Base64 sentinel decoded: the sentinel is defined for `Mcp-Name` only) the
+  tool's name, else 400 with -32020 (MCP-012, MCP-013); another version gets 400 with
+  -32022 listing 2026-07-28, 2025-11-25 and 2025-06-18; the client capabilities are required
+  (-32602, MCP-007); results carry `resultType: "complete"` and the server's identity in `_meta`;
+  `server/discover`, `tools/list` and `tools/call` are served, and anything else is 404 with -32601.
+  An `initialize` request is answered as 2025-11-25 or 2025-06-18 (the version asked when it is one
+  of those, else 2025-11-25, MCP-005), and later legacy requests (`ping`, `tools/list`,
+  `tools/call`) take their version from the header alone, as no session holds it: without the
+  header a server would assume 2025-03-26, which is not served, so the request is refused with 400
+  (MCP-012). Results of legacy requests have the legacy shapes (no `resultType`, `ttlMs` or
+  `cacheScope`). The tool list is the same for every key, in a fixed order, `cacheScope` private
+  with `ttlMs` of five minutes (MCP-009). No SDK: the subset is small and has to run inside the
+  REST pipeline below; the SDK was not installed (MCP-021).
+- **The REST API's pipeline, not a fork.** After the Origin check, the route hands the request to
+  `handleApiRequest`, the function every REST route uses: the bearer key and its addresses, failed
+  authentication per address, the key's and the company's rate limits, the plan's monthly requests
+  and the key's own limit, the plan's scopes, the JSON body within 64 KB and the request log.
+  Three additive options let it carry another protocol: `errorBody`, so its refusals keep their
+  status, headers and message but are written as a JSON-RPC error whose code is the HTTP status
+  (or -32700 for a body that is not JSON) and whose data is the REST code, reason and request id,
+  with the request's id once the body was read and its id can be (MCP-006, MCP-010); `nulCheck:
+false`, because the NUL refusal moves into the tools' argument schemas (`parseInput` refuses the
+  character naming its path, a tool error the model can correct) and nothing else of a message is
+  stored; and a `json` result with fields for the log. Every authenticated POST counts as one request, so a tool
+  call is accounted as exactly the one REST call it mirrors, and `initialize`, its notification and
+  `tools/list` count too (a client's connection costs about three requests). The log line is the
+  REST one (`api request`, path `/api/mcp`) with `mcp`: the method, the version, the tool, the REST
+  call it mirrors (`mirrors`), the status that call would have answered (`mirroredStatus`, 500
+  for an unexpected failure, which operators alert on as the HTTP line says 200) and whether a send
+  was replayed; the method is logged at most 128 characters long. Unauthenticated requests, other origins and other methods are refused before anything
+  is counted, as for REST.
+- **Nine tools on the domain services** (`api/mcp-tools.ts`, `api/mcp-model.ts`): search_contacts
+  (`GET /contacts`), get_contact, list_conversations, list_conversation_messages, list_templates
+  (approved, sendable), list_campaigns, get_campaign, send_text_reply and send_template (both
+  `POST /messages`). Each calls the service its REST call calls, with the same input, never HTTP
+  to HyFib. A call checks the scopes first (`assertAnyScope`, any one of the tool's: send_template
+  takes `messages.send` or `messages.send_marketing`, the template's category deciding in the
+  service as for REST), then the arguments against the tool's schema, then runs the service, which
+  checks the scope, the company's status and its input again. Input schemas are JSON Schema 2020-12
+  generated from the REST API's zod schemas (`z.toJSONSchema`, input side); the id tools take
+  `contactId`, `conversationId` or `campaignId`, and every schema is closed to unknown arguments,
+  so a `tenantId` argument is refused, never read. Tenant scope comes only from the verified key's
+  context, bound into the runner before any message is read.
+- **Results and errors.** A result is the REST response body as JSON text content; a send's also
+  says `replayed`. Everything the REST call refuses is a tool error (`isError: true`) whose text is
+  the REST error body with its status, code, message, reason and field issues, so the model can
+  correct itself (MCP-008), except that arguments failing the tool's schema are -32602 for
+  2025-06-18, whose tools page lists invalid arguments among protocol errors (the move to tool
+  errors came in 2025-11-25); an unknown tool or malformed params are JSON-RPC errors; an unexpected
+  error is -32603 with the REST API's generic message and the request id only, its cause logged.
+  Nothing secret is in a result: the bodies are the public API's, which hold no token or secret.
+- **Sends, idempotent as REST's.** The send tools require an `idempotencyKey` argument under the
+  header's rule (1 to 255 visible ASCII characters) and use the REST idempotency store, per key
+  for 24 hours: the same key and arguments (in any order: the hash is over canonical JSON) return
+  the first answer without sending, other arguments are refused with `idempotency_key_reused`. The
+  hash names the tool, so a key used by a REST request is never replayed by a tool send or the
+  other way round (refused instead). The 24-hour window, consent, the frequency cap and template
+  checks are the services' own. Sends are recorded as REST sends are, as the key's (`api_key_id`,
+  sender `api`); reads write no audit rows, as REST reads do not.
+- **Untrusted text.** Each tool returning customer-written text (message text, names, notes,
+  fields) says in its description that it is untrusted and never to be followed as instructions,
+  and so do the server's instructions, which also ask for the user's confirmation before a send
+  (T365, MCP-017). The send tools are hinted as not read-only and open-world, the reads as
+  read-only; hints are not a control.
+- **Origin check, no CORS.** Every method checks `Origin` first (MCP-014): none, or exactly the
+  app's own origin; anything else gets 403 with a JSON-RPC error and is neither counted nor logged
+  as an API request. The route sends no CORS headers, and its OPTIONS answers 405, so no browser
+  preflight succeeds.
+- **Authorization by API key.** The specification makes its OAuth framework a SHOULD for HTTP
+  servers and allows custom strategies (MCP-016); the key as `Authorization: Bearer` is HyFib's
+  strategy, exactly as for REST. Settings → API keys shows the endpoint, a table of the tools with
+  the scope each needs, a client configuration with a placeholder instead of a key (its format
+  varies by client, MCP-022) and a `curl` of `tools/list`, and recommends a key with read scopes
+  only unless sending is wanted; it says when the plan leaves the API out (the endpoint then
+  refuses requests) and marks tools whose scopes the plan leaves out.
+
+Not built: OAuth (authorization server discovery, protected resource metadata, client
+registration) and therefore the connectors of assistants that require it; SSE response streams,
+progress notifications and `subscriptions/listen`; resources, prompts, completions, logging and
+the tasks extension; `structuredContent` and output schemas; tools beyond the nine (contact
+writes, conversation changes, other message types, campaign changes, the rest of the API); a
+tool list narrowed to the key's scopes; the 2025-03-26 and 2024-11-05 revisions (with batches);
+sessions; a separate rate limit or quota for MCP; and verification with a real assistant client.
+
+Review (before merge): an independent review checked the specification claims against the
+specification's files and found no High issue. One Medium: `Mcp-Method` was compared after
+Base64-sentinel decoding, which the specification defines for `Mcp-Name` and `Mcp-Param-*` only,
+so an encoded method was accepted (now compared exactly, unsafe characters refused, unit test
+added). Low issues: a body that was not JSON got code 400 instead of -32700; errors after the body
+was read had no id, and the NUL refusal of the whole body was a transport error rather than a tool
+error (now `nulCheck: false` and the tools' schemas); the method was logged whole; an unexpected
+tool failure needed a field to alert on (`mcp.mirroredStatus` 500, documented in DEPLOYMENT and
+RUNBOOKS); 2025-06-18's invalid arguments must be protocol errors (now -32602 for that revision,
+and MCP-008 corrected); PROGRESS overstated what the integration tests showed; the settings card
+ignored the plan; and a token-shaped literal in a unit test (now a token generated at run time).
+All were fixed.

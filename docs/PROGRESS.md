@@ -1,5 +1,120 @@
 # Progress
 
+## 2026-10-21 — A hosted MCP server over the public API (W-141, ADR-416)
+
+Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI
+only; not tried with a real assistant client.** The matrix row W-141 was planned. Research first:
+docs/research/mcp.md (MCP-001 to MCP-023), from the specification's repository, latest revision
+2026-07-28.
+
+### Completed
+
+- **Endpoint:** `POST /api/mcp` (`app/api/mcp/route.ts`, `server/mcp.ts`), the stateless JSON
+  subset of Streamable HTTP: one JSON-RPC message per POST, one JSON answer (202 and no body for a
+  notification), no SSE, no sessions; GET, DELETE and OPTIONS answer 405. `Origin` checked first on
+  every method (none or the app's own; otherwise 403, uncounted); no CORS headers. Batches and
+  client responses refused.
+- **Protocol** (`api/mcp-protocol.ts`, pure): 2026-07-28 served statelessly (per-request `_meta`,
+  `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` checked against the body, -32020 and -32022,
+  `server/discover`, `resultType`, `ttlMs` and `cacheScope`, 404 and -32601 for other methods);
+  2025-11-25 and 2025-06-18 through `initialize` without a session (`ping`, `tools/list`,
+  `tools/call`, the version from the header).
+- **REST pipeline reused:** the route calls `handleApiRequest`, so key, addresses, rate limits,
+  monthly requests, the plan's scopes, the 64 KB body, the NUL refusal and the request log are the
+  REST ones and every POST counts as one request. Additive options: `errorBody` (refusals as
+  JSON-RPC errors with the REST status, headers and message) and a `json` result whose `log` fields
+  join the REST log line (`mcp.tool`, `mcp.mirrors`, `mcp.mirroredStatus`, `mcp.replayed`).
+- **Tools** (`api/mcp-tools.ts`, `api/mcp-model.ts`): search_contacts, get_contact,
+  list_conversations, list_conversation_messages, list_templates, list_campaigns, get_campaign,
+  send_text_reply, send_template, each calling its REST call's domain service with the same scopes
+  (checked before the arguments, again in the service); input schemas from the REST zod schemas,
+  closed to unknown arguments; results as JSON text; REST refusals as tool errors with the same
+  status, code, message and reason; unexpected errors as -32603 with the generic message. The send
+  tools require `idempotencyKey` (the REST store; hash of canonical arguments under the tool's
+  name, so never replayed across REST and MCP). Customer-written text marked untrusted in the
+  descriptions and the server's instructions.
+- **Settings → API keys:** an "AI assistants (MCP)" card with the endpoint, a table of the tools and
+  the scope each needs, a client configuration with `<your API key>` and a `curl` of `tools/list`;
+  read-only keys recommended.
+- **Docs:** ADR-416, research file docs/research/mcp.md, THREAT-MODEL T365, SECURITY, ARCHITECTURE
+  §6N, DEPLOYMENT (Public API), RUNBOOKS §10N, BACKLOG Phase 6, feature matrix W-141
+  (implemented). No OpenAPI change: no REST-visible behaviour changed.
+
+### Tests
+
+- Unit (`api/mcp-protocol.test.ts`, 32 tests; `api/mcp-tools.test.ts`, 20 tests): batches,
+  non-JSON-RPC bodies, responses, null ids and params refused; notifications 202; legacy
+  `initialize` (both versions, another version answered with 2025-11-25), `ping`, `tools/list`
+  without modern fields, the header required and checked; modern `server/discover`, `tools/list`
+  with caching fields and no cursor, header and `_meta` mismatches, unsupported versions with the
+  supported list, capabilities required, `Mcp-Name` (Base64 sentinel) and `Mcp-Method` (exact: a
+  sentinel or unsafe characters refused), 404 for `ping` and unknown methods; the method logged at
+  most 128 characters; tool results, sends with `replayed`, REST refusals as tool errors, an
+  unexpected error as -32603 without its cause and logged with mirrored status 500, unknown tools
+  and malformed params; arguments failing the schema as -32602 for 2025-06-18 and as tool errors
+  for 2025-11-25 (service refusals tool errors in both); the Origin rule, transport errors, -32700
+  for a body that is not JSON and the request's id once read; tool definitions (order, closed
+  object schemas without `$schema`, the REST schemas' fields, `idempotencyKey` required with the
+  header's pattern, untrusted notes, scopes and hints); scope refusals before any query and before
+  argument checks, the plan's scopes, either sending scope for templates, key rules, unknown
+  arguments and ids, the NUL character refused naming its argument, a suspended company; an
+  unexpected error never carrying a token (generated at run time); canonical hashing, never equal
+  to a REST request's.
+- Integration (CI only, `tests/integration/mcp.test.ts`): each read tool equal to its REST service
+  call (contacts, a contact, conversations, messages with a customer's injection attempt returned
+  as data, templates, campaigns), paging, scopes refused with the REST messages; isolation (another
+  company's contact and conversation not found, a `tenantId` argument refused, the protocol bound
+  to the key); a text reply sent once per key (replayed in any argument order, one send job,
+  recorded as the key's API send), the key reused with other text refused, a REST key never
+  replayed by the tool; the window closed refused with nothing sent; an approved template sent once
+  per key and refused to a reply-only key.
+- E2E (CI only, `tests/e2e/mcp.spec.ts`): the settings card (endpoint, tool table and scopes, the
+  snippet with the placeholder and not the key); `initialize` without a session id, its
+  notification 202 with no body, `tools/list` (2026-07-28), `search_contacts`, `list_templates`
+  refused for a missing scope with the REST message, a body that is not JSON answered 400 with
+  -32700; 401 without a key (JSON-RPC error, `WWW-Authenticate`), 403 for another origin without
+  CORS headers, 405 for GET; the key's requests this period 7 after six MCP messages and one REST
+  request.
+- Hand mutation of 41 rules, bounds and checks (34 first, 7 after the review; a script outside the
+  repository, one at a time against the two unit test files): **39 caught by the unit tests.** The
+  2 others need the database and are covered by named integration tests (not run here): "answer
+  exactly what the REST calls answer, as JSON text a client can parse" (also "page as the REST
+  calls do") would fail for `list_conversation_messages` passing `conversationId` on to the
+  service and for `search_contacts` dropping its filters. Not executable here and so not counted
+  above: four route-level mutations, each with the e2e assertion that covers it (no `errorBody`:
+  the 401 body's `error.code`; no Origin check on POST: the 403; GET not 405: the 405 and `Allow`;
+  the pipeline answering `null` for a notification: the empty 202 body). One has no test: dropping
+  the `mcp` fields from the request log line (the log is not asserted anywhere).
+
+### Review fixes (before merge)
+
+An independent review checked the specification claims and found no High issue.
+
+- **Medium:** `Mcp-Method` was compared after Base64-sentinel decoding, which the specification
+  defines for `Mcp-Name` and `Mcp-Param-*` only; it is now compared exactly and a value with unsafe
+  characters is refused with -32020.
+- **Lows:** a body that is not JSON now gets -32700 (still 400); errors after the body was read
+  carry its id; the whole-body NUL refusal is skipped for MCP (`nulCheck: false`) and the tools'
+  argument schemas refuse the character as a tool error naming the argument; the logged method is
+  cut to 128 characters; unexpected tool failures carry `mcp.mirroredStatus` 500 to alert on
+  (DEPLOYMENT, RUNBOOKS §10N); arguments failing a tool's schema are -32602 for 2025-06-18, as that
+  revision lists them, and MCP-008 is corrected; the mutation accounting says the integration
+  tests did not run here; the settings card says when the plan leaves the API out and marks tools
+  whose scopes it leaves out; a token-shaped literal in a unit test is now generated at run time.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                                         | Result                                                                       |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`                                                 | clean                                                                        |
+| `npx prettier --check . --ignore-path .prettierignore --ignore-path .gitignore` | clean                                                                        |
+| `pnpm typecheck`                                                                | clean                                                                        |
+| `pnpm test` (unit, after the review fixes)                                      | 2,192 of 2,192 passed (188 files; 52 new in 2 files)                         |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`                             | clean                                                                        |
+| `pnpm build`                                                                    | passed (`/api/mcp` dynamic)                                                  |
+| hand mutation of 41 rules and checks                                            | 39 caught by unit tests; 2 covered by named integration tests (not run here) |
+| `pnpm test:integration`, `pnpm test:e2e`                                        | not run here: no local PostgreSQL or browser; CI runs them                   |
+
 ## 2026-10-21 — Stored company exports, kept encrypted in PostgreSQL for 7 days (P5-11, ADR-415)
 
 Status: **Implemented (migration 0325); unit tests run locally, integration and e2e tests written

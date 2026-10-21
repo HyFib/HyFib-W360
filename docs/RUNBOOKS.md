@@ -1983,6 +1983,31 @@ by hand.
 
 ## 10N. Public API
 
+**An AI assistant cannot use the MCP endpoint** (ADR-416). The endpoint is `<app>/api/mcp` with
+an API key as `Authorization: Bearer <key>`; it answers JSON-RPC, and its refusals carry the REST
+API's message in `error.message` and the REST code and request id in `error.data`. 401, 429 and
+403 `ip_not_allowed` or `not_in_plan` mean what they mean for REST (below). 403 "Requests from this
+origin are not accepted" means a browser page sent it (an `Origin` other than the app's): MCP
+clients send no `Origin`. 405 means a GET or DELETE: the endpoint offers no SSE stream or sessions,
+so the client must POST. 400 with -32020 is a missing or mismatched `MCP-Protocol-Version`,
+`Mcp-Method` or `Mcp-Name` header; 400 with -32022 lists the versions served (2026-07-28,
+2025-11-25, 2025-06-18), and a client of an older revision cannot connect. A client that offers only
+OAuth sign-in cannot use the endpoint: it needs a client that sends a header. A tool answering
+`isError: true` with 403 "does not have the … scope" needs a key with that scope (Settings → API
+keys shows each tool's). The request log has one `api request` line per POST, path `/api/mcp`, with
+`mcp.tool`, `mcp.mirrors` (the REST call it counts as) and `mcp.mirroredStatus`. The HTTP status
+of a tool call is 200 even when it fails, so `mcp.mirroredStatus` 500 is the field to alert on: it
+marks an unexpected failure, whose `mcp tool call failed` line carries the error and the request
+id. A body that is not JSON gets 400 with -32700; text with the NUL character in a tool's arguments
+is a tool error naming the argument. Every POST, including `initialize`
+and `tools/list`, counts as one API request against the key's and the plan's limits.
+
+**An assistant sent a message nobody wanted.** Revoke or rotate the key (below); messages it sent
+carry its id like any API send. Give assistants keys with read scopes only unless sending is
+wanted, and use a client that asks before each tool call. A repeated send with the same
+`idempotencyKey` and arguments within 24 hours was not sent twice (the tool answer says
+`"replayed": true`).
+
 **A company's API key leaked.** In Settings → API keys (owners and administrators), revoke it: the
 next request with it gets 401. If the integration must keep working, rotate instead with no overlap
 and give the new key to the integration; do not keep an overlap for a leaked key. The audit log

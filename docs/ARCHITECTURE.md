@@ -2223,6 +2223,17 @@ true`); the same key with another request (method, path and body hashed) answers
   reached, changed in a dialog); creation with the scopes the member may grant, allowed addresses
   and a monthly limit; the new token shown once with a copy button (kept only in the page's
   memory); rotation with an overlap; revocation.
+- **MCP server** (ADR-416, no migration): `app/api/mcp/route.ts` checks `Origin`
+  (`mcpOriginAllowed`), then hands POSTs to `handleApiRequest` with `errorBody: mcpTransportError`
+  (its refusals as JSON-RPC errors) and a handler that answers the one JSON-RPC message with
+  `handleMcpMessage` (`api/mcp-protocol.ts`, pure: 2026-07-28 served statelessly with per-request
+  `_meta` and mirrored headers, 2025-11-25 and 2025-06-18 through `initialize` without sessions)
+  and `runMcpTool` (`api/mcp-tools.ts`) bound to the verified key's context and `runtime.outbound`.
+  Each tool (`MCP_TOOLS`, `api/mcp-model.ts`) mirrors one REST call and calls its service; input
+  schemas are the REST zod schemas as JSON Schema; sends hash canonical arguments under the tool's
+  name in the REST idempotency store. The handler returns a `json` result whose `log` fields join
+  the REST log line. GET, DELETE and OPTIONS answer 405. Settings → API keys lists the endpoint, the
+  tools and their scopes, and a client configuration.
 - **Not built yet:** media and call-to-action messages, taking reactions back (neither is in Meta's
   OpenAPI description, ADR-412), assigning many
   conversations or starting many runs in one call, bulk sends, media downloads, statuses changed

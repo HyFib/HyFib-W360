@@ -2325,6 +2325,16 @@ path, status, company and key of each request, never its query string or body.
   number, email address and part of a name (ADR-113, ADR-124). Load-balancer or CDN access logs must
   leave out the query strings of `/api/v1/*`, or be kept short-lived and named in the privacy
   notice.
+- **MCP endpoint** (`/api/mcp`, ADR-416, no migration and no setting). It answers through the same
+  request pipeline and log as `/api/v1/*`, so its requests count against the same limits. Its
+  `Origin` check compares the header with the origin of `APP_BASE_URL`, which must therefore be the
+  public origin users and assistants reach. A proxy in front must pass `/api/mcp` POSTs with their
+  `Authorization`, `Origin`, `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` headers unchanged,
+  and must not add CORS headers or answer OPTIONS itself. The endpoint never streams (no SSE), so
+  no proxy buffering change is needed. Its arguments are in the body, never the query string.
+  Its log lines are the REST `api request` lines with an `mcp` object: alert on
+  `mcp.mirroredStatus` 500 (an unexpected tool failure, answered as a JSON-RPC error over HTTP 200,
+  with an `mcp tool call failed` error line carrying the request id), as on status 500 for REST.
 
 ## Razorpay
 

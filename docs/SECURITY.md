@@ -1028,6 +1028,22 @@ Phase 5 rules (Public API, P5-08):
   contact it would have created (integration tests, run in CI). At most 50 numbers per call, once
   per `Idempotency-Key`; a call counts as one request against the key's limits, within the 64 KB a
   body holds, and the send worker paces each WhatsApp number's messages as it paces every send.
+- The MCP endpoint (`POST /api/mcp`, ADR-416) is the public API in another protocol: the same
+  company key as `Authorization: Bearer`, through the same request pipeline (addresses, the
+  failed-authentication limit, the key's and the company's rate limits, the plan's and the key's
+  monthly requests, the plan's scopes, a 64 KB JSON body, the request log), each POST one request;
+  the NUL refusal is done by the tools' argument schemas instead of on the whole body. Its tools need the scopes of the REST calls they mirror: `search_contacts` and
+  `get_contact` `contacts.read`; `list_conversations` and `list_conversation_messages`
+  `conversations.read`; `list_templates` `templates.read`; `list_campaigns` and `get_campaign`
+  `campaigns.read`; `send_text_reply` `messages.reply`; `send_template` `messages.send` or
+  `messages.send_marketing` (the template's category decides, as for REST). Scopes are checked
+  before arguments and again in the service, writes refused while the company is suspended or
+  restricted. The company comes only from the key; tool schemas refuse unknown arguments. Sends
+  need an `idempotencyKey` (the REST store, per key for 24 hours; a key used by REST is refused,
+  never replayed, by a tool). `Origin` is checked first on every method (none or the app's own
+  origin, otherwise 403); no CORS headers are sent; GET, DELETE and OPTIONS answer 405. Tool
+  descriptions mark customer-written text as untrusted (T365). Settings recommends a read-only key
+  for an assistant. OAuth is not offered (unit tests run locally; integration and e2e tests in CI).
 - Buttons and lists through the API (ADR-080) follow every rule of text replies (`messages.reply`,
   an active company, only contacts who wrote in the last 24 hours with one answer for every
   refusal, the window checked again at send). Their ids cannot start with `w360`: HyFib's own
