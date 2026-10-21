@@ -16,7 +16,7 @@
     "@w360/core": "workspace:*",
     "drizzle-orm": "0.45.3",
     "pg": "8.23.0",
-    "pg-boss": "12.34.0"
+    "pg-boss": "12.38.0"
   },
   "devDependencies": {
     "@types/pg": "8.23.1"
