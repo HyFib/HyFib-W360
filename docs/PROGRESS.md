@@ -34,6 +34,9 @@ two messages took two campaigns over hand-split audiences. This closes P3-04's "
   recorded variant expected PostgreSQL's message itself, but the database layer maps a refused
   privilege to `forbidden` ("Operation not permitted.") with the reason as its cause; it now
   checks both, as the API's guarded-column tests do. The refusal itself was right.
+- **Codex review (PR #105):** the campaign page now reads the campaign, each variant's results
+  and the totals in one repeatable-read snapshot, as the API's detail does, so the variants add up
+  to the results while recipients are being sent.
 - **Results:** a Variants card side by side with the results' denominators, descriptive only (no
   winner, no significance); the recipients page and CSV name each recipient's variant.
 - **API and webhooks (additive):** `variantB` on draft create/edit and in settings, `variants` on
@@ -175,6 +178,12 @@ backtracked on an unclosed `{{` followed by much whitespace (old: 32 ms for 400 
 for 200,000). It is now `\{\{([^{}]*)\}\}` with the inner text trimmed by its two callers: the
 same matches, captures and replacements (33,678 random placeholder matches compared, none
 different), and a unit test for the trimming and the unclosed case.
+
+Codex's review of the same PR found that the edit's campaign checks (campaigns scheduled or
+sending, and the usage behind the variables refusal and the confirmation) matched a campaign's own
+template only, missing campaigns that send the template as variant B (ADR-405); both queries now
+also match `app.campaign_variants`. An integration test (CI only) refuses an edit while such a
+campaign is running or scheduled, lists it, and refuses a change of variables it relies on.
 
 ### Test commands and results (local, 2026-10-21)
 

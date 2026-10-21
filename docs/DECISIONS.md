@@ -17492,6 +17492,11 @@ each version's graph is tested once rather than once per run; `isRateLimited` al
 retryable answer; a member's masked usage carries no ids of what they may not read (run counts
 stay); the rollback steps in DEPLOYMENT say how to reach `w360_definer`, which cannot log in.
 
+Codex's review of PR #105, with ADR-405 beside it, found that the campaign checks (the share-locked
+read of campaigns scheduled or sending, and the usage behind the variables refusal and the
+confirmation) matched a campaign's own template only, so a campaign sending the template as
+variant B was not counted; both now also match `app.campaign_variants`, with an integration test.
+
 ## ADR-405 A/B template variants for campaigns (P3-04, P5-08, P5-09) (2026-10-21)
 
 Context: P3-04 listed "A/B variants" as remaining. A campaign sent one template to its whole
@@ -17611,3 +17616,8 @@ submitted by a web server of the release before could get stuck (now ignored, an
 to use variants after the web rollout); the top-level template fields did not say they are
 variant A's; the audit recorded only A's category, and an unread submission field was removed; and
 0317 took the campaigns' lock before the recipients' (now the reverse). All were fixed.
+
+Codex's review of PR #105: the campaign page counted each variant and the campaign apart in a
+read-committed transaction, so while recipients were being sent the variants could fail to add up
+to the results; it now reads them in one repeatable-read snapshot, as the API's detail does. The
+same review found that template edits did not see variant B's campaigns (ADR-404, fixed there).

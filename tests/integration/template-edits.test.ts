@@ -520,6 +520,55 @@ describe('editing a template Meta has', () => {
     expect((await templateRow(id)).edit_state).toBe('sending');
   });
 
+  it('counts a campaign that sends it as variant B (ADR-405)', async () => {
+    const { id } = await approvedTemplate(c, 'edit_as_variant');
+    const { id: own } = await approvedTemplate(c, 'edit_variant_a');
+    const owner = await fx.ctx(c, c.owner);
+    const campaign = uuidv7();
+    await fx.query(
+      `INSERT INTO app.campaigns (id, tenant_id, name, status, channel_account_id, template_id,
+              audience_used, timezone)
+       VALUES ($1, $2, 'Two notices', 'running', $3, $4, '{}', 'Asia/Kolkata')`,
+      [campaign, c.tenant.id, c.channelAccountId, own],
+    );
+    await fx.query(
+      `INSERT INTO app.campaign_variants (id, tenant_id, campaign_id, label, template_id,
+              share_percent)
+       VALUES ($1, $2, $3, 'B', $4, 50)`,
+      [uuidv7(), c.tenant.id, campaign, id],
+    );
+    await expectAppError(
+      templates.editTemplate(owner, id, { definition: delayed }),
+      'precondition_failed',
+      /campaign using this template is scheduled or sending/,
+    );
+    await fx.query(`UPDATE app.campaigns SET status = 'scheduled' WHERE id = $1`, [campaign]);
+    await expectAppError(
+      templates.editTemplate(owner, id, { definition: delayed }),
+      'precondition_failed',
+      /scheduled or sending/,
+    );
+    await fx.query(`UPDATE app.campaigns SET status = 'paused' WHERE id = $1`, [campaign]);
+    expect((await templates.templateUsage(owner, id)).campaigns).toEqual([
+      { id: campaign, name: 'Two notices', status: 'paused' },
+    ]);
+    const extraVariable: TemplateDefinition = {
+      ...delayed,
+      body: {
+        text: 'Hi {{1}}, your order {{2}} arrives {{3}}.',
+        examples: ['Asha', 'A-1001', 'today'],
+      },
+    };
+    await expectAppError(
+      templates.editTemplate(owner, id, { definition: extraVariable }),
+      'precondition_failed',
+      /variables or buttons, which campaign “Two notices” rely on/,
+    );
+    expect((await templateRow(id)).edit_state).toBeNull();
+    await templates.editTemplate(owner, id, { definition: delayed });
+    expect((await templateRow(id)).edit_state).toBe('sending');
+  });
+
   it('refuses a draft Meta does not have', async () => {
     const owner = await fx.ctx(c, c.owner);
     const { id } = await templates.createDraft(owner, {

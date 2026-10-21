@@ -10,6 +10,7 @@ import {
   eq,
   inArray,
   messageTemplates,
+  or,
   sql,
   type CampaignStatus,
   type Database,
@@ -67,8 +68,9 @@ const USAGE_LIMIT = 50;
 /** Where a template is used, as a member sees it before editing it. */
 export interface TemplateUsage {
   /**
-   * Campaigns not finished yet that send it, `running` ones sending it now. A name is null for a
-   * member who may not read campaigns (as for automations and stores below).
+   * Campaigns not finished yet that send it, as their own template or a variant's (ADR-405),
+   * `running` ones sending it now. A name is null for a member who may not read campaigns (as for
+   * automations and stores below).
    */
   campaigns: { id: string | null; name: string | null; status: CampaignStatus }[];
   // An id is null, as the name, for an item the caller may not read (`maskUsage`).
@@ -83,6 +85,19 @@ export interface TemplateUsage {
   storeRules: { id: string | null; storeName: string | null; event: string; enabled: boolean }[];
 }
 
+/**
+ * A campaign that sends the template: as its own (variant A) or as a variant's, whose template is
+ * in `app.campaign_variants` (ADR-405).
+ */
+function campaignSends(templateId: string) {
+  return or(
+    eq(campaigns.templateId, templateId),
+    sql`exists (select 1 from app.campaign_variants v
+                 where v.tenant_id = ${campaigns.tenantId} and v.campaign_id = ${campaigns.id}
+                   and v.template_id = ${templateId}::uuid)`,
+  );
+}
+
 /** Where the template is used (at most 50 of each kind), in the company's scope. */
 export async function templateUsage(
   tx: Tx,
@@ -95,7 +110,7 @@ export async function templateUsage(
     .where(
       and(
         eq(campaigns.tenantId, tenantId),
-        eq(campaigns.templateId, templateId),
+        campaignSends(templateId),
         inArray(campaigns.status, UNFINISHED_CAMPAIGN_STATUSES),
       ),
     )
@@ -233,9 +248,9 @@ export function usageLabels(usage: TemplateUsage): string[] {
 }
 
 /**
- * The company's campaigns using the template that are scheduled or sending, read under a share
- * lock: a runner starting one holds its row, so the edit waits for it, and a campaign that has not
- * started cannot start before the edit's transaction ends.
+ * The company's campaigns using the template (as their own or a variant's) that are scheduled or
+ * sending, read under a share lock: a runner starting one holds its row, so the edit waits for it,
+ * and a campaign that has not started cannot start before the edit's transaction ends.
  */
 async function sendingCampaigns(tx: Tx, tenantId: string, templateId: string) {
   return tx
@@ -244,7 +259,7 @@ async function sendingCampaigns(tx: Tx, tenantId: string, templateId: string) {
     .where(
       and(
         eq(campaigns.tenantId, tenantId),
-        eq(campaigns.templateId, templateId),
+        campaignSends(templateId),
         inArray(campaigns.status, [...SENDING_CAMPAIGN_STATUSES]),
       ),
     )

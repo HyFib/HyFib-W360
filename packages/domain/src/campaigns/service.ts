@@ -2303,7 +2303,9 @@ export function createCampaignsService(deps: CampaignDeps) {
               : null,
           };
         },
-        { accessMode: 'read only' },
+        // One snapshot, as the API's detail reads it: each variant's results, counted apart, add
+        // up to the campaign's while it is sending (ADR-405).
+        { isolationLevel: 'repeatable read', accessMode: 'read only' },
       );
     },
 
