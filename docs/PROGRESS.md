@@ -53,18 +53,19 @@ setup".
 - **Failures:** a failed read stores only its attempt, changes no status (an `auth` refusal does
   not ask for a reconnect; the access check decides that) and is logged; the number is tried again
   20 hours later. A number whose read cannot be stored is its own `store_failed` result and the
-  others go on. Errors are logged through the `err` serializer (no query values). An error of the
+  others go on, unless its attempt cannot be recorded either (the database out of reach): the
+  refresh then stops and the rest are left for the next check. Errors are logged through the `err` serializer (no query values). An error of the
   refresh is logged as an error without failing the job or changing the access outcome. A paused
   account is asked nothing; a pause during the refresh stops it.
 - **Bounded facts:** `getPhoneNumber` keeps each fact within its column (name 200, quality 32,
   statuses 64, clipped; a display number over 32 not kept), for setup too, which now completes
-  where an over-long value used to fail it. A refresh keeps a stored fact Meta left out (never an
-  old limit).
+  where an over-long value used to fail it. A refresh keeps a stored name, display number or status
+  Meta left out (never a quality rating or limit), and Channels' note says so.
 - **Audit:** nothing for a routine refresh; `channel.messaging_limit_refused` (ADR-398's metadata)
   only when a refusal changes Channels from a limit, or from never asked, to "not reported".
 - **Web:** Channels says under its numbers that HyFib reads each active number's facts about once a
   day with the account's access check, and that "Checked" is the last read (`NUMBER_FACTS_NOTE`).
-- **Tests:** unit (`messaging/number-facts.test.ts`, 21 tests: the bounded parse, the attempt in
+- **Tests:** unit (`messaging/number-facts.test.ts`, 22 tests: the bounded parse, the attempt in
   the due rule, partial answers, one number's store failure not stopping the others, a newer setup
   read kept, and the shared read's single read, the
   second read after permanent and auth refusals, the second read's failure, no second read for
@@ -86,7 +87,7 @@ setup".
   over-long name stored clipped beside another number's facts; a paused account, before or during
   the check, asked nothing). e2e (`whatsapp-access.spec.ts`: the note on Channels). Written for
   CI; the integration and e2e tests were not run here.
-- **Mutation checks:** 27 deliberate regressions: the first 13 (no second read on auth, the second
+- **Mutation checks:** 30 deliberate regressions: the first 13 (no second read on auth, the second
   read asking for the limit, the first failure given instead of the second, `>=` to `>` in the due
   rule, the never-asked clause dropped, the audit made unconditional, the pause check, the time
   budget and the due filter dropped, the write ignoring the number's or the account's status, the
@@ -94,13 +95,18 @@ setup".
   (a store error escaping the loop, no attempt after a store error or a failed read, the due rule
   ignoring the attempt, no attempt stored with the facts, omitted facts written as null, an old
   limit kept, a newer setup read overwritten, a refresh after any outcome, a refresh's error
-  thrown, the display number unbounded or clipped, the name unbounded, a wrong status bound): 27
-  caught by the unit tests, each file restored exactly.
+  thrown, the display number unbounded or clipped, the name unbounded, a wrong status bound) and 3
+  after the second review (no stop when an attempt cannot be recorded, Meta's failure relabelled
+  when its attempt fails, the quality rating kept): 30 caught by the unit tests, each file
+  restored exactly.
 - **Review fixes (no High finding):** one number's unstorable read no longer holds back the
   others (bounded parse, per-number `store_failed`); the job's gating and catch path are tested;
   errors are logged through the `err` serializer; failing numbers are tried once a day (0313); the
   e2e "Checked" step that passed because of its fixture is dropped; a partial answer keeps stored
-  facts; a setup finishing during a refresh's read keeps its newer read.
+  facts; a setup finishing during a refresh's read keeps its newer read. Second review (no High or
+  Medium): the refresh stops once an attempt cannot be recorded; the quality rating is never kept
+  and the note says which facts may be earlier; 0313's grant is asserted; Meta's failure is kept
+  when its attempt fails; wording fixed.
 - **Docs:** ADR-402; ARCHITECTURE, RUNBOOKS (how often facts refresh, what "Checked" means, the log
   lines), DEPLOYMENT (0313), BACKLOG P2-10, the matrix's W-030. No threat-model row (no new data
   beyond an attempt time, no new role or provider; the same read in the same scope, once a day)
@@ -113,7 +119,7 @@ setup".
 | Command                                            | Result                                                          |
 | -------------------------------------------------- | --------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
-| `pnpm test` (unit)                                 | 178 files, 1,911 tests passed                                   |
+| `pnpm test` (unit)                                 | 178 files, 1,912 tests passed                                   |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
 | `pnpm build`                                       | passed (after the review fixes)                                 |
 

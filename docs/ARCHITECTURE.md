@@ -252,12 +252,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   no read started after 40 seconds of the job, which expires at 120). Each is read with
   `readNumberFacts`, the function the setup's health step uses (the limit field, and once more
   without it after a permanent or lost-access refusal; `getPhoneNumber` bounds each fact to its
-  column), through the job's paced calls, and stored with `refreshedFactsColumns` (a fact Meta left
-  out keeps its stored value; the limit never does) in the company's scope after re-reading that
+  column), through the job's paced calls, and stored with `refreshedFactsColumns` (a name, display
+  number or status Meta left out keeps its stored value; the quality rating and limit never do) in the company's scope after re-reading that
   the number is still active, its account connected and setup has not read it since. Every read
   records `channel_accounts.facts_attempted_at` (0313), so a number is tried at most once in 20
   hours whatever the outcome. A failed read stores nothing else and never changes a status; a
-  number whose read cannot be stored is its own `store_failed` result and the others go on; a
+  number whose read cannot be stored is its own `store_failed` result and the others go on, unless
+  its attempt cannot be recorded either (the refresh then stops); a
   refusal of the limit is audited only when it changes what Channels shows; an error of the refresh
   is logged through the `err` serializer without failing the job. No new due list or definer
   function: the access check's daily cadence and its pause handling apply.

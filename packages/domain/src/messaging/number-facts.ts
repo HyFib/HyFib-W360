@@ -95,19 +95,21 @@ export function numberFactsColumns(facts: PhoneNumberFacts, checkedAt: Date) {
  * what "Checked" is (ADR-402).
  */
 export const NUMBER_FACTS_NOTE =
-  'HyFib reads each active number’s quality rating, messaging limit and name from Meta about once a day, with the daily check of its account’s access, but not while the account needs reconnecting or Meta is limiting management requests. “Checked” is when HyFib last read them.';
+  'HyFib reads each active number’s quality rating, messaging limit and name from Meta about once a day, with the daily check of its account’s access, but not while the account needs reconnecting or Meta is limiting management requests. “Checked” is when HyFib last read them; a name, display number or status Meta left out of that answer keeps the value from an earlier read.';
 
 /**
- * What a refresh stores (ADR-402): as `numberFactsColumns`, except that a fact Meta left out (or
- * gave in a form HyFib does not keep, such as a display number longer than its column) keeps the
- * value stored before, so a partial answer does not wipe the number's name or quality rating each
- * day. The messaging limit is the exception: a read that asked for it and got none is "not reported
- * by Meta", as ADR-398 defines it, and keeping an older limit beside the new check time would show
- * a limit Meta did not report. `attemptedAt` is when the read started. Setup stores
- * `numberFactsColumns` unchanged.
+ * What a refresh stores (ADR-402): as `numberFactsColumns`, except that a name, display number or
+ * status Meta left out (or gave in a form HyFib does not keep, such as a display number longer than
+ * its column) keeps the value stored before, so a partial answer does not wipe them each day; they
+ * change rarely, and Channels says such a value may come from an earlier read. The quality rating
+ * and the messaging limit are time-sensitive and are never kept: an answer without the rating
+ * stores none (unknown), as setup does, and one without the limit stores "not reported by Meta"
+ * (ADR-398), since an older value beside the new "Checked" time would show what Meta no longer
+ * reported. `attemptedAt` is when the read started. Setup stores `numberFactsColumns` unchanged.
  */
 export function refreshedFactsColumns(facts: PhoneNumberFacts, checkedAt: Date, attemptedAt: Date) {
   const columns: Partial<typeof channelAccounts.$inferInsert> = {
+    qualityRating: facts.qualityRating,
     messagingLimit: facts.messagingLimit,
     messagingLimitCheckedAt: checkedAt,
     healthCheckedAt: checkedAt,
@@ -116,7 +118,6 @@ export function refreshedFactsColumns(facts: PhoneNumberFacts, checkedAt: Date, 
   for (const key of [
     'displayPhoneNumber',
     'verifiedName',
-    'qualityRating',
     'nameStatus',
     'codeVerificationStatus',
   ] as const) {
@@ -183,14 +184,20 @@ export interface NumberFactsDeps {
 /**
  * One number's refresh: `refreshed` (its facts stored, `limitRefused` when without the limit after
  * a refusal); `failed` (Meta's answer was a failure: nothing stored but the attempt, the number and
- * its account unchanged); `store_failed` (storing the read threw, for example the database:
- * nothing stored, the error kept for the worker's log, and `attemptError` when recording the
- * attempt threw too); `skipped` (the number or its account changed during the read, or setup read
+ * its account unchanged, and `attemptError` when recording the attempt threw); `store_failed`
+ * (storing the read threw: nothing stored, the error kept for the worker's log, and `attemptError`
+ * when recording the attempt threw too); `skipped` (the number or its account changed during the read, or setup read
  * it more recently: nothing stored).
  */
 export type NumberRefreshResult =
   | { channelAccountId: string; state: 'refreshed'; limitRefused: boolean }
-  | { channelAccountId: string; state: 'failed'; kind: GraphFailureKind; error: string }
+  | {
+      channelAccountId: string;
+      state: 'failed';
+      kind: GraphFailureKind;
+      error: string;
+      attemptError?: unknown;
+    }
   | { channelAccountId: string; state: 'store_failed'; error: unknown; attemptError?: unknown }
   | { channelAccountId: string; state: 'skipped' };
 
@@ -301,6 +308,10 @@ export async function refreshNumberFacts(
         }
         numbers.push(failed);
       }
+      // Recording an attempt failed: the database is most likely out of reach, so the next
+      // numbers' reads would be thrown away unrecorded. They are left for the next check.
+      const last = numbers[numbers.length - 1];
+      if (last && 'attemptError' in last && last.attemptError !== undefined) return;
     }
   });
   const left = due.length - numbers.length;
@@ -342,13 +353,19 @@ async function storeNumberFacts(
 ): Promise<NumberRefreshResult> {
   const { scope, whatsappAccountId, channelAccountId, readAt } = target;
   if (!read.ok) {
-    await deps.db.run(scope, (tx) => recordAttempt(tx, target));
-    return {
+    const failed: NumberRefreshResult = {
       channelAccountId,
       state: 'failed',
       kind: read.failure.kind,
       error: graphFailureText(read.failure),
     };
+    try {
+      await deps.db.run(scope, (tx) => recordAttempt(tx, target));
+    } catch (attemptError) {
+      // Meta's failure stays the number's result; the attempt's error goes with it.
+      failed.attemptError = attemptError;
+    }
+    return failed;
   }
   const tenantId = scope.tenantId;
   const checkedAt = deps.clock.now();

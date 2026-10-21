@@ -198,8 +198,10 @@ sweep is not running: nobody is emailed about late queues until it does, so star
   included, which is therefore tried once a day.
 - Facts are kept within their columns: a verified name over 200 characters is clipped, a status
   over its column's length (32 or 64) is clipped, and a display number over 32 characters is not
-  kept (the stored one stays in a refresh; none at setup). A fact Meta leaves out of a refresh's
-  answer keeps its stored value; a missing messaging limit is shown as "not reported by Meta".
+  kept (the stored one stays in a refresh; none at setup). A name, display number or status Meta
+  leaves out of a refresh's answer keeps the value from an earlier read (Channels' note says so);
+  a quality rating it leaves out is shown as none, and a missing messaging limit as "not reported
+  by Meta", beside the new "Checked" time.
 - "Checked <time>" on Channels is the last read that completed. A failed read stores nothing, so
   the time stays; the worker logs `WhatsApp number’s facts could not be read from Meta` with the
   number, the failure's kind and code, and the first check 20 hours later tries again. A failed read never marks
@@ -215,10 +217,11 @@ sweep is not running: nobody is emailed about late queues until it does, so star
   clipped message) only when the number showed a limit or had never been asked; the same refusal
   on later days is not audited again. A successful refresh audits nothing.
 - `WhatsApp number’s facts could not be stored` (error, with the number and `err`): the read
-  succeeded but writing it failed (the database). The other numbers go on, the attempt is recorded
-  (`WhatsApp number’s facts refresh attempt could not be recorded` when that failed too) and the
-  number is tried again the next day. `err` is the serialized error without the query's values
-  (ADR-129).
+  succeeded but writing it failed. The other numbers go on, the attempt is recorded and the number
+  is tried again the next day. `WhatsApp number’s facts refresh attempt could not be recorded`
+  (error) means recording the attempt failed too, after a store failure or after Meta's failure:
+  the database is most likely out of reach, so the refresh stops and the remaining numbers are
+  read at the next check. `err` is the error through the logger's serializer (ADR-129).
 - `WhatsApp numbers’ facts could not be refreshed` (error, with `err`) is a database or code error
   outside one number's write (loading the account): the access check's outcome is already stored and
   the job is not retried for it; the next check tries again. Investigate if it repeats.

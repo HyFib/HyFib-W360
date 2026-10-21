@@ -234,7 +234,7 @@ describe('when a number’s facts are refreshed (ADR-402)', () => {
     expect(due(ago(60_000), ago(60_000), ago(25 * 3_600_000))).toBe(false);
   });
 
-  it('keeps a stored fact Meta left out, never an old limit, in a refresh only', () => {
+  it('keeps a stored name, display number or status Meta left out, never a quality rating or limit, in a refresh only', () => {
     const at = new Date('2026-10-16T10:00:00Z');
     const tried = new Date('2026-10-16T09:59:59Z');
     const partial = {
@@ -248,6 +248,14 @@ describe('when a number’s facts are refreshed (ADR-402)', () => {
     // Only what Meta gave, and the limit as not reported (ADR-398), are written.
     expect(refreshedFactsColumns(partial, at, tried)).toEqual({
       qualityRating: 'RED',
+      messagingLimit: null,
+      messagingLimitCheckedAt: at,
+      healthCheckedAt: at,
+      factsAttemptedAt: tried,
+    });
+    // A rating Meta left out is written as none (unknown), as setup does: never an old one.
+    expect(refreshedFactsColumns({ ...partial, qualityRating: null }, at, tried)).toEqual({
+      qualityRating: null,
       messagingLimit: null,
       messagingLimitCheckedAt: at,
       healthCheckedAt: at,
@@ -618,21 +626,48 @@ describe('refreshing an account’s numbers (ADR-402)', () => {
       { factsAttemptedAt: NOW },
       expect.objectContaining({ qualityRating: 'YELLOW', factsAttemptedAt: NOW }),
     ]);
-    // Recording the attempt failing too is reported with it, and the next number still runs.
+    // Recording the attempt failing too (the database out of reach): reported with it, and the
+    // refresh stops, leaving the other numbers unread for the next check.
     const both = await run({
       selects: [[connected], [number('a', OLD), number('b', OLD)], ...current(), ...current()],
       answers: [withLimit, withLimit],
       failingUpdates: [0, 1],
     });
-    expect(both.result.numbers).toEqual([
-      {
-        channelAccountId: 'a',
-        state: 'store_failed',
-        error: new Error('write 0 failed'),
-        attemptError: new Error('write 1 failed'),
-      },
-      { channelAccountId: 'b', state: 'refreshed', limitRefused: false },
-    ]);
+    expect(both.result).toEqual({
+      outcome: 'done',
+      numbers: [
+        {
+          channelAccountId: 'a',
+          state: 'store_failed',
+          error: new Error('write 0 failed'),
+          attemptError: new Error('write 1 failed'),
+        },
+      ],
+      left: 1,
+    });
+    expect(both.reads.map((x) => x.id)).toEqual(['ph-a']);
+  });
+
+  it('keeps Meta’s failure when recording its attempt fails, and stops there', async () => {
+    const r = await run({
+      selects: [[connected], [number('a', OLD), number('b', OLD)]],
+      answers: [revoked, revoked, withLimit],
+      failingUpdates: [0],
+    });
+    expect(r.result).toEqual({
+      outcome: 'done',
+      numbers: [
+        {
+          channelAccountId: 'a',
+          state: 'failed',
+          kind: 'auth',
+          error: 'auth 190: OAuthException',
+          attemptError: new Error('write 0 failed'),
+        },
+      ],
+      left: 1,
+    });
+    expect(r.reads.map((x) => x.id)).toEqual(['ph-a', 'ph-a']);
   });
 
   it('keeps a read setup made after this read started', async () => {
@@ -654,7 +689,7 @@ describe('refreshing an account’s numbers (ADR-402)', () => {
     expect(same.result.numbers[0]).toMatchObject({ state: 'refreshed' });
   });
 
-  it('keeps the stored facts Meta left out of its answer', async () => {
+  it('keeps the stored name, display number and statuses Meta left out of its answer', async () => {
     const r = await run({
       selects: [[connected], [number('a', OLD)], ...current()],
       answers: [

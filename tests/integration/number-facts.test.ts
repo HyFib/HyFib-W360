@@ -399,6 +399,7 @@ describe('the daily refresh of each active number’s facts (ADR-402)', () => {
     });
     const result = await run(c);
     expect(result.numbersError).toBeUndefined();
+    expect(result.numbers?.numbers).toHaveLength(2);
     expect(result.numbers?.numbers.every((n) => n.state === 'refreshed')).toBe(true);
     expect(await numberRow(c)).toMatchObject({
       verified_name: 'N'.repeat(200),
@@ -407,6 +408,40 @@ describe('the daily refresh of each active number’s facts (ADR-402)', () => {
       quality_rating: 'YELLOW',
     });
     expect(await numberRow(second)).toMatchObject({ quality_rating: 'GREEN' });
+  });
+
+  it('lets the runtime role alone write the attempt time (migration 0313)', async () => {
+    const [privileges] = await fx.query<{
+      app_update: boolean;
+      platform_select: boolean;
+      platform_update: boolean;
+      definer_select: boolean;
+      definer_update: boolean;
+      public_select: boolean;
+      public_update: boolean;
+    }>(
+      `SELECT has_column_privilege('w360_app', 'app.channel_accounts', c, 'UPDATE') AS app_update,
+              has_column_privilege('w360_platform', 'app.channel_accounts', c, 'SELECT')
+                AS platform_select,
+              has_column_privilege('w360_platform', 'app.channel_accounts', c, 'UPDATE')
+                AS platform_update,
+              has_column_privilege('w360_definer', 'app.channel_accounts', c, 'SELECT')
+                AS definer_select,
+              has_column_privilege('w360_definer', 'app.channel_accounts', c, 'UPDATE')
+                AS definer_update,
+              has_column_privilege('public', 'app.channel_accounts', c, 'SELECT') AS public_select,
+              has_column_privilege('public', 'app.channel_accounts', c, 'UPDATE') AS public_update
+         FROM (VALUES ('facts_attempted_at')) AS v(c)`,
+    );
+    expect(privileges).toEqual({
+      app_update: true,
+      platform_select: false,
+      platform_update: false,
+      definer_select: false,
+      definer_update: false,
+      public_select: false,
+      public_update: false,
+    });
   });
 
   it('asks Graph nothing for the numbers of a paused account', async () => {

@@ -163,7 +163,6 @@ const str = (value: unknown): string | null => (typeof value === 'string' ? valu
 const num = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) ? value : null;
 
-/** The fields of a phone number its health read asks for, besides its messaging limit. */
 /**
  * The most characters of a number's facts HyFib keeps: the columns' checks (0003). A longer
  * display number is not kept at all (null), since a cut phone number would show another number;
@@ -183,6 +182,7 @@ function boundedFact(value: unknown, max: number): string | null {
   return typeof value === 'string' && value.length > 0 ? clipText(value, max) : null;
 }
 
+/** The fields of a phone number its health read asks for, besides its messaging limit. */
 const PHONE_NUMBER_FIELDS =
   'display_phone_number,verified_name,quality_rating,name_status,code_verification_status';
 

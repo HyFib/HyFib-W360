@@ -17050,12 +17050,16 @@ Decision:
   retryable failure is not retried within the job, since the access check's job is not re-run for
   it). A number whose read cannot be stored (the write throws, for example on the database) is
   that number's `store_failed` result: its attempt is still recorded in its own transaction, the
-  error is logged at error level, and the refresh goes on with the next number, so one number can
-  never hold back the account's others. An error the refresh throws outside a number's store (the
+  error is logged at error level, and the refresh goes on with the next number, so one bad row can
+  never hold back the account's others. When recording a number's attempt fails too (after a failed
+  store or after Meta's failure, whose kind and code stay the number's `failed` result with the
+  `attemptError`), the database is most likely out of reach: the refresh stops there and counts
+  the remaining numbers as left, rather than making reads whose answers and attempts could not be
+  stored. An error the refresh throws outside a number's store (the
   database while loading the account) is returned as `numbersError` and logged as an error without
   failing the job: a pg-boss retry would ask Meta for the access again, and the next check retries.
-  Errors are logged through the logger's `err` serializer (ADR-129), never their message as text: a
-  failed query's message repeats its parameters, here a number's name and phone number. Before
+  Errors are logged through the logger's `err` serializer (ADR-129), which keeps each error's code
+  and cause (since ADR-129, `db.run`'s errors quote no values either way). Before
   writing, the number is re-read under a row lock: one no longer active, moved, or whose account is
   no longer connected is skipped, and so is one whose health setup read after this read started (a
   setup finishing during the refresh keeps its newer read).
@@ -17071,11 +17075,13 @@ Decision:
   number means its reads keep failing). The column: nullable, no default (nothing rewritten),
   `UPDATE` for the runtime role only (which already selects the table), exported with the number
   and deleted with it (whole rows). Expand only.
-- **A partial answer keeps what was stored (`refreshedFactsColumns`, the refresh only):** a fact
-  Meta leaves out, or gives in a form not kept (an over-long display number), keeps the stored
-  value, so a partial answer does not wipe a number's name or quality rating each day. The messaging
-  limit is the exception: an answer without it is "not reported by Meta" as ADR-398 defines it, and
-  keeping an older limit beside the new check time would show a limit Meta did not report. Setup
+- **A partial answer keeps a stored name, display number or status (`refreshedFactsColumns`, the
+  refresh only):** one Meta leaves out, or gives in a form not kept (an over-long display number),
+  keeps the stored value, so a partial answer does not wipe them each day; they change rarely, and
+  Channels' note says such a value may come from an earlier read. The quality rating and the
+  messaging limit are time-sensitive and never kept: an answer without the rating stores none
+  (unknown), as setup does, and one without the limit stores "not reported by Meta" (ADR-398);
+  an older value beside the new "Checked" time would show what Meta no longer reported. Setup
   stores every fact as Meta gave it, as before.
 - **Pauses (ADR-399):** an account paused when the refresh starts is asked nothing (`paused`, the
   due numbers counted as left); a pause set by any response of the job, the access check's own
@@ -17096,7 +17102,8 @@ Decision:
   the last day. Below the numbers, when one is active: "HyFib reads each active number’s quality
   rating, messaging limit and name from Meta about once a day, with the daily check of its account’s
   access, but not while the account needs reconnecting or Meta is limiting management requests.
-  “Checked” is when HyFib last read them." (`NUMBER_FACTS_NOTE`). The e2e fixture that stores a
+  “Checked” is when HyFib last read them; a name, display number or status Meta left out of that
+  answer keeps the value from an earlier read." (`NUMBER_FACTS_NOTE`). The e2e fixture that stores a
   number "as read now" with a limit now also stores its health time, so the worker's refresh does
   not read it again within 20 hours.
 - **Tenant isolation:** every read and write runs in `db.run(scope, …)` with the scope the signed
@@ -17116,10 +17123,18 @@ read could not be stored (an over-long name failing the column's check) threw ou
 read first every day as the stalest, held back the account's other numbers for good (fixed by the
 bounded parse and the per-number `store_failed` result above); that the job's two central claims,
 no refresh after any outcome but `healthy` and a refresh's error returned with the stored outcome,
-had no test (unit tests now stub the access check); that the error's message was logged as text,
-which for a failed query repeats its values (now through the `err` serializer); that a number whose
+had no test (unit tests now stub the access check); that the error's message was logged as text
+(now the error itself through the `err` serializer, which keeps its code and cause; the review's
+premise that the text repeated a query's values was wrong, as `db.run` maps those errors since
+ADR-129); that a number whose
 reads fail was read again at every check of the day (fixed by `facts_attempted_at`, migration
 0313); that an e2e step's "Checked" assertion passed because of the fixture, not the refresh
 (dropped); that a partial answer wiped stored facts daily (kept in the refresh); and that a setup
 finishing during a refresh's read could be overwritten by an older read (now skipped). All were
-fixed.
+fixed. A second review found no High or Medium issue. It found that with the database out of reach
+the refresh went on reading every remaining number for up to 40 seconds, throwing the answers away
+(it now stops once an attempt cannot be recorded); that a kept quality rating sat beside a new
+"Checked" time (the rating is no longer kept, and the note says which facts may come from an
+earlier read); that 0313's grant had no test (now asserted); that an attempt failing after Meta's
+failure relabelled it as a store failure (Meta's kind and code are kept); and wording and test
+gaps. All were fixed.

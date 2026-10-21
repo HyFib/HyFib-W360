@@ -76,8 +76,7 @@ export function whatsappAccessCheckHandler(rt: WorkerRuntime) {
       rt.logger.info(facts, 'WhatsApp access checked');
     }
     if (numbersError !== undefined) {
-      // Through the logger's `err` serializer, which keeps the cause but never a failed query's
-      // values (ADR-129): a number's name and phone number never reach the log.
+      // Through the logger's `err` serializer (ADR-129), which keeps the error's code and cause.
       rt.logger.error(
         { ...facts, err: numbersError },
         'WhatsApp numbers’ facts could not be refreshed; the next check tries again',
@@ -105,6 +104,12 @@ function logNumberFacts(
         },
         'WhatsApp number’s facts could not be read from Meta; the next check tries again',
       );
+      if (number.attemptError !== undefined) {
+        rt.logger.error(
+          { ...facts, channelAccountId: number.channelAccountId, err: number.attemptError },
+          'WhatsApp number’s facts refresh attempt could not be recorded',
+        );
+      }
     } else if (number.state === 'store_failed') {
       rt.logger.error(
         { ...facts, channelAccountId: number.channelAccountId, err: number.error },
