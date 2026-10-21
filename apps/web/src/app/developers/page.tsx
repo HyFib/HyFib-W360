@@ -77,7 +77,7 @@ export default function DevelopersPage() {
                   {group.operations.map((operation) => (
                     <li key={operation.id}>
                       <a
-                        className="font-mono text-xs underline-offset-4 hover:underline"
+                        className="font-mono text-xs break-all underline-offset-4 hover:underline"
                         href={`#${operationAnchor(operation.id)}`}
                       >
                         {operation.method.toUpperCase()} {operation.path}
@@ -95,7 +95,7 @@ export default function DevelopersPage() {
                 {reference.events.map((event) => (
                   <li key={event.type}>
                     <a
-                      className="font-mono text-xs underline-offset-4 hover:underline"
+                      className="font-mono text-xs break-all underline-offset-4 hover:underline"
                       href={`#${eventAnchor(event.type)}`}
                     >
                       {event.type}
@@ -112,7 +112,7 @@ export default function DevelopersPage() {
                 {reference.schemas.map((schema) => (
                   <li key={schema.name}>
                     <a
-                      className="font-mono text-xs underline-offset-4 hover:underline"
+                      className="font-mono text-xs break-all underline-offset-4 hover:underline"
                       href={`#${schemaAnchor(schema.name)}`}
                     >
                       {schema.name}
