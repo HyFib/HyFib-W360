@@ -656,12 +656,6 @@ describe('choice-type custom contact fields (ADR-407)', () => {
     }
     const [a, b, c] = made as [string, string, string];
     expect(a < b && b < c).toBe(true);
-    const storagePool = new pg.Pool({
-      connectionString: inject('dbUrls').app,
-      max: 1,
-      options: '-c enable_indexscan=off -c enable_indexonlyscan=off -c enable_bitmapscan=off',
-    });
-    const storageOrder = createDatabase(storagePool);
     // Rewrite a, then b, until each row version is stored after c's, so a scan in storage order
     // meets c first: the deletion's old locking (in its update's scan order) would lock c, then
     // wait for a, which the bulk edit holds while it waits for b, then for c.
@@ -696,52 +690,66 @@ describe('choice-type custom contact fields (ADR-407)', () => {
           [pid],
         )
       ).map((r) => r.pid);
-    const holder = await fx.dbs.adminPool.connect();
-    let bulk: Promise<string> | undefined;
-    let deletion: Promise<string> | undefined;
+    // The deletion's own connections: no index or bitmap scans (see below), and the pool's usual
+    // timeouts, so a wait that is no deadlock fails fast.
+    const storagePool = new pg.Pool({
+      connectionString: inject('dbUrls').app,
+      max: 1,
+      lock_timeout: 5_000,
+      statement_timeout: 15_000,
+      options: '-c enable_indexscan=off -c enable_indexonlyscan=off -c enable_bitmapscan=off',
+    });
+    storagePool.on('error', () => undefined);
     try {
-      // b is held, so the bulk edit (in id order) locks a and waits for b.
-      await holder.query('BEGIN');
-      await holder.query('SELECT 1 FROM app.contacts WHERE id = $1 FOR UPDATE', [b]);
-      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
-      bulk = settled(
-        contactsSvc().bulkSetField(owner, {
-          filter: { tag: 'vip' },
-          key: 'city',
-          value: 'Pune',
-          expectedCount: 3,
-        }),
-      );
-      let bulkPid = 0;
-      await vi.waitFor(
-        async () => {
-          const [pid] = await blockedBy(lock!.pid);
-          if (pid === undefined) throw new Error('the bulk edit is not waiting yet');
-          bulkPid = pid;
-        },
-        { timeout: 4_000, interval: 20 },
-      );
-      // The deletion locks the contacts with a value in id order, so it waits for a, held by the
-      // bulk edit, without locking c first. It runs on connections that cannot scan an index, so
-      // a deletion that locked contacts in its scan's order (as before ADR-407's fix) would meet
-      // them in storage order (c first) and deadlock, rather than happen to meet them in id order
-      // through the (tenant_id, id) index; the fix sorts by id whatever the plan.
-      deletion = settled(
-        createContactsService({ db: storageOrder, clock: systemClock }).deleteField(owner, tier.id),
-      );
-      await vi.waitFor(
-        async () => {
-          if ((await blockedBy(bulkPid)).length < 1) {
-            throw new Error('the deletion is not waiting yet');
-          }
-        },
-        { timeout: 4_000, interval: 20 },
-      );
-    } finally {
-      await holder.query('COMMIT');
-      holder.release();
-    }
-    try {
+      const storageOrder = createDatabase(storagePool);
+      const holder = await fx.dbs.adminPool.connect();
+      let bulk: Promise<string> | undefined;
+      let deletion: Promise<string> | undefined;
+      try {
+        // b is held, so the bulk edit (in id order) locks a and waits for b.
+        await holder.query('BEGIN');
+        await holder.query('SELECT 1 FROM app.contacts WHERE id = $1 FOR UPDATE', [b]);
+        const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+        bulk = settled(
+          contactsSvc().bulkSetField(owner, {
+            filter: { tag: 'vip' },
+            key: 'city',
+            value: 'Pune',
+            expectedCount: 3,
+          }),
+        );
+        let bulkPid = 0;
+        await vi.waitFor(
+          async () => {
+            const [pid] = await blockedBy(lock!.pid);
+            if (pid === undefined) throw new Error('the bulk edit is not waiting yet');
+            bulkPid = pid;
+          },
+          { timeout: 4_000, interval: 20 },
+        );
+        // The deletion locks the contacts with a value in id order, so it waits for a, held by the
+        // bulk edit, without locking c first. It runs on connections that cannot scan an index, so
+        // a deletion that locked contacts in its scan's order (as before ADR-407's fix) would meet
+        // them in storage order (c first) and deadlock, rather than happen to meet them in id order
+        // through the (tenant_id, id) index; the fix sorts by id whatever the plan.
+        deletion = settled(
+          createContactsService({ db: storageOrder, clock: systemClock }).deleteField(
+            owner,
+            tier.id,
+          ),
+        );
+        await vi.waitFor(
+          async () => {
+            if ((await blockedBy(bulkPid)).length < 1) {
+              throw new Error('the deletion is not waiting yet');
+            }
+          },
+          { timeout: 4_000, interval: 20 },
+        );
+      } finally {
+        await holder.query('COMMIT');
+        holder.release();
+      }
       expect(await bulk).toBe('done');
       expect(await deletion).toBe('done');
     } finally {

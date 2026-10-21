@@ -88,8 +88,9 @@ KEY UPDATE`), so an automation step adding a tag takes turns with it; the import
   first name from WhatsApp do; a failed automation step counts toward the five failed attempts after
   which its run ends with `step_error`; a conflict is resent by the member or the API client. What
   can still cycle, each detected by PostgreSQL and retried: a bulk tag edit, the API's many-contact
-  call or an import that adds tags with an automation step and a deletion; the contact a merge kept
-  during an import; and a Flow answer whose inbound transaction already holds some contact locked by
+  call or an import that adds tags with an automation step and a deletion; a contact a merge kept,
+  or another request created, during an import (a created one usually has a later id, but ids come
+  from the app servers' clocks); and a Flow answer whose inbound transaction already holds some contact locked by
   an earlier message of the same webhook change that has a value of a field being deleted, possibly
   with a change of options too. Not raced in tests: automation steps and Flow answers (their lock
   order is reviewed).

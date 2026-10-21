@@ -246,8 +246,9 @@ export async function setContactFieldOptions(
  *   `FOR UPDATE` (they change tags, which automation steps take turns on through their key share
  *   lock); with an automation step holding one of those contacts while it waits for this field's
  *   row, and this deletion waiting for another of them, the three can cycle;
- * - the contact a merge kept during an import is locked after the import's other contacts, which
- *   may be out of id order (a contact created meanwhile has a later id, so it is not);
+ * - a contact a merge kept, or another request created, during an import is locked after the
+ *   import's other contacts, which may be out of id order (a created one usually has a later id,
+ *   but ids come from the app servers' clocks, and later chunks can find two in either order);
  * - a Flow answer is saved in an inbound transaction that may already hold some contact locked by
  *   an earlier message of the same webhook change (an earlier form answer, or the name filled in
  *   when a new WhatsApp identity joins an existing contact); if that contact has a value of the

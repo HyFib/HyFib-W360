@@ -17829,9 +17829,10 @@ KEY UPDATE` in id order before removing the values, so it waits for any transact
   still cycle, each detected by PostgreSQL, which fails one transaction: a bulk tag edit, the API's
   call changing many contacts or an import that adds tags (all lock `FOR UPDATE`, as they change
   tags, which automation steps take turns on through their key share lock) with an automation step
-  waiting for a field being deleted and that deletion; the contact a merge kept during an import,
-  locked after the import's other contacts and possibly out of id order (a contact created meanwhile
-  has a later id); and a Flow answer whose inbound transaction already holds some contact locked by
+  waiting for a field being deleted and that deletion; a contact a merge kept, or another request
+  created, during an import, locked after the import's other contacts and possibly out of id order
+  (a created one usually has a later id, but ids come from the app servers' clocks, and later chunks
+  can find two in either order); and a Flow answer whose inbound transaction already holds some contact locked by
   an earlier message of the same webhook change (an earlier form answer, or the name filled in when
   a new identity joins an existing contact) that has a value of a field being deleted, possibly with
   a change of options too. A member's or key's request then gets a conflict, which the member or the

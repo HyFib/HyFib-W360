@@ -236,6 +236,7 @@ export async function settleLockedContacts(
   },
 ): Promise<{ locked: Map<string, ContactLockRow>; unsettled: string[] }> {
   const locked = new Map<string, ContactLockRow>();
+  const gone: string[] = [];
   let pending = [...new Set(phones)];
   for (let round = 0; round < IMPORT_RELOCK_ROUNDS && pending.length > 0; round += 1) {
     const found = await deps.selectByPhones(pending);
@@ -249,12 +250,13 @@ export async function settleLockedContacts(
       const row = freshById.get(e.id);
       if (row && row.phoneE164 === phone) locked.set(phone, row);
     }
-    pending = pending.filter((phone) => !locked.has(phone));
-    // A number no contact has now was found by nobody: reading it again finds nobody either.
+    // Only numbers found on a contact that moved or went are read again: a number no contact has
+    // now would be found by nobody again.
     const seen = new Set(found.map(([phone]) => phone));
-    if (pending.every((phone) => !seen.has(phone))) break;
+    gone.push(...pending.filter((phone) => !locked.has(phone) && !seen.has(phone)));
+    pending = pending.filter((phone) => !locked.has(phone) && seen.has(phone));
   }
-  return { locked, unsettled: pending };
+  return { locked, unsettled: [...gone, ...pending] };
 }
 
 /** A contact as an import reads it once locked. */
@@ -1512,9 +1514,9 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         if (opts.updateExisting) {
           // Every contact the file names that exists now, locked before any is changed, all in id
           // order. A contact merged into, or created by another request, during the import is
-          // found below and locked then; a created one has a later id (UUIDv7) than those locked
-          // here, a kept contact of a merge may not, so that rare case can cycle, which
-          // PostgreSQL detects (the member imports again).
+          // found below and locked then, possibly out of id order (a created one usually has a
+          // later id, UUIDv7 from the app servers' clocks; a merge's kept contact may not), a rare
+          // cycle PostgreSQL detects (the member imports again).
           const known: string[] = [];
           for (const part of chunks([...records.keys()], 1000)) {
             for (const [, e] of await selectByPhones(part)) known.push(e.id);
