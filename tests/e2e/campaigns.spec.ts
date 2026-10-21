@@ -747,11 +747,14 @@ test('an A/B campaign is drafted with two templates, reviewed by its approver an
   // The runner sends each recipient its variant's template.
   await expect(async () => {
     await page.reload();
-    // The results' own figure (a term), not the variants table's row of the same name.
-    await expect(page.locator('dt', { hasText: 'Handed to WhatsApp' }).locator('..')).toContainText(
-      '20',
-      { timeout: 1_000 },
-    );
+    // The results' own figure (a term of exactly this text), not the variants table's row or the
+    // "How these numbers are counted" term "Handed to WhatsApp (campaign.queued v1)".
+    await expect(
+      page
+        .locator('dt')
+        .filter({ hasText: /^Handed to WhatsApp$/ })
+        .locator('..'),
+    ).toContainText('20', { timeout: 1_000 });
   }).toPass({ timeout: 60_000 });
   let names: string[] = [];
   await expect(async () => {

@@ -33,7 +33,10 @@ two messages took two campaigns over hand-split audiences. This closes P3-04's "
 - **CI's first run (PR #105, 2026-10-21):** the test that the runtime role cannot change a
   recorded variant expected PostgreSQL's message itself, but the database layer maps a refused
   privilege to `forbidden` ("Operation not permitted.") with the reason as its cause; it now
-  checks both, as the API's guarded-column tests do. The refusal itself was right.
+  checks both, as the API's guarded-column tests do. The refusal itself was right. The e2e's
+  first full run (Chromium) found its "Handed to WhatsApp" term ambiguous with the "How these
+  numbers are counted" term "Handed to WhatsApp (campaign.queued v1)"; it now matches the term's
+  exact text.
 - **Codex review (PR #105):** the campaign page now reads the campaign, each variant's results
   and the totals in one repeatable-read snapshot, as the API's detail does, so the variants add up
   to the results while recipients are being sent.
