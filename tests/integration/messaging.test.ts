@@ -721,12 +721,16 @@ describe('outbound sends', () => {
       text: 'B',
       clientKey: 'ck-lease-2',
     });
+    // The sweep reads every company's stale sends oldest first (by next_attempt_at), and other
+    // tests leave theirs behind: these two are made older than any, so its first page has them.
     await dbs.adminPool.query(
-      `UPDATE app.send_intents SET state = 'sending', lease_until = now() - interval '1 minute', sent_at = NULL WHERE message_id = $1`,
+      `UPDATE app.send_intents SET state = 'sending', lease_until = now() - interval '1 minute', sent_at = NULL,
+              next_attempt_at = timestamptz '2000-01-01 00:00:00Z' WHERE message_id = $1`,
       [before.messageId],
     );
     await dbs.adminPool.query(
-      `UPDATE app.send_intents SET state = 'sending', lease_until = now() - interval '1 minute', sent_at = now() - interval '2 minutes' WHERE message_id = $1`,
+      `UPDATE app.send_intents SET state = 'sending', lease_until = now() - interval '1 minute', sent_at = now() - interval '2 minutes',
+              next_attempt_at = timestamptz '2000-01-01 00:00:00Z' WHERE message_id = $1`,
       [after.messageId],
     );
     const stale = await adminQuery<{ id: string }>('SELECT id FROM ops.stale_send_intents(100)');
