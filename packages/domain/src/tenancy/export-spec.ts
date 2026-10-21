@@ -153,6 +153,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'cancelled_count',
       'cursor_position',
       'next_batch_at',
+      'resignal_count',
       'created_by_membership_id',
       'created_by_user_id',
       'stopped_by_membership_id',

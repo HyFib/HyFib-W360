@@ -23,6 +23,7 @@ export const ENROLLMENT_STATUS: Record<string, { label: string; tone: Tone }> = 
   running: { label: 'Running', tone: 'info' },
   completed: { label: 'Completed', tone: 'success' },
   stopped: { label: 'Stopped', tone: 'warning' },
+  failed: { label: 'Failed', tone: 'danger' },
 };
 
 export const END_REASONS: Record<string, string> = {

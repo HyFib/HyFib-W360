@@ -8775,6 +8775,46 @@ describe('the event of an automation run step (ADR-326)', () => {
     expect(automationRunStepPayloadSchema.safeParse(fromEnrolment).success).toBe(true);
   });
 
+  it('names the enrolment in the start and end of a run a member’s enrolment started (ADR-401)', async () => {
+    const enrollment = '0192a1b2-0000-7000-8000-0000000000e8';
+    const runEvent = (type: 'automation.run_started' | 'automation.run_ended') =>
+      ({
+        ...(event(null) as unknown as Record<string, unknown>),
+        type,
+        status: type === 'automation.run_started' ? 'running' : 'completed',
+        detail: {
+          runId: run,
+          automationId: automation,
+          ...(type === 'automation.run_ended' ? { endReason: 'no_next' } : {}),
+        },
+      }) as unknown as Parameters<typeof buildWebhookPayload>[1];
+    for (const type of ['automation.run_started', 'automation.run_ended'] as const) {
+      const reads = answering([
+        [{ ...runRow, apiKeyId: null, enrollmentId: enrollment }],
+        [{ phone: '+919845012345', name: 'Asha', erasedAt: null }],
+      ]);
+      const built = await buildWebhookPayload(reads.tx, runEvent(type), 'endpoint');
+      expect(built, type).toMatchObject({
+        type,
+        data: { run: { id: run, trigger: 'api', apiKeyId: null, enrollmentId: enrollment } },
+      });
+      const schema =
+        type === 'automation.run_started'
+          ? automationRunStartedPayloadSchema
+          : automationRunEndedPayloadSchema;
+      expect(schema.safeParse(built).success, type).toBe(true);
+      expect(reads.unread()).toBe(0);
+    }
+    // Any other run names no enrolment.
+    const reads = answering([[runRow], [{ phone: '+919845012345', name: 'Asha', erasedAt: null }]]);
+    const keyRun = await buildWebhookPayload(
+      reads.tx,
+      runEvent('automation.run_started'),
+      'endpoint',
+    );
+    expect(keyRun).toMatchObject({ data: { run: { apiKeyId: key, enrollmentId: null } } });
+  });
+
   it('sends nothing for a step or a run that is gone, reading nothing for an id that is not one', async () => {
     const gone = answering([[]]);
     await expect(buildWebhookPayload(gone.tx, event(id), 'endpoint')).rejects.toBeInstanceOf(

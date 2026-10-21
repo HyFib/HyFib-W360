@@ -25,6 +25,7 @@ import {
   type Database,
   type SQL,
   type TemplateCategory,
+  authorizedTenantScope,
   systemScope,
   type TenantScope,
   type Tx,
@@ -47,7 +48,10 @@ import {
   ENROLLMENT_LIMITS,
   assertEnrollableCount,
   enrollmentBatchDelayMs,
+  enrollmentBatchDue,
   enrollmentEndForRefusal,
+  enrollmentEndStatus,
+  enrollmentSweepAction,
   enrollmentJobKey,
   enrollmentStalled,
   enrollmentPreviewSchema,
@@ -134,8 +138,9 @@ export interface EnrollmentDetail extends EnrollmentSummary {
   /** Refusals by reason, most frequent first. */
   refusals: { reason: string; label: string; count: number }[];
   /**
-   * When a running enrolment last made progress, if its next batch is more than 10 minutes
-   * overdue (its job lost or out of retries; the minute sweep signals it again); otherwise null.
+   * When a running enrolment last handled a contact, if it has stalled (its next batch 10 minutes
+   * overdue, or the sweep has signalled it again since its last batch), while the company is
+   * active; otherwise null.
    */
   stalledSince: Date | null;
 }
@@ -203,7 +208,7 @@ async function endEnrollment(
   await tx
     .update(automationEnrollments)
     .set({
-      status: end.reason ? 'stopped' : 'completed',
+      status: enrollmentEndStatus(end.reason),
       endReason: end.reason,
       cancelledCount: sql`${automationEnrollments.cancelledCount} + ${cancelled.length}`,
       inputs: {},
@@ -235,7 +240,7 @@ async function endEnrollmentAsJob(
     subjectId: enrollment.id,
     metadata: {
       automationId: enrollment.automationId,
-      status: reason ? 'stopped' : 'completed',
+      status: enrollmentEndStatus(reason),
       reason,
       started: counts.started,
       refused: counts.refused,
@@ -251,10 +256,12 @@ export type EnrollmentBatchOutcome =
   | { outcome: 'ended' }
   /** A batch was handled and the next one signalled. */
   | { outcome: 'batch'; started: number; refused: number; nextBatchAt: Date }
+  /** Its next batch is not due yet: the job queued for that time (or the sweep) carries on. */
+  | { outcome: 'not_due'; nextBatchAt: Date }
   /** The last batch was handled (or the enrolment could not go on). */
   | {
       outcome: 'finished';
-      status: 'completed' | 'stopped';
+      status: 'completed' | 'stopped' | 'failed';
       reason: AutomationEnrollmentEndReason | null;
       started: number;
       refused: number;
@@ -290,6 +297,11 @@ export async function processEnrollmentBatch(
     if (!enrollment) return { outcome: 'missing' };
     if (enrollment.status !== 'running') return { outcome: 'ended' };
     const now = deps.clock.now();
+    // Paced per enrolment: a job that arrives before the next batch is due does nothing, so a second
+    // chain of jobs collapses into the one queued for that time instead of doubling the pace.
+    if (enrollment.nextBatchAt && !enrollmentBatchDue(enrollment.nextBatchAt, now)) {
+      return { outcome: 'not_due', nextBatchAt: enrollment.nextBatchAt };
+    }
     const counts = { started: enrollment.startedCount, refused: enrollment.refusedCount };
     const finish = async (
       reason: AutomationEnrollmentEndReason | null,
@@ -301,7 +313,7 @@ export async function processEnrollmentBatch(
       });
       return {
         outcome: 'finished',
-        status: reason ? 'stopped' : 'completed',
+        status: enrollmentEndStatus(reason),
         reason,
         ...batch,
       };
@@ -399,6 +411,8 @@ export async function processEnrollmentBatch(
         refusedCount: sql`${automationEnrollments.refusedCount} + ${batch.refused}`,
         cursorPosition: last ? last.position : enrollment.cursorPosition,
         nextBatchAt,
+        // A batch was handled: the sweep's count of signals without progress starts again.
+        resignalCount: 0,
       })
       .where(
         and(
@@ -831,6 +845,16 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
             )
             .groupBy(automationEnrollmentContacts.reason);
           const summary = toSummary(r.e, r.segmentName, nameOf(r.e.createdByMembershipId));
+          // When it last handled a contact (its start when it has handled none).
+          const [lastProgress] = await tx
+            .select({ at: sql<Date | null>`max(${automationEnrollmentContacts.processedAt})` })
+            .from(automationEnrollmentContacts)
+            .where(
+              and(
+                eq(automationEnrollmentContacts.tenantId, ctx.tenant.id),
+                eq(automationEnrollmentContacts.enrollmentId, id),
+              ),
+            );
           return {
             ...summary,
             automationName: r.automationName,
@@ -839,9 +863,12 @@ export function createAutomationEnrollmentService(deps: EnrollmentDeps) {
             refusals: summariseRefusals(
               reasons.map((x) => ({ reason: x.reason ?? '', count: x.count })),
             ),
+            // Not while the company is suspended: no run starts then, and that is not a stall.
             stalledSince:
-              r.e.status === 'running' && enrollmentStalled(r.e.nextBatchAt, clock.now())
-                ? r.e.updatedAt
+              r.e.status === 'running' &&
+              ctx.tenant.status === 'active' &&
+              (r.e.resignalCount > 0 || enrollmentStalled(r.e.nextBatchAt, clock.now()))
+                ? (lastProgress?.at ?? r.e.createdAt)
                 : null,
           };
         },
@@ -963,24 +990,136 @@ export async function findDueEnrollments(db: Database, limit = 100): Promise<Due
   }));
 }
 
+/** What the sweep did with one overdue enrolment. */
+export type EnrollmentSweepOutcome = 'signalled' | 'failed' | 'skipped';
+
 /**
- * Signals each overdue enrolment again under its batch's own key, so a job still waiting or being
- * retried collapses with it and one that ran out of retries is replaced. A batch starts only the
- * contacts after the stored position, under the enrolment's row lock, so a signal never starts a
- * contact twice.
+ * One overdue enrolment, in its company's scope (the company comes from the due list) and under its
+ * row lock: when it is still running and overdue at the same position, either signal it again under
+ * its batch's own key (a job still waiting or retrying collapses with it, one out of retries is
+ * replaced), counting the signal and making it due now, or, after 3 signals with no batch handled,
+ * end it as failed (`stalled`): its pending contacts are cancelled, started runs go on, and the end
+ * is audited once. A batch starts only contacts after the stored position, so a signal never starts
+ * a contact twice.
+ */
+export async function resignalEnrollment(
+  deps: Pick<EnrollmentDeps, 'db' | 'jobs' | 'signer' | 'clock'>,
+  due: DueEnrollment,
+): Promise<EnrollmentSweepOutcome> {
+  const scope = authorizedTenantScope(due.tenantId, null);
+  return deps.db.run(scope, async (tx) => {
+    const [enrollment] = await tx
+      .select()
+      .from(automationEnrollments)
+      .where(
+        and(
+          eq(automationEnrollments.tenantId, due.tenantId),
+          eq(automationEnrollments.id, due.enrollmentId),
+        ),
+      )
+      .for('update');
+    const now = deps.clock.now();
+    if (
+      enrollment?.status !== 'running' ||
+      enrollment.cursorPosition !== due.cursorPosition ||
+      !enrollmentStalled(enrollment.nextBatchAt, now)
+    ) {
+      return 'skipped';
+    }
+    if (enrollmentSweepAction(enrollment.resignalCount) === 'fail') {
+      await endEnrollmentAsJob(tx, enrollment, 'stalled', now, {
+        started: enrollment.startedCount,
+        refused: enrollment.refusedCount,
+      });
+      return 'failed';
+    }
+    await tx
+      .update(automationEnrollments)
+      .set({ resignalCount: enrollment.resignalCount + 1, nextBatchAt: now })
+      .where(
+        and(
+          eq(automationEnrollments.tenantId, due.tenantId),
+          eq(automationEnrollments.id, enrollment.id),
+        ),
+      );
+    await signalEnrollment(deps, tx, {
+      tenantId: due.tenantId,
+      enrollmentId: enrollment.id,
+      actorUserId: enrollment.createdByUserId,
+      key: enrollmentJobKey(enrollment.id, enrollment.cursorPosition),
+    });
+    return 'signalled';
+  });
+}
+
+export interface EnrollmentSweepResult {
+  signalled: number;
+  failed: number;
+  skipped: number;
+  /** Enrolments whose handling raised an error (the others were handled). */
+  errors: { tenantId: string; enrollmentId: string; error: unknown }[];
+}
+
+/**
+ * The minute sweep's part (ADR-401): each overdue enrolment of the due list handled on its own, so
+ * one's failure holds up neither the others nor the rest of the sweep; errors are returned for the
+ * worker to log.
  */
 export async function signalDueEnrollments(
-  deps: Pick<EnrollmentDeps, 'db' | 'jobs' | 'signer'>,
+  deps: Pick<EnrollmentDeps, 'db' | 'jobs' | 'signer' | 'clock'>,
   limit = 100,
-): Promise<number> {
-  const due = await findDueEnrollments(deps.db, limit);
-  for (const e of due) {
-    await signalEnrollment(deps, null, {
-      tenantId: e.tenantId,
-      enrollmentId: e.enrollmentId,
-      actorUserId: e.actorUserId,
-      key: enrollmentJobKey(e.enrollmentId, e.cursorPosition),
-    });
+): Promise<EnrollmentSweepResult> {
+  const result: EnrollmentSweepResult = { signalled: 0, failed: 0, skipped: 0, errors: [] };
+  for (const due of await findDueEnrollments(deps.db, limit)) {
+    try {
+      result[await resignalEnrollment(deps, due)] += 1;
+    } catch (error) {
+      result.errors.push({ tenantId: due.tenantId, enrollmentId: due.enrollmentId, error });
+    }
   }
-  return due.length;
+  return result;
+}
+
+/**
+ * Defers a running enrolment of a suspended company (the worker's job was deferred): its next batch
+ * is due at `at`, when the job queued here looks again, so the sweep does not start a second chain
+ * meanwhile. Returns whether it was running.
+ */
+export async function deferEnrollment(
+  deps: Pick<EnrollmentDeps, 'db' | 'jobs' | 'signer'>,
+  scope: TenantScope,
+  enrollmentId: string,
+  at: Date,
+): Promise<boolean> {
+  if (!z.uuid().safeParse(enrollmentId).success) return false;
+  return deps.db.run(scope, async (tx) => {
+    const [enrollment] = await tx
+      .select()
+      .from(automationEnrollments)
+      .where(
+        and(
+          eq(automationEnrollments.tenantId, scope.tenantId),
+          eq(automationEnrollments.id, enrollmentId),
+        ),
+      )
+      .for('update');
+    if (enrollment?.status !== 'running') return false;
+    await tx
+      .update(automationEnrollments)
+      .set({ nextBatchAt: at })
+      .where(
+        and(
+          eq(automationEnrollments.tenantId, scope.tenantId),
+          eq(automationEnrollments.id, enrollment.id),
+        ),
+      );
+    await signalEnrollment(deps, tx, {
+      tenantId: scope.tenantId,
+      enrollmentId: enrollment.id,
+      actorUserId: enrollment.createdByUserId,
+      key: `${enrollmentJobKey(enrollment.id, enrollment.cursorPosition)}:deferred:${at.getTime()}`,
+      at,
+    });
+    return true;
+  });
 }

@@ -12,7 +12,10 @@ import {
   ENROLLMENT_REFUSAL_LABELS,
   assertEnrollableCount,
   enrollmentBatchDelayMs,
+  enrollmentBatchDue,
+  enrollmentEndStatus,
   enrollmentStalled,
+  enrollmentSweepAction,
   enrollmentEndForRefusal,
   enrollmentJobKey,
   runEnrollmentBatch,
@@ -23,8 +26,10 @@ import {
 import {
   createAutomationEnrollmentService,
   endEnrollmentForRemovedMember,
+  deferEnrollment,
   findDueEnrollments,
   processEnrollmentBatch,
+  resignalEnrollment,
   signalDueEnrollments,
 } from './enrollments';
 import { START_REFUSALS, startInputVariables, startRefusalOf, type StartRefusal } from './starts';
@@ -57,7 +62,13 @@ const refusalOf = (reason: StartRefusal) =>
 
 describe('enrolment bounds and input (ADR-401)', () => {
   it('takes at most 10,000 contacts, 50 starts per transaction (under PostgreSQL’s 64 cached subtransactions)', () => {
-    expect(ENROLLMENT_LIMITS).toEqual({ contacts: 10_000, batch: 50, stallMinutes: 10 });
+    expect(ENROLLMENT_LIMITS).toEqual({
+      contacts: 10_000,
+      batch: 50,
+      stallMinutes: 10,
+      resignals: 3,
+      dueSlackMs: 1_000,
+    });
     expect(ENROLLMENT_LIMITS.batch).toBeLessThan(64);
   });
 
@@ -409,6 +420,8 @@ interface Scenario {
   cursor?: number;
   /** How many outcome rows the update finds still pending (default: all). */
   updatedRows?: number;
+  nextBatchAt?: Date | null;
+  resignalCount?: number;
 }
 
 function scenarioAnswers(s: Scenario) {
@@ -478,6 +491,8 @@ function scenarioAnswers(s: Scenario) {
                 refusedCount: 0,
                 cancelledCount: 0,
                 cursorPosition: s.cursor ?? 0,
+                nextBatchAt: s.nextBatchAt ?? null,
+                resignalCount: s.resignalCount ?? 0,
                 createdByMembershipId: MEMBER,
                 createdByUserId: USER,
                 stoppedByMembershipId: null,
@@ -1150,10 +1165,12 @@ describe('pacing, progress and the sweep (ADR-401 review)', () => {
     expect(enrollmentBatchDelayMs(10, 0)).toBe(10_000);
   });
 
-  it('calls an enrolment stalled only when its next batch is more than 10 minutes overdue', () => {
+  it('calls an enrolment stalled when its next batch is 10 minutes overdue or more', () => {
     const at = (minutesAgo: number) => new Date(NOW.getTime() - minutesAgo * 60_000);
     expect(enrollmentStalled(at(11), NOW)).toBe(true);
-    expect(enrollmentStalled(at(10), NOW)).toBe(false);
+    // The same bound as the due list's `next_batch_at <= now() - 10 minutes`.
+    expect(enrollmentStalled(at(10), NOW)).toBe(true);
+    expect(enrollmentStalled(new Date(NOW.getTime() - 10 * 60_000 + 1), NOW)).toBe(false);
     expect(enrollmentStalled(at(-5), NOW)).toBe(false);
     expect(enrollmentStalled(null, NOW)).toBe(false);
   });
@@ -1213,40 +1230,73 @@ describe('pacing, progress and the sweep (ADR-401 review)', () => {
     );
     expect(inserted?.values?.nextBatchAt).toEqual(NOW);
   });
+});
 
-  it('signals each overdue enrolment again under its batch’s own key, signed with its member', async () => {
-    const other = '0192a1b2-0000-7000-8000-0000000000e9';
-    const recording = recordingDb((step) =>
-      step.op === 'execute' && step.sql?.includes('ops.automation_enrollments_due')
-        ? {
-            rows: [
-              {
-                tenant_id: TENANT,
-                enrollment_id: ENROLLMENT,
-                actor_user_id: USER,
-                cursor_position: 50,
-              },
-              {
-                tenant_id: TENANT,
-                enrollment_id: other,
-                actor_user_id: 'user-2',
-                cursor_position: 0,
-              },
-            ],
-          }
-        : { rows: [] },
+describe('pacing per enrolment and the sweep’s cap (ADR-401 second review)', () => {
+  const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
+  const progressOf = (steps: Step[]) =>
+    steps.find(
+      (st) =>
+        st.op === 'update' &&
+        st.table === 'automation_enrollments' &&
+        st.set?.cursorPosition !== undefined,
+    )?.set;
+
+  it('runs a batch only once its enrolment’s next batch is due, within a second', () => {
+    expect(enrollmentBatchDue(null, NOW)).toBe(true);
+    expect(enrollmentBatchDue(NOW, NOW)).toBe(true);
+    expect(enrollmentBatchDue(new Date(NOW.getTime() + 1_000), NOW)).toBe(true);
+    expect(enrollmentBatchDue(new Date(NOW.getTime() + 1_001), NOW)).toBe(false);
+    expect(enrollmentBatchDue(minutes(-30), NOW)).toBe(true);
+  });
+
+  it('does nothing when a second chain’s job arrives before the next batch is due', async () => {
+    const early = await batchOf({ contacts: [{ n: 1 }, { n: 2 }], nextBatchAt: minutes(5) });
+    expect(early.result).toEqual({ outcome: 'not_due', nextBatchAt: minutes(5) });
+    expect(writes(early.steps)).toEqual([]);
+    expect(early.jobs).toEqual([]);
+    // Due (or overdue): the batch runs and the sweep's count starts again.
+    const due = await batchOf({
+      contacts: [{ n: 1 }, { n: 2 }],
+      nextBatchAt: minutes(-20),
+      resignalCount: 2,
+    });
+    expect(due.result).toMatchObject({ outcome: 'finished', started: 2 });
+    expect(progressOf(due.steps)).toMatchObject({ resignalCount: 0 });
+  });
+
+  it('ends an enrolment as failed only through the sweep’s cap', () => {
+    expect(enrollmentEndStatus(null)).toBe('completed');
+    expect(enrollmentEndStatus('stopped_by_member')).toBe('stopped');
+    expect(enrollmentEndStatus('stalled')).toBe('failed');
+    expect([0, 1, 2, 3].map(enrollmentSweepAction)).toEqual(['signal', 'signal', 'signal', 'fail']);
+  });
+
+  const due = (over: Partial<{ cursorPosition: number }> = {}) => ({
+    tenantId: TENANT,
+    enrollmentId: ENROLLMENT,
+    actorUserId: USER,
+    cursorPosition: 50,
+    ...over,
+  });
+  const contacts = Array.from({ length: 60 }, (_, i) => ({ n: i + 1 }));
+
+  it('signals an overdue enrolment again, counting the signal and making it due now', async () => {
+    const recording = recordingDb(
+      scenarioAnswers({ contacts, cursor: 50, nextBatchAt: minutes(-11), resignalCount: 1 }),
     );
-    expect(await findDueEnrollments(recording.db, 7)).toEqual([
-      { tenantId: TENANT, enrollmentId: ENROLLMENT, actorUserId: USER, cursorPosition: 50 },
-      { tenantId: TENANT, enrollmentId: other, actorUserId: 'user-2', cursorPosition: 0 },
-    ]);
-    expect(recording.steps[0]?.params).toEqual([7]);
     const jobs = new RecordingJobQueue();
-    expect(await signalDueEnrollments({ db: recording.db, jobs, signer })).toBe(2);
+    expect(await resignalEnrollment({ db: recording.db, jobs, signer, clock }, due())).toBe(
+      'signalled',
+    );
+    expect(recording.steps[0]).toMatchObject({ table: 'automation_enrollments', lock: 'update' });
+    expect(
+      recording.steps.find((st) => st.op === 'update' && st.table === 'automation_enrollments')
+        ?.set,
+    ).toEqual({ resignalCount: 2, nextBatchAt: NOW });
     expect(
       jobs.jobs.map((j) => [
         j.queue,
-        j.envelope.kind,
         j.envelope.tenantId,
         j.envelope.ref,
         j.envelope.actorUserId,
@@ -1254,24 +1304,184 @@ describe('pacing, progress and the sweep (ADR-401 review)', () => {
         j.options.startAfter,
       ]),
     ).toEqual([
-      [
-        QUEUES.automationEnroll.name,
-        'automation.enroll',
-        TENANT,
-        ENROLLMENT,
-        USER,
-        `${ENROLLMENT}:50`,
-        undefined,
-      ],
-      [
-        QUEUES.automationEnroll.name,
-        'automation.enroll',
-        TENANT,
-        other,
-        'user-2',
-        `${other}:0`,
-        undefined,
-      ],
+      [QUEUES.automationEnroll.name, TENANT, ENROLLMENT, USER, `${ENROLLMENT}:50`, undefined],
     ]);
+  });
+
+  it('ends it as failed after three signals with no batch handled, audited once, runs untouched', async () => {
+    const recording = recordingDb(
+      scenarioAnswers({ contacts, cursor: 50, nextBatchAt: minutes(-11), resignalCount: 3 }),
+    );
+    const jobs = new RecordingJobQueue();
+    expect(await resignalEnrollment({ db: recording.db, jobs, signer, clock }, due())).toBe(
+      'failed',
+    );
+    expect(writes(recording.steps)).toEqual([
+      'update automation_enrollment_contacts',
+      'update automation_enrollments',
+      'insert audit_events',
+    ]);
+    expect(endOf(recording.steps)).toMatchObject({
+      status: 'failed',
+      endReason: 'stalled',
+      inputs: {},
+      nextBatchAt: null,
+    });
+    const audit = recording.steps.find((st) => st.op === 'insert' && st.table === 'audit_events');
+    expect(audit?.values).toMatchObject({
+      action: 'automation.enrollment_ended',
+      actorType: 'system',
+      metadata: { status: 'failed', reason: 'stalled' },
+    });
+    expect(jobs.jobs).toEqual([]);
+  });
+
+  it('leaves an enrolment that moved on, is no longer overdue or has ended', async () => {
+    for (const [scenario, over] of [
+      [{ contacts, cursor: 100, nextBatchAt: minutes(-11) }, {}],
+      [{ contacts, cursor: 50, nextBatchAt: minutes(-9) }, {}],
+      [{ contacts, cursor: 50, nextBatchAt: minutes(-11), status: 'stopped' as const }, {}],
+      [{ contacts, cursor: 50, nextBatchAt: minutes(-11), missing: true }, {}],
+    ] as const) {
+      const recording = recordingDb(scenarioAnswers(scenario));
+      const jobs = new RecordingJobQueue();
+      expect(
+        await resignalEnrollment({ db: recording.db, jobs, signer, clock }, due(over)),
+        JSON.stringify(scenario),
+      ).toBe('skipped');
+      expect(writes(recording.steps)).toEqual([]);
+      expect(jobs.jobs).toEqual([]);
+    }
+  });
+
+  it('handles each enrolment of the due list on its own and returns the errors', async () => {
+    const other = '0192a1b2-0000-7000-8000-0000000000e9';
+    const base = scenarioAnswers({ contacts, cursor: 50, nextBatchAt: minutes(-11) });
+    const recording = recordingDb((step) => {
+      if (step.op === 'execute' && step.sql?.includes('ops.automation_enrollments_due')) {
+        return {
+          rows: [
+            {
+              tenant_id: TENANT,
+              enrollment_id: other,
+              actor_user_id: 'user-2',
+              cursor_position: 50,
+            },
+            {
+              tenant_id: TENANT,
+              enrollment_id: ENROLLMENT,
+              actor_user_id: USER,
+              cursor_position: 50,
+            },
+          ],
+        };
+      }
+      if (
+        step.op === 'select' &&
+        step.table === 'automation_enrollments' &&
+        step.params.includes(other)
+      ) {
+        throw new Error('connection lost');
+      }
+      return base(step);
+    });
+    expect(await findDueEnrollments(recording.db, 7)).toHaveLength(2);
+    expect(recording.steps[0]?.params).toEqual([7]);
+    const jobs = new RecordingJobQueue();
+    const result = await signalDueEnrollments({ db: recording.db, jobs, signer, clock });
+    expect(result).toMatchObject({ signalled: 1, failed: 0, skipped: 0 });
+    expect(result.errors.map((e) => [e.enrollmentId, (e.error as Error).message])).toEqual([
+      [other, 'connection lost'],
+    ]);
+    expect(jobs.jobs.map((j) => j.options.singletonKey)).toEqual([`${ENROLLMENT}:50`]);
+  });
+
+  it('defers a suspended company’s enrolment: its next batch is due at the deferred time', async () => {
+    const at = minutes(5);
+    const recording = recordingDb(
+      scenarioAnswers({ contacts, cursor: 50, nextBatchAt: minutes(-1) }),
+    );
+    const jobs = new RecordingJobQueue();
+    expect(await deferEnrollment({ db: recording.db, jobs, signer }, scope, ENROLLMENT, at)).toBe(
+      true,
+    );
+    expect(
+      recording.steps.find((st) => st.op === 'update' && st.table === 'automation_enrollments')
+        ?.set,
+    ).toEqual({ nextBatchAt: at });
+    expect(
+      jobs.jobs.map((j) => [j.envelope.actorUserId, j.options.singletonKey, j.options.startAfter]),
+    ).toEqual([[USER, `${ENROLLMENT}:50:deferred:${at.getTime()}`, at]]);
+    // The deferred chain and the sweep's: whichever job comes before that time does nothing.
+    const early = await batchOf({ contacts, cursor: 50, nextBatchAt: at });
+    expect(early.result).toMatchObject({ outcome: 'not_due' });
+    const ended = recordingDb(scenarioAnswers({ contacts, status: 'completed' }));
+    expect(
+      await deferEnrollment(
+        { db: ended.db, jobs: new RecordingJobQueue(), signer },
+        scope,
+        ENROLLMENT,
+        at,
+      ),
+    ).toBe(false);
+    expect(writes(ended.steps)).toEqual([]);
+  });
+
+  it('shows an enrolment as without progress since its last contact, except while the company is suspended', async () => {
+    const lastAt = new Date(NOW.getTime() - 30 * 60_000);
+    const view = async (status: 'active' | 'suspended', over: Record<string, unknown>) => {
+      const row = {
+        id: ENROLLMENT,
+        tenantId: TENANT,
+        automationId: AUTOMATION,
+        source: 'contacts',
+        segmentId: null,
+        inputs: {},
+        status: 'running',
+        endReason: null,
+        total: 60,
+        startedCount: 50,
+        refusedCount: 0,
+        cancelledCount: 0,
+        cursorPosition: 50,
+        nextBatchAt: minutes(-11),
+        resignalCount: 0,
+        createdByMembershipId: MEMBER,
+        createdByUserId: USER,
+        stoppedByMembershipId: null,
+        createdAt: minutes(-60),
+        updatedAt: NOW,
+        endedAt: null,
+        ...over,
+      };
+      const recording = recordingDb((step) => {
+        if (step.table === 'automation_enrollments') {
+          return [{ e: row, automationName: 'Follow-up', segmentName: null }];
+        }
+        if (step.table === 'memberships') return [{ id: MEMBER, name: 'Owner' }];
+        if (step.table === 'automation_enrollment_contacts') {
+          return step.fields.includes('at') ? [{ at: lastAt }] : [];
+        }
+        throw new Error(`an unexpected read of ${step.table}`);
+      });
+      const ctx = {
+        ...memberCtx(ENROLLER),
+        tenant: { id: TENANT, status, slug: 'acme', timezone: 'Asia/Kolkata' },
+      } as unknown as TenantContext;
+      return (
+        await createAutomationEnrollmentService({
+          db: recording.db,
+          clock,
+          jobs: new RecordingJobQueue(),
+          signer,
+        }).getEnrollment(ctx, ENROLLMENT)
+      ).stalledSince;
+    };
+    expect(await view('active', {})).toEqual(lastAt);
+    expect(await view('suspended', {})).toBeNull();
+    // Signalled again since its last batch: still without progress, though not overdue now.
+    expect(await view('active', { nextBatchAt: NOW, resignalCount: 1 })).toEqual(lastAt);
+    expect(await view('active', { nextBatchAt: minutes(-5) })).toBeNull();
+    expect(await view('active', { status: 'completed', nextBatchAt: null })).toBeNull();
   });
 });

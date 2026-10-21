@@ -668,23 +668,24 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Model** (`packages/domain/src/automations/graph.ts`, browser-safe): a trigger (a message is or
   contains a keyword; a customer starts a conversation; any customer message; optionally only while
   the business is open or closed; a cooldown per conversation; started by a store's order messages,
-  §6M; or started by a member's enrolment or through the API with the inputs it declares, §6N) and a graph of typed steps: send a message, ask with reply buttons (Meta's limits:
-  1–3 buttons, titles ≤ 20, body ≤ 1024, header and footer ≤ 60; research M-157/M-159), ask a
-  question (any text, a number or an email; retries; answer saved under a name), send a template and
-  ask with a template (an approved utility or marketing template with its variables as texts; the
-  asking step branches on each quick-reply button, any other reply and no reply; ADR-050), condition
-  (answers, contact fields, tags, business hours), update contact (tags, custom fields), wait
-  (≤ 24 h), hand off to people (a team, or routed like a new case), end. Texts may use `{{name}}`,
-  `{{company}}`, `{{answer.<name>}}`, in automations started by order messages
-  `{{order.<field>}}`, and in automations started through the API `{{input.<name>}}`. `checkGraph`
-  rejects missing targets, unsaved answers, unknown or misplaced
-  placeholders, missing teams or fields, loops that never pass through a question or a wait, empty
-  template variables, templates HyFib cannot send or whose variables, buttons or account no longer
-  match (checked against the company's synced templates), and, in automations started by order
-  messages or through the API, a message or question that some path reaches before the customer
-  replied; an automation started through the API must be limited to one number (`triggerIssues`). A wait or a
-  question timeout over 23 hours warns only when a message that is not a template can follow it
-  before a reply (templates need no window, so a run can follow up a day or more later).
+  §6M; or started by a member's enrolment or through the API with the inputs it declares, §6N) and a
+  graph of typed steps: send a message, ask with reply buttons (Meta's limits: 1–3 buttons, titles ≤
+  20, body ≤ 1024, header and footer ≤ 60; research M-157/M-159), ask a question (any text, a number
+  or an email; retries; answer saved under a name), send a template and ask with a template (an
+  approved utility or marketing template with its variables as texts; the asking step branches on
+  each quick-reply button, any other reply and no reply; ADR-050), condition (answers, contact
+  fields, tags, business hours), update contact (tags, custom fields), wait (≤ 24 h), hand off to
+  people (a team, or routed like a new case), end. Texts may use `{{name}}`, `{{company}}`,
+  `{{answer.<name>}}`, in automations started by order messages `{{order.<field>}}`, and in
+  automations started through the API `{{input.<name>}}`. `checkGraph` rejects missing targets,
+  unsaved answers, unknown or misplaced placeholders, missing teams or fields, loops that never pass
+  through a question or a wait, empty template variables, templates HyFib cannot send or whose
+  variables, buttons or account no longer match (checked against the company's synced templates),
+  and, in automations started by order messages or through the API, a message or question that some
+  path reaches before the customer replied; an automation started through the API must be limited to
+  one number (`triggerIssues`). A wait or a question timeout over 23 hours warns only when a message
+  that is not a template can follow it before a reply (templates need no window, so a run can follow
+  up a day or more later).
 - **Interpreter** (`automations/interpreter.ts`): a pure function (graph, run state, event, facts)
   → new state, effects, log entry; one call is one step. Reply buttons, and the quick-reply buttons
   of an asking template step (as their payload), carry `w360bot:<run>:<step>:<visit>:<position>`

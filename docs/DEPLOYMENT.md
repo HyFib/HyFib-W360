@@ -1854,30 +1854,32 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 
    Migration 0311 (ADR-401) adds `app.automation_enrollments` and
    `app.automation_enrollment_contacts` (forced row security, grants, deletion steps 685 and 692),
-   the nullable column `app.automation_runs.enrollment_id` with its foreign key, replaces the run check `automation_runs_api_key` (a key or an enrolment, exactly one, on an `api`
-   run) and the run guard, and adds the sweep's due list `ops.automation_enrollments_due` (SECURITY
-   DEFINER, pinned search path, executable by the runtime role only, reading running enrolments
-   through a policy of their own). The check and the foreign key are added `NOT VALID`, so the
-   migration holds the runs table's lock only briefly and reads none of it. Expand only and backward compatible: web servers and workers of the release
-   before never name the new column or tables, and their API starts write runs the new check allows.
-   The new queue `automation.enroll` is declared by the migration command with the others. Roll out
-   workers before web as usual: an enrolment is started only by a web server of this release, and
-   its first job waits in the queue until a worker of this release takes it. To roll back the
-   application past this release, stop the running enrolments first (their jobs would otherwise wait
-   unconsumed); the tables, column and function can stay.
+   the nullable column `app.automation_runs.enrollment_id` with its foreign key, replaces the run
+   check `automation_runs_api_key` (a key or an enrolment, exactly one, on an `api` run) and the run
+   guard, and adds the sweep's due list `ops.automation_enrollments_due` (SECURITY DEFINER, pinned
+   search path, executable by the runtime role only, reading running enrolments through a policy of
+   their own). The check and the foreign key are added `NOT VALID`, so the migration holds the runs
+   table's lock only briefly and reads none of it. Expand only and backward compatible: web servers
+   and workers of the release before never name the new column or tables, and their API starts write
+   runs the new check allows. The new queue `automation.enroll` is declared by the migration command
+   with the others. Roll out workers before web as usual: an enrolment is started only by a web
+   server of this release, and its first job waits in the queue until a worker of this release takes
+   it. To roll back the application past this release, stop the running enrolments first (their jobs
+   would otherwise wait unconsumed); the tables, column and function can stay.
 
    Migration 0312 (ADR-401) validates the check and the foreign key 0311 added `NOT VALID`, as 0054
    validated 0052's. Validation reads `app.automation_runs` without blocking writes; every row
    written since 0311 was checked when written, and the rows before it have no enrolment, so it
    cannot fail on them. It runs in the same deployment, after 0311.
 
-   Migration 0314 (ADR-401) builds `automation_runs_enrollment_idx` on `app.automation_runs
-(tenant_id, enrollment_id) WHERE enrollment_id IS NOT NULL` with `CREATE INDEX CONCURRENTLY`
-   (`-- migrate:no-transaction`, as 0053), after 0311 and 0312, so runs keep being read and written
-   while it is built. It serves the foreign key's check when company deletion removes enrolments
-   (step 692); until it exists that check falls back to an index on the company's runs. If it fails,
-   an INVALID index can remain: `DROP INDEX CONCURRENTLY IF EXISTS
-app.automation_runs_enrollment_idx;` and run the migrations again (RUNBOOKS).
+   Migration 0314 (ADR-401) builds `automation_runs_enrollment_idx` on
+   `app.automation_runs (tenant_id, enrollment_id) WHERE enrollment_id IS NOT NULL` with
+   `CREATE INDEX CONCURRENTLY` (`-- migrate:no-transaction`, as 0053), after 0311 and 0312, so runs
+   keep being read and written while it is built. It serves the foreign key's check when company
+   deletion removes enrolments (step 692); until it exists that check falls back to an index on the
+   company's runs. If it fails, an INVALID index can remain: run
+   `DROP INDEX CONCURRENTLY IF EXISTS app.automation_runs_enrollment_idx;` and the migrations again
+   (RUNBOOKS).
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

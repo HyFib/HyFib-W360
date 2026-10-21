@@ -698,38 +698,43 @@ cancelled (`bot_stopped`). New runs: Pause the automation (runs in progress fini
 once: Archive (runs in progress stop and their conversations go to people). Each action is audited
 (`automation.*`).
 
-**Enrolments of contacts or a segment (ADR-401).** An owner or administrator enrols contacts from
-an automation's page or the Contacts page; only an active automation whose live version is started
-by a member or through the API can be chosen, at most 10,000 contacts, one running enrolment per
+**Enrolments of contacts or a segment (ADR-401).** An owner or administrator enrols contacts from an
+automation's page or the Contacts page; only an active automation whose live version is started by a
+member or through the API can be chosen, at most 10,000 contacts, one running enrolment per
 automation ("Contacts are being enrolled in this automation already": wait or stop that one). The
 enrolment's page (Automations → the automation → its enrolment) counts contacts started, refused
 (with the reasons: erased, on the suppression list, opted out, no marketing opt-in, conversation
-assigned to a member, another automation handling the conversation, the hourly limit of 10 runs,
-no runs left in the plan this month, no phone number, merged into another contact), not started
-and waiting. A refused contact is not retried: fix the cause (record consent, unassign the
-conversation, wait an hour) and enrol it again. Runs start in the background, 50 per job; worker
-log lines "automation enrolment batch" carry the enrolment id, the outcome and the counts. An
-enrolment that stopped by itself says why: the automation was paused or archived, its number is not
-active, its live version takes other inputs, the plan does not include automations, or the member
-who started it left or lost the permission ("automation enrolment member removed"). While the
-company is suspended no run starts and its job looks again every five minutes ("automation
-enrolment deferred"). Batches are paced by the number's send rate (`META_SEND_RATE_PER_SECOND`):
-10,000 contacts at the default 20 a second take about nine minutes to start. Meta's messaging limit
-is not paced: it counts the unique customers reached outside a service window in a moving 24
-hours, per business portfolio and shared by its numbers, so before enrolling thousands of contacts
-in an automation whose first step is a template, compare the count with the limit Settings →
-Channels shows for its number (a campaign's page warns of the same, ADR-400); sends beyond it fail
-with Meta's error and fail their runs. If an enrolment's page says "No progress since …", its next
-batch is more than 10 minutes overdue (its job was lost or ran out of retries): the minute sweep
-signals it again ("automation enrolments signalled again" in the worker log; each batch starts
-nothing twice). If it stays, check that the worker runs and the `automation.enroll` queue drains
-(section 3) and read the dead letter's error; a batch that keeps failing dead-letters again each
-time, so fix the cause or have a member stop the enrolment. Stopping cancels the contacts not started;
-runs already started go on, and each is stopped from its run page. The audit log has
-`automation.enrollment_started`, `automation.enrollment_stopped` and `automation.enrollment_ended`
-(counts only, never the inputs or the search). Runs an enrolment started say so on their page and
-reach webhooks as runs of trigger `api` with no API key and their `enrollmentId`: an endpoint that
-filters runs by the trigger `api` receives them too; one limited to API keys' runs does not.
+assigned to a member, another automation handling the conversation, the hourly limit of 10 runs, no
+runs left in the plan this month, no phone number, merged into another contact), not started and
+waiting. A refused contact is not retried: fix the cause (record consent, unassign the conversation,
+wait an hour) and enrol it again. Runs start in the background, 50 per job; worker log lines
+"automation enrolment batch" carry the enrolment id, the outcome and the counts. An enrolment that
+stopped by itself says why: the automation was paused or archived, its number is not active, its
+live version takes other inputs, the plan does not include automations, or the member who started it
+left or lost the permission ("automation enrolment member removed"). While the company is suspended
+no run starts and its job looks again every five minutes ("automation enrolment deferred"). Batches
+are paced by the number's send rate (`META_SEND_RATE_PER_SECOND`): 10,000 contacts at the default 20
+a second take about nine minutes to start. The pace is per enrolment: two enrolments on one number,
+or an enrolment beside a campaign, each go at that rate, and the number's send bucket spaces their
+messages. Meta's messaging limit is not paced: it counts the unique customers reached outside a
+service window in a moving 24 hours, per business portfolio and shared by its numbers, so before
+enrolling thousands of contacts in an automation whose first step is a template, compare the count
+with the limit Settings → Channels shows for its number (a campaign's page warns of the same,
+ADR-400); sends beyond it fail with Meta's error and fail their runs. If an enrolment's page says
+"No progress since …", its next batch is 10 minutes overdue or more (its job was lost or ran out of
+retries): the minute sweep signals it again ("automation enrolments signalled again or failed as
+stalled" in the worker log; each batch starts nothing twice), at most three times without a batch
+handled; the next sweep then ends it as failed ("Its next batch kept failing"), leaving started runs
+going. Before that, check that the worker runs and the `automation.enroll` queue drains (section 3)
+and read the dead letter's error. The notice does not show while the company is suspended.
+"automation enrolment sweep failed" at error level means the sweep could not handle an enrolment
+(the error is logged); the rest of the sweep ran, and the next minute's sweep tries again. Stopping
+cancels the contacts not started; runs already started go on, and each is stopped from its run page.
+The audit log has `automation.enrollment_started`, `automation.enrollment_stopped` and
+`automation.enrollment_ended` (counts only, never the inputs or the search). Runs an enrolment
+started say so on their page and reach webhooks as runs of trigger `api` with no API key and their
+`enrollmentId`: an endpoint that filters runs by the trigger `api` receives them too; one limited to
+API keys' runs does not.
 
 **Budgets and failed sends.** A run fails, and hands the conversation to people, when it exceeds
 200 steps, enters one step 20 times, sends 50 messages or runs longer than 7 days, or when a

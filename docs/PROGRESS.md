@@ -79,21 +79,21 @@ started only from customer messages, store events, members' tests and the public
   run pages and lists name the enrolment. Pages re-check permissions; logic stays in the services.
 - **Webhooks:** enrolled runs reach `automation.run_started`/`run_ended` as before, with trigger
   `api` and `apiKeyId: null` (descriptions updated).
-- **Tests:** unit (`automations/enrollments.test.ts`, 34 tests after the review fixes: bounds, the schema, the count
-  check, the inputs, refusal codes, job keys, the refusal summary, the batch logic (50 in order,
-  refusals, the plan ending it, other errors thrown), and against a recording database a batch
-  (runs naming the enrolment, outcomes, next job and position, the cursor, every refusal, the
-  plan's runs, marketing consent, each way it ends, ended and missing enrolments, an unexpected
-  error), a start (the snapshot, the audit without inputs, the first job, a segment, permissions,
-  inputs, counts, the second running enrolment) and a stop; `api-trigger.test.ts` updated);
-  integration (`tests/integration/automation-enrollments.test.ts`, 16 tests (6 added by the review fixes): the snapshot and
-  batches of 50 with the run's records and audit, a segment and the webhook event, each refusal
-  with its reason, the plan's runs and a plan without automations, a crash mid-batch and two jobs
-  at once without a second run, stop, who may, ends mid-way (paused, demoted member, removed
-  member), isolation between companies, the grants, row security, deletion steps and the run's
-  check and guard); e2e (`automations.spec.ts`: an enrolment from the Contacts page's filters to
-  its completed page and the run naming it). Written for CI; the integration and e2e tests were
-  not run here.
+- **Tests:** unit (`automations/enrollments.test.ts`, 42 tests after both reviews' fixes: bounds,
+  the schema, the count check, the inputs, refusal codes, job keys, the refusal summary, the batch
+  logic (50 in order, refusals, the plan ending it, other errors thrown), and against a recording
+  database a batch (runs naming the enrolment, outcomes, next job and position, the cursor, every
+  refusal, the plan's runs, marketing consent, each way it ends, ended and missing enrolments, an
+  unexpected error), a start (the snapshot, the audit without inputs, the first job, a segment,
+  permissions, inputs, counts, the second running enrolment) and a stop; `api-trigger.test.ts`
+  updated); integration (`tests/integration/automation-enrollments.test.ts`, 18 tests (8 added by
+  the reviews' fixes): the snapshot and batches of 50 with the run's records and audit, a segment
+  and the webhook event, each refusal with its reason, the plan's runs and a plan without
+  automations, a crash mid-batch and two jobs at once without a second run, stop, who may, ends
+  mid-way (paused, demoted member, removed member), isolation between companies, the grants, row
+  security, deletion steps and the run's check and guard); e2e (`automations.spec.ts`: an enrolment
+  from the Contacts page's filters to its completed page and the run naming it). Written for CI; the
+  integration and e2e tests were not run here.
 - **Mutation checks:** 23 deliberate regressions (the batch bound, the plan ending a batch, unknown
   errors recorded as refusals, the count check, the limit, an empty enrolment, the member's
   permission, the cursor, the last batch, marketing consent, inputs kept, the marketing
@@ -105,8 +105,8 @@ started only from customer messages, store events, members' tests and the public
   DATA-RETENTION, DEPLOYMENT (migration 0311), RUNBOOKS (§10D), BACKLOG P4-01 and the matrix's
   H-053.
 - **Review fixes (no High finding; second commit):**
-  - **M1, enrolments stuck running after a dead letter:** `next_batch_at` records when the next batch
-    is due; the minute sweep (`signalDueEnrollments`) reads `ops.automation_enrollments_due`
+  - **M1, enrolments stuck running after a dead letter:** `next_batch_at` records when the next
+    batch is due; the minute sweep (`signalDueEnrollments`) reads `ops.automation_enrollments_due`
     (SECURITY DEFINER, pinned search path, runtime role only, a definer policy for running rows) and
     signals each enrolment more than 10 minutes overdue under its batch's own key; the page says "No
     progress since …" (`stalledSince`). Integration test: a dead-lettered batch is due, a second
@@ -133,17 +133,43 @@ started only from customer messages, store events, members' tests and the public
     the delayed job, the stored, cleared and initial `next_batch_at`, counts not from `RETURNING`,
     the sweep's key, the run step's `enrollmentId`, and any error read as changed inputs): 32
     caught; the last cannot be observed, as `startInputVariables` throws only validation errors.
+- **Second review fixes (no High finding; third and fourth commits):**
+  - L4 of the first review: the partial index moved out of 0311 into migration 0314, built
+    concurrently outside a transaction (as 0053), with its recovery in RUNBOOKS and DEPLOYMENT.
+  - **M1, pacing bypassed:** under the row lock a job more than a second before `next_batch_at`
+    returns `not_due` and does nothing; the deferral (`deferEnrollment`) moves `next_batch_at` to
+    its time. The pace is documented as per enrolment only. Unit tests (early chain, due within the
+    slack, deferral) and integration tests (an early job, a deferred enrolment not due).
+  - **L1:** no stall notice while the company is suspended (integration test).
+  - **L2:** the integration tests read the due list through `dueAmong`, with every other company's
+    running enrolments made not due in a rolled-back transaction, and handle only their own
+    enrolments (`resignalEnrollment`).
+  - **L3:** unit test that built `run_started` and `run_ended` payloads carry `run.enrollmentId`.
+  - **L4, endless dead letters:** `resignal_count` (0311) counts sweep signals without a batch
+    handled; after three the next sweep ends the enrolment as `failed` (`stalled`), audited once,
+    pending contacts cancelled, started runs untouched; each sweep write runs in the company's scope
+    under the row lock. Unit and integration tests.
+  - **L5:** the enrolment sweep runs after retention, each enrolment on its own, errors logged at
+    error level with the error; the rest of the sweep is not held up.
+  - Nits: `REVOKE EXECUTE ... FROM PUBLIC` on the due list; the stall bound is "10 minutes or more"
+    in SQL and code alike. The ADR-401 heading, dropped by the 0314 commit's doc edit, is restored.
+  - Mutation checks: 45 deliberate regressions (the 33 above, an early job let through, the due
+    slack, the count not reset, the cap off by one, a moved cursor ignored, the signal not counted
+    or not made due, `stalled` not failed, the deferral not moving the next batch, the stall shown
+    while suspended, one sweep error stopping the rest, and the start and end payloads'
+    `enrollmentId`): 44 caught; the miss is the unobservable one above.
 - **Not built:** enrolling through the public API, scheduling an enrolment or a rate of its own,
-  stopping an enrolment's runs at once, choosing contacts one by one.
+  pacing shared across enrolments and campaigns of one number, stopping an enrolment's runs at
+  once, choosing contacts one by one.
 
 ### Test commands and results (local, 2026-10-16)
 
 | Command                                            | Result                                                          |
 | -------------------------------------------------- | --------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
-| `pnpm test` (unit)                                 | 177 files, 1,921 tests passed (after the review fixes)          |
+| `pnpm test` (unit)                                 | 177 files, 1,930 tests passed (after both reviews' fixes)       |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
-| Migrations 0311, 0312 and 0314 parsed with pglast  | 28, 2 and 1 statements (not applied to a database)              |
+| Migrations 0311, 0312 and 0314 parsed with pglast  | 29, 2 and 1 statements (not applied to a database)              |
 | `pnpm build`                                       | passed                                                          |
 
 ## 2026-10-16 — A campaign's notice of its number's messaging limit (P3-04, ADR-400)

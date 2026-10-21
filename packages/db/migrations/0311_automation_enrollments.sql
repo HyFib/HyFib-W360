@@ -20,7 +20,8 @@ CREATE TABLE app.automation_enrollments (
   segment_id uuid,
   -- The trigger's inputs, by name, given once for everyone enrolled; cleared when it ends.
   inputs jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(inputs) = 'object'),
-  status text NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'stopped')),
+  status text NOT NULL DEFAULT 'running'
+    CHECK (status IN ('running', 'completed', 'stopped', 'failed')),
   end_reason text,
   total integer NOT NULL CHECK (total BETWEEN 1 AND 10000),
   started_count integer NOT NULL DEFAULT 0 CHECK (started_count >= 0),
@@ -31,6 +32,9 @@ CREATE TABLE app.automation_enrollments (
   -- When the next batch is due (its job's start, paced by the number's send rate); NULL once ended.
   -- The minute sweep signals a running enrolment whose next batch is more than 10 minutes overdue.
   next_batch_at timestamptz,
+  -- Times the sweep signalled the enrolment again with no batch handled since (reset by each batch);
+  -- after 3 the next sweep ends it as failed (`stalled`), so a batch that always fails stops.
+  resignal_count smallint NOT NULL DEFAULT 0 CHECK (resignal_count BETWEEN 0 AND 3),
   created_by_membership_id uuid NOT NULL,
   created_by_user_id text NOT NULL,
   stopped_by_membership_id uuid,
@@ -56,7 +60,8 @@ CREATE TABLE app.automation_enrollments (
     OR (status = 'stopped' AND ended_at IS NOT NULL
         AND end_reason IN ('stopped_by_member', 'member_removed', 'automation_paused',
                            'automation_unavailable', 'channel_unavailable', 'not_in_plan',
-                           'inputs_changed', 'marketing_not_allowed'))),
+                           'inputs_changed', 'marketing_not_allowed'))
+    OR (status = 'failed' AND ended_at IS NOT NULL AND end_reason = 'stalled')),
   CONSTRAINT automation_enrollments_stopped_by CHECK (
     (end_reason = 'stopped_by_member') = (stopped_by_membership_id IS NOT NULL)),
   CONSTRAINT automation_enrollments_inputs_cleared CHECK (status = 'running' OR inputs = '{}'::jsonb),
@@ -74,7 +79,7 @@ SELECT ops.apply_tenant_rls('app.automation_enrollments');
 -- Members insert an enrolment whole; the job and a member's stop change only its progress and end.
 GRANT SELECT, INSERT ON app.automation_enrollments TO w360_app;
 GRANT UPDATE (status, end_reason, started_count, refused_count, cancelled_count, cursor_position,
-  next_batch_at, inputs, stopped_by_membership_id, ended_at, updated_at)
+  next_batch_at, resignal_count, inputs, stopped_by_membership_id, ended_at, updated_at)
   ON app.automation_enrollments TO w360_app;
 -- The sweep's due list reads running enrolments by when their next batch is due.
 CREATE INDEX automation_enrollments_due_idx ON app.automation_enrollments (next_batch_at)
@@ -197,7 +202,7 @@ CREATE POLICY tenant_deletion_delete ON app.automation_enrollments FOR DELETE TO
   USING (tenant_id = (SELECT ops.deleting_tenant_id()));
 
 -- Enrolments whose job was lost or ran out of retries (ADR-401): the minute sweep signals each
--- running enrolment of an active company whose next batch is more than 10 minutes overdue, with
+-- running enrolment of an active company whose next batch is 10 minutes overdue or more, with
 -- what a signal needs (ids, the member who signs its job, the position its batch starts after).
 -- Under the enrolment's row lock a batch only starts contacts after the stored position, so a
 -- signal never starts a contact twice. Read through a policy for running rows only.
@@ -217,5 +222,6 @@ GRANT SELECT (status, created_by_user_id, cursor_position, next_batch_at)
   ON app.automation_enrollments TO w360_definer;
 CREATE POLICY enrollment_sweep_read ON app.automation_enrollments FOR SELECT TO w360_definer
   USING (status = 'running');
+REVOKE EXECUTE ON FUNCTION ops.automation_enrollments_due(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ops.automation_enrollments_due(integer) TO w360_app;
 ALTER FUNCTION ops.automation_enrollments_due(integer) OWNER TO w360_definer;

@@ -266,7 +266,12 @@ export const automationHttpCalls = appSchema.table('automation_http_calls', {
 export const AUTOMATION_ENROLLMENT_SOURCES = ['contacts', 'segment'] as const;
 export type AutomationEnrollmentSource = (typeof AUTOMATION_ENROLLMENT_SOURCES)[number];
 
-export const AUTOMATION_ENROLLMENT_STATUSES = ['running', 'completed', 'stopped'] as const;
+export const AUTOMATION_ENROLLMENT_STATUSES = [
+  'running',
+  'completed',
+  'stopped',
+  'failed',
+] as const;
 export type AutomationEnrollmentStatus = (typeof AUTOMATION_ENROLLMENT_STATUSES)[number];
 
 /** Why an enrolment stopped before every contact was handled (the table's CHECK lists the same). */
@@ -279,6 +284,8 @@ export const AUTOMATION_ENROLLMENT_END_REASONS = [
   'not_in_plan',
   'inputs_changed',
   'marketing_not_allowed',
+  /** Failed: its batch made no progress after the sweep signalled it 3 times. */
+  'stalled',
 ] as const;
 export type AutomationEnrollmentEndReason = (typeof AUTOMATION_ENROLLMENT_END_REASONS)[number];
 
@@ -306,6 +313,8 @@ export const automationEnrollments = appSchema.table('automation_enrollments', {
   cursorPosition: integer('cursor_position').notNull().default(0),
   /** When the next batch is due (paced by the number's send rate); null once ended. */
   nextBatchAt: tz('next_batch_at'),
+  /** Sweep signals since the last batch handled (ADR-401); at 3 the next sweep fails it. */
+  resignalCount: smallint('resignal_count').notNull().default(0),
   createdByMembershipId: uuid('created_by_membership_id').notNull(),
   createdByUserId: text('created_by_user_id').notNull(),
   stoppedByMembershipId: uuid('stopped_by_membership_id'),

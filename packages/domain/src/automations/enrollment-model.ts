@@ -27,6 +27,16 @@ export const ENROLLMENT_LIMITS = {
    * again (its job lost or out of retries) and its page says it has made no progress.
    */
   stallMinutes: 10,
+  /**
+   * Times the sweep signals an enrolment again without a batch handled in between before the next
+   * sweep ends it as failed (`stalled`): a batch that fails every time does not loop for ever.
+   */
+  resignals: 3,
+  /**
+   * Slack when a job checks that its batch is due: pg-boss starts a delayed job at its time, but the
+   * clocks of the worker and the database may differ by a little.
+   */
+  dueSlackMs: 1_000,
 } as const;
 
 /**
@@ -39,12 +49,31 @@ export function enrollmentBatchDelayMs(started: number, sendRatePerSecond: numbe
   return Math.ceil((started * 1000) / Math.max(1, sendRatePerSecond));
 }
 
-/** Whether a running enrolment's next batch is overdue by more than the stall bound. */
+/**
+ * Whether a running enrolment's next batch is overdue by the stall bound or more, as the sweep's due
+ * list counts it (`next_batch_at <= now() - 10 minutes`).
+ */
 export function enrollmentStalled(nextBatchAt: Date | null, now: Date): boolean {
   return (
     nextBatchAt !== null &&
-    now.getTime() - nextBatchAt.getTime() > ENROLLMENT_LIMITS.stallMinutes * 60_000
+    now.getTime() - nextBatchAt.getTime() >= ENROLLMENT_LIMITS.stallMinutes * 60_000
   );
+}
+
+/**
+ * Whether a batch may run now: not before the time its enrolment's next batch is due, so a second
+ * chain of jobs (a deferred one beside the sweep's, a retry after a lost completion) waits instead of
+ * doubling the pace.
+ */
+export function enrollmentBatchDue(nextBatchAt: Date | null, now: Date): boolean {
+  return (
+    nextBatchAt === null || nextBatchAt.getTime() <= now.getTime() + ENROLLMENT_LIMITS.dueSlackMs
+  );
+}
+
+/** What the sweep does with an overdue enrolment: signal it again, or end it as failed. */
+export function enrollmentSweepAction(resignalCount: number): 'signal' | 'fail' {
+  return resignalCount >= ENROLLMENT_LIMITS.resignals ? 'fail' : 'signal';
 }
 
 /** Whom an enrolment takes: the contacts the contacts page's filters match, or a saved segment. */
@@ -132,7 +161,17 @@ export const ENROLLMENT_END_REASON_LABELS: Record<AutomationEnrollmentEndReason,
   inputs_changed: 'The automation’s live version takes other inputs than the ones given.',
   marketing_not_allowed:
     'The automation sends marketing templates, which the member who started it may no longer send.',
+  stalled:
+    'Its next batch kept failing: HyFib tried it again 3 times after it stopped making progress.',
 };
+
+/** The status an enrolment ends with for a reason (none: every contact was handled). */
+export function enrollmentEndStatus(
+  reason: AutomationEnrollmentEndReason | null,
+): 'completed' | 'stopped' | 'failed' {
+  if (reason === null) return 'completed';
+  return reason === 'stalled' ? 'failed' : 'stopped';
+}
 
 /** A pending contact of a batch, in snapshot order. */
 export interface PendingEnrollee {

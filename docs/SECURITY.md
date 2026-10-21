@@ -394,23 +394,24 @@ Phase 4 rules (automations, P4-01):
   10,000 contacts the member saw counted, one running enrolment per automation; each contact takes
   the API's start steps (erasure, suppression, opt-outs, marketing consent for marketing
   automations, a conversation no member holds and no run handles, the hourly limit, the plan's
-  runs). The `automation.enroll` job is signed with the member; each batch re-checks that the
-  member is active and still holds the permissions, and the enrolment ends otherwise. Runs act for
-  the company (no member on the run or its jobs) and record their enrolment (`enrollment_id`,
-  fixed by the run guard; a check allows a key or an enrolment, exactly one, on an `api` run).
-  Audited when started, stopped and ended, by counts, without the inputs or the search text.
+  runs). The `automation.enroll` job is signed with the member; each batch re-checks that the member
+  is active and still holds the permissions, and the enrolment ends otherwise. Runs act for the
+  company (no member on the run or its jobs) and record their enrolment (`enrollment_id`, fixed by
+  the run guard; a check allows a key or an enrolment, exactly one, on an `api` run). Audited when
+  started, stopped and ended, by counts, without the inputs or the search text.
   `app.automation_enrollments` and `app.automation_enrollment_contacts` have FORCE row security,
   composite foreign keys to the company's automation, segment, members, contacts and runs, and give
   the app role select and insert, updates of the progress, end and outcome columns only (never who,
-  which automation, whom or the positions), and no delete; w360_definer may read the key columns
-  and delete the rows of a company being deleted (steps 685 and 692), and read the status, member,
+  which automation, whom or the positions), and no delete; w360_definer may read the key columns and
+  delete the rows of a company being deleted (steps 685 and 692), and read the status, member,
   position and next batch time of running enrolments (a policy for running rows only) for
-  `ops.automation_enrollments_due` (SECURITY DEFINER, pinned search path, executable by the runtime
-  role only, granted before its ownership moved), the minute sweep's list of enrolments whose next
-  batch is more than 10 minutes overdue, in active companies; the company comes from the database,
-  never from a payload, and the signal it sends is the member's signed job, verified as any. The
-  runs' webhook payloads now carry `run.enrollmentId`. No other function is new or widened, and no
-  permission is new.
+  `ops.automation_enrollments_due` (SECURITY DEFINER, pinned search path, EXECUTE revoked from
+  PUBLIC and granted to the runtime role only, before its ownership moved), the minute sweep's list
+  of enrolments whose next batch is more than 10 minutes overdue, in active companies; the company
+  comes from the database, never from a payload; the sweep then changes each enrolment (its signal
+  count, or its failure after three signals) in that company's scope under the row lock, and the
+  signal it sends is the member's signed job, verified as any. The runs' webhook payloads now carry
+  `run.enrollmentId`. No other function is new or widened, and no permission is new.
 - Automations start only in unassigned conversations of an active (not suspended) company, never
   after an opt-out keyword, and every bot message re-checks the channel, the 24-hour window and the
   contact's WhatsApp number when queued (a template step checks its template and the contact's

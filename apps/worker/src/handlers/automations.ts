@@ -1,15 +1,16 @@
 import type { Job } from 'pg-boss';
+import { toError } from '@w360/core';
 import {
   advanceAutomationRun,
   applyAutomationRetention,
   authorizeJob,
+  deferEnrollment,
   endEnrollmentForRemovedMember,
   findDueAutomationRuns,
   findDueHttpCalls,
   processEnrollmentBatch,
   processHttpCall,
   signalDueEnrollments,
-  signalEnrollment,
   signalAutomationRun,
   signalHttpCall,
   stopRunForRemovedTester,
@@ -83,20 +84,20 @@ export function automationEnrollHandler(rt: WorkerRuntime) {
       requireActiveActor: true,
     });
     if (auth.outcome === 'deferred') {
-      // Suspended company: no run starts; the same signed job is queued again for later (the
-      // tenant id comes from the verified envelope).
-      const minute = Math.floor(rt.clock.now().getTime() / 60_000);
-      const { tenantId, actorUserId, ref } = auth.envelope;
-      if (tenantId && actorUserId) {
-        await signalEnrollment(rt, null, {
-          tenantId,
-          enrollmentId: ref,
-          actorUserId,
-          key: `${ref}:deferred:${minute}`,
-          at: new Date(rt.clock.now().getTime() + ENROLLMENT_DEFER_MINUTES * 60_000),
-        });
-      }
-      rt.logger.info({ jobId: job.id, enrollmentId: ref }, 'automation enrolment deferred');
+      // Suspended company: no run starts. The enrolment's next batch becomes due later and a job is
+      // queued for that time, in the company's scope (from the verified envelope), so the sweep does
+      // not start a second chain meanwhile.
+      const ref = auth.envelope.ref;
+      const deferred = await deferEnrollment(
+        rt,
+        auth.cleanupScope,
+        ref,
+        new Date(rt.clock.now().getTime() + ENROLLMENT_DEFER_MINUTES * 60_000),
+      );
+      rt.logger.info(
+        { jobId: job.id, enrollmentId: ref, deferred },
+        'automation enrolment deferred',
+      );
       return;
     }
     if (auth.outcome === 'rejected' && 'cleanupScope' in auth) {
@@ -190,13 +191,37 @@ export async function sweepAutomationRuns(rt: WorkerRuntime): Promise<{ signalle
   }
   // Queued HTTP calls whose job was lost (tenant ids from the definer sweep query).
   for (const call of await findDueHttpCalls(rt.db)) await signalHttpCall(rt, call);
-  // Members' enrolments whose next batch is more than 10 minutes overdue: a lost job, or one that
-  // ran out of retries (ADR-401). Tenant ids come from the definer due list.
-  const enrollments = await signalDueEnrollments(rt);
-  if (enrollments > 0) rt.logger.info({ enrollments }, 'automation enrolments signalled again');
   const retention = await applyAutomationRetention(rt.db);
   if (retention.cleared + retention.deleted > 0) {
     rt.logger.info(retention, 'automation retention applied');
+  }
+  // Members' enrolments whose next batch is 10 minutes overdue: a lost job, or one that ran out of
+  // retries (ADR-401). Tenant ids come from the definer due list. Last and on its own, so a failure
+  // here holds up none of the sweep's other work; it is logged as an error and the next minute's
+  // sweep tries again.
+  try {
+    const swept = await signalDueEnrollments(rt);
+    for (const failure of swept.errors) {
+      rt.logger.error(
+        {
+          err: toError(failure.error),
+          tenantId: failure.tenantId,
+          enrollmentId: failure.enrollmentId,
+        },
+        'automation enrolment sweep failed for an enrolment; the next sweep tries again',
+      );
+    }
+    if (swept.signalled + swept.failed > 0) {
+      rt.logger.info(
+        { signalled: swept.signalled, failed: swept.failed },
+        'automation enrolments signalled again or failed as stalled',
+      );
+    }
+  } catch (error) {
+    rt.logger.error(
+      { err: toError(error) },
+      'automation enrolment sweep failed; the next sweep tries again',
+    );
   }
   return { signalled: due.length };
 }

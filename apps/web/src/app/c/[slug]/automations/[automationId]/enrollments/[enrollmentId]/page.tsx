@@ -100,8 +100,8 @@ export default async function EnrollmentPage({
             {enrollment.stalledSince ? (
               <Alert tone="warning">
                 No progress since {formatDateTime(enrollment.stalledSince.toISOString(), tz)}. HyFib
-                tries the next batch again every few minutes; if this stays, stop the enrolment and
-                tell HyFib support.
+                tries the next batch again, every 10 minutes; after three tries without progress the
+                enrolment ends as failed. You can stop it meanwhile.
               </Alert>
             ) : null}
             <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-5">

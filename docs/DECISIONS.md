@@ -16773,7 +16773,7 @@ draft of 251 eligible contacts on `TIER_250`, reviewed as over without a problem
 (`__proto__`, `constructor`) are tested as unknown, the API's `limit` is bounded to 64 characters
 as kept, and the schema test checks the field's types, formats and nullability. All were fixed.
 
-Members enrol contacts or a segment in an automation (P4-01) (2026-10-16)
+## ADR-401 Members enrol contacts or a segment in an automation (P4-01) (2026-10-16)
 
 Context: runs start from customer messages (ADR-034), store events (ADR-050), members' test runs
 (ADR-038) and the public API, one contact per call (ADR-077) or up to 50 (ADR-161). A member who
@@ -16828,14 +16828,19 @@ Decision:
   batch's job, all in the same transaction.
 - **Paced by the number's send rate:** the next batch's job starts (`startAfter`, stored as
   `next_batch_at`) no sooner than the runs this batch started take at `META_SEND_RATE_PER_SECOND`,
-  the rate campaigns pace by when they have no rate of their own (50 runs at the default 20 a second:
-  2.5 seconds; a batch that started none queues the next one at once). Runs, and so their first
-  messages, start no faster than the number sends; campaigns' own `rate_per_minute` has no
-  equivalent here (a later slice could add one). Meta's messaging limit is not paced: it counts
-  unique customers reached outside a service window in a moving 24 hours, per business portfolio
-  and shared by its numbers (ADR-398), so an enrolment whose first step is a template can reach it;
-  Settings → Channels shows the number's limit (ADR-398), as a campaign's page warns of it
-  (ADR-400), and RUNBOOKS says to compare the count with it before enrolling.
+  the rate campaigns pace by when they have no rate of their own (50 runs at the default 20 a
+  second: 2.5 seconds; a batch that started none queues the next one at once). Under the row lock, a
+  job that arrives more than a second before `next_batch_at` does nothing (`not_due`), so a second
+  chain of jobs (a deferred one beside the sweep's, a retry after a lost completion) collapses into
+  the one queued for that time instead of doubling the pace, and a deferral moves `next_batch_at` to
+  its own time. **The pace is per enrolment only:** two enrolments on one number, or an enrolment
+  beside a campaign or the inbox, each start runs at the full rate, and the number's send bucket is
+  what finally spaces their messages. Campaigns' own `rate_per_minute` has no equivalent here (a
+  later slice could add one). Meta's messaging limit is not paced: it counts unique customers
+  reached outside a service window in a moving 24 hours, per business portfolio and shared by its
+  numbers (ADR-398), so an enrolment whose first step is a template can reach it; Settings →
+  Channels shows the number's limit (ADR-398), as a campaign's page warns of it (ADR-400), and
+  RUNBOOKS says to compare the count with it before enrolling.
 - **The start steps are the API's** (`automations/starts.ts`, moved from `api/automations.ts`):
   `loadStartableAutomation`, `startInputVariables`, `automationSendsMarketing`,
   `activeStartChannel` and `startRunForContact`, each contact in a savepoint of its own: erasure,
@@ -16867,15 +16872,22 @@ Decision:
   running, refusing every other enrolment of its automation. So the minute sweep reads
   `ops.automation_enrollments_due` (SECURITY DEFINER, pinned search path, executable by the runtime
   role only, reading running rows through a policy of their own: ids, the member and the position)
-  for running enrolments of active companies whose next batch is more than 10 minutes overdue, and
-  signals each under its batch's own key: a job still waiting or retrying collapses with it, one
-  that ran out of retries is replaced. The batch starts only contacts after the stored position,
-  under the row lock, so a signal never starts a contact twice (integration test: three jobs at
-  once after a re-signal). The enrolment's page says "No progress since" the last change while it
-  is that overdue. Ending it as failed on a dead letter (ADR-111's stranded work) was not chosen:
-  most failures (a deadlock, a lost connection) succeed when tried again, which a sweep does without
-  anyone; a batch that keeps failing dead-letters again each time, which platform staff see
-  (ADR-091), and a member can stop it.
+  for running enrolments of active companies whose next batch is 10 minutes overdue or more (the
+  page's stall check uses the same bound). Each is then handled on its own, in its company's scope
+  (the company from the due list) under its row lock: still running, overdue and at the same
+  position, it is signalled under its batch's own key (a job still waiting or retrying collapses
+  with it, one out of retries is replaced), its `resignal_count` raised and its next batch made due
+  now. A batch handled resets the count. **After three signals with no batch handled, the next sweep
+  ends it as `failed` (`stalled`):** its pending contacts are not started, started runs go on, the
+  end is audited once and shown on its page, so a batch that fails every time stops instead of
+  dead-lettering for ever. The batch starts only contacts after the stored position, under the row
+  lock, so a signal never starts a contact twice (integration test: three jobs at once after a
+  re-signal). The enrolment's page says "No progress since" its last handled contact while it is
+  stalled (overdue, or signalled since its last batch), except while the company is suspended (no
+  run starts then; the deferral keeps its next batch in the future). The sweep runs last in the
+  automation sweep, after retention, and its errors are logged per enrolment at error level while
+  the others go on. Ending it on the first dead letter (ADR-111's stranded work) was not chosen:
+  most failures (a deadlock, a lost connection) succeed when tried again, which the sweep does.
 - **Who started a run:** `automation_runs.enrollment_id` (migration 0311), as `api_key_id` records a
   key: a check keeps exactly one of the two on a run of an `api` automation and neither on any other
   run, and the run guard keeps it fixed. Runs act for the company, as live runs do (ADR-038): their
@@ -16917,18 +16929,18 @@ Decision:
   runtime role's grants (insert and read; updates only of progress, end and outcome columns; no
   delete), the definer role's deletion policies, deletion steps 685 (outcomes, before the runs they
   name) and 692 (enrolments, after the runs that name them), and the run's column, check, foreign
-  key, partial index and guard, and the sweep's due list. The check replaces 0052's under its name
-  and, with the foreign key, is added `NOT VALID`: the rows already there have no enrolment, so
-  for them it is the check 0054 validated. **Migration 0312** validates both without blocking
-  writes, as 0054 did for 0052. **Migration 0314** builds a partial index on `(tenant_id,
-enrollment_id)` concurrently (`-- migrate:no-transaction`, as 0053), so runs stay readable and
-  writable while it is built; it serves the foreign key's check when company deletion removes
-  enrolments (step 692; PostgreSQL proves `enrollment_id = $n` implies its predicate, which an
-  integration test checks with the check's generic plan). A merged contact's outcome keeps its row with no contact
-  (`ON DELETE SET NULL`), and retention deleting a run clears the outcome's run, so neither the
-  merge (ADR-224) nor retention needs a change. Exported with the company (both tables and the
-  run's column). One definer function (the due list), granted to the runtime role before its
-  ownership moves to `w360_definer`; nothing executable by PUBLIC.
+  key and guard, and the sweep's due list. The check replaces 0052's under its name
+  and, with the foreign key, is added `NOT VALID`: the rows already there have no enrolment, so for
+  them it is the check 0054 validated. **Migration 0312** validates both without blocking writes, as
+  0054 did for 0052. **Migration 0314** builds a partial index on `(tenant_id, enrollment_id)`
+  concurrently (`-- migrate:no-transaction`, as 0053), so runs stay readable and writable while it
+  is built; it serves the foreign key's check when company deletion removes enrolments (step 692;
+  PostgreSQL proves `enrollment_id = $n` implies its predicate, which an integration test checks
+  with the check's generic plan). A merged contact's outcome keeps its row with no contact
+  (`ON DELETE SET NULL`), and retention deleting a run clears the outcome's run, so neither the merge
+  (ADR-224) nor retention needs a change. Exported with the company (both tables and the run's
+  column). One definer function (the due list), with EXECUTE revoked from PUBLIC explicitly and
+  granted to the runtime role before its ownership moves to `w360_definer`.
 
 Not built: enrolling through the public API; scheduling an enrolment for later, or a rate of its
 own; stopping an enrolment's runs at once; choosing contacts one by one on the Contacts page (it
@@ -16951,3 +16963,16 @@ built concurrently: a first fix built it inside 0311, which would have scanned t
 enrolment repeated the Contacts filter's schema (it now uses it). Smaller fixes: the inputs'
 refusal is caught only as a validation error, the counts come from the rows changed, and the
 browser's requests clear their busy state when they fail.
+
+Second review (before merge): no High issue; it confirmed that a double start is impossible. It
+found that pacing could be bypassed (a batch never read `next_batch_at`, and after a suspension the
+deferred chain and the sweep's could both run, at twice the pace): a job now does nothing before its
+batch is due, and the deferral moves `next_batch_at`; that the stall notice showed while the
+company was suspended (now not); that the integration tests read the cross-company due list, which
+its limit could truncate (they now read it with every other company's enrolments made not due, in a
+transaction rolled back); that the start and end events' `enrollmentId` had no test (added); that a
+batch failing every time looped through dead letters for ever (now ended as `failed` after three
+signals); that the enrolment sweep could stop the automation sweep before retention (now last, its
+errors logged per enrolment); and two nits: an explicit `REVOKE ... FROM PUBLIC` and the stall bound
+aligned between SQL and code. The index of the first review, first built inside 0311 (which would
+have scanned the runs under its exclusive lock), is built concurrently by 0314.

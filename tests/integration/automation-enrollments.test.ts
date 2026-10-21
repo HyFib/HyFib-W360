@@ -9,9 +9,9 @@ import {
   contactForPhone,
   createContactMergeService,
   createTemplatesService,
-  findDueEnrollments,
+  deferEnrollment,
   processTemplateSubmit,
-  signalDueEnrollments,
+  resignalEnrollment,
   syncTemplates,
   type TemplateDefinition,
   createAutomationEnrollmentService,
@@ -1024,6 +1024,46 @@ const festiveSale: TemplateDefinition = {
   buttons: [{ type: 'QUICK_REPLY', text: 'Stop promotions' }],
 };
 
+/**
+ * The enrolments of these companies that the sweep's definer function lists. Other companies'
+ * running enrolments are made not due inside a transaction that is rolled back, so the function's
+ * limit and order cannot hide these companies' enrolments behind other tests'.
+ */
+async function dueAmong(companies: Company[]) {
+  const client = await fx.dbs.adminPool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE app.automation_enrollments SET next_batch_at = now()
+        WHERE status = 'running' AND NOT (tenant_id = ANY($1::uuid[]))`,
+      [companies.map((c) => c.tenant.id)],
+    );
+    const { rows } = await client.query<{
+      tenant_id: string;
+      enrollment_id: string;
+      actor_user_id: string;
+      cursor_position: number;
+    }>('SELECT * FROM ops.automation_enrollments_due(100)');
+    return rows.map((r) => ({
+      tenantId: r.tenant_id,
+      enrollmentId: r.enrollment_id,
+      actorUserId: r.actor_user_id,
+      cursorPosition: r.cursor_position,
+    }));
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+  }
+}
+
+/** Makes an enrolment's next batch 11 minutes overdue, as a lost or failed job leaves it. */
+const overdue = (id: string) =>
+  fx.query(
+    `UPDATE app.automation_enrollments SET next_batch_at = now() - interval '11 minutes'
+      WHERE id = $1`,
+    [id],
+  );
+
 /** The waiting or running jobs of an enrolment's batch, by its key. */
 const batchJobs = async (key: string) =>
   fx.query<{ state: string; delayed: boolean }>(
@@ -1033,18 +1073,18 @@ const batchJobs = async (key: string) =>
   );
 
 describe('enrolments after review: the sweep, pacing, consent, the job’s authorisation, merges (ADR-401)', () => {
-  it('paces the next batch by the number’s send rate', async () => {
+  it('paces the next batch by the number’s send rate, and a job that comes early does nothing', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     const automationId = await publish(owner, c, 'Paced');
     await contactsOf(c, 55, 'paced');
     const started = await enrol(owner, automationId, byTag('paced'), 55);
-    const first = await processEnrollmentBatch(
-      { ...enrollmentDeps(), sendRatePerSecond: 20 },
-      authorizedTenantScope(c.tenant.id, c.owner.id),
-      started.id,
-    );
-    expect(first).toMatchObject({ outcome: 'batch', started: 50 });
+    const paced = { ...enrollmentDeps(), sendRatePerSecond: 20 };
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    expect(await processEnrollmentBatch(paced, scope, started.id)).toMatchObject({
+      outcome: 'batch',
+      started: 50,
+    });
     // 50 runs at 20 a second: the next batch's job may start 2.5 seconds later, not before.
     expect(await batchJobs(`${started.id}:50`)).toEqual([{ state: 'created', delayed: true }]);
     const [row] = await fx.query<{ seconds: number }>(
@@ -1054,6 +1094,35 @@ describe('enrolments after review: the sweep, pacing, consent, the job’s autho
     );
     expect(row!.seconds).toBeGreaterThan(2);
     expect(row!.seconds).toBeLessThan(3);
+    // Another job before then (a second chain) starts nothing and changes nothing.
+    expect(await processEnrollmentBatch(paced, scope, started.id)).toMatchObject({
+      outcome: 'not_due',
+    });
+    expect(await runsOf(started.id)).toHaveLength(50);
+    expect(await enrollmentRow(started.id)).toMatchObject({
+      started_count: 50,
+      cursor_position: 50,
+    });
+    // Deferred while the company was suspended: its next batch is due at the deferred time, so the
+    // sweep's job and the deferred one cannot both run before it.
+    const later = new Date(Date.now() + 5 * 60_000);
+    expect(
+      await deferEnrollment(
+        enrollmentDeps(),
+        authorizedTenantScope(c.tenant.id, null),
+        started.id,
+        later,
+      ),
+    ).toBe(true);
+    const [deferred] = await fx.query<{ at: Date }>(
+      'SELECT next_batch_at AS at FROM app.automation_enrollments WHERE id = $1',
+      [started.id],
+    );
+    expect(deferred!.at.getTime()).toBe(later.getTime());
+    expect(await processEnrollmentBatch(paced, scope, started.id)).toMatchObject({
+      outcome: 'not_due',
+    });
+    expect(await dueAmong([c])).toEqual([]);
   });
 
   it('signals an enrolment whose next batch is 10 minutes overdue again, and the signal starts nobody twice', async () => {
@@ -1062,58 +1131,51 @@ describe('enrolments after review: the sweep, pacing, consent, the job’s autho
     const automationId = await publish(owner, c, 'Stalled');
     const ids = await contactsOf(c, 60, 'stalled');
     const started = await enrol(owner, automationId, byTag('stalled'), 60);
-    await processEnrollmentBatch(
-      enrollmentDeps(),
-      authorizedTenantScope(c.tenant.id, c.owner.id),
-      started.id,
-    );
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    await processEnrollmentBatch(enrollmentDeps(), scope, started.id);
     // Not due yet: the next batch is paced, not overdue.
-    expect((await findDueEnrollments(fx.dbs.app)).map((d) => d.enrollmentId)).not.toContain(
-      started.id,
-    );
+    expect(await dueAmong([c])).toEqual([]);
     // Its job ran out of retries: the next batch is now 11 minutes overdue.
     await fx.query(
       `UPDATE pgboss.job SET state = 'failed' WHERE name = $1 AND singleton_key = $2`,
       [QUEUES.automationEnroll.name, `${started.id}:50`],
     );
-    await fx.query(
-      `UPDATE app.automation_enrollments SET next_batch_at = now() - interval '11 minutes'
-        WHERE id = $1`,
-      [started.id],
-    );
+    await overdue(started.id);
     expect((await enrollments().getEnrollment(owner, started.id)).stalledSince).toBeInstanceOf(
       Date,
     );
-    expect(await findDueEnrollments(fx.dbs.app)).toContainEqual({
+    const [due] = await dueAmong([c]);
+    expect(due).toEqual({
       tenantId: c.tenant.id,
       enrollmentId: started.id,
       actorUserId: c.owner.id,
       cursorPosition: 50,
     });
-    // The sweep signals it under its batch's own key; a second sweep collapses into that job.
-    expect(await signalDueEnrollments(enrollmentDeps())).toBeGreaterThanOrEqual(1);
-    await signalDueEnrollments(enrollmentDeps());
+    // The sweep signals it under its batch's own key, counts the signal and makes it due now; a
+    // second sweep finds it no longer overdue.
+    expect(await resignalEnrollment(enrollmentDeps(), due!)).toBe('signalled');
+    expect(await resignalEnrollment(enrollmentDeps(), due!)).toBe('skipped');
     expect(await batchJobs(`${started.id}:50`)).toEqual([{ state: 'created', delayed: false }]);
+    const [counted] = await fx.query<{ resignal_count: number }>(
+      'SELECT resignal_count FROM app.automation_enrollments WHERE id = $1',
+      [started.id],
+    );
+    expect(counted!.resignal_count).toBe(1);
+    // Still shown as without progress until a batch is handled.
+    expect((await enrollments().getEnrollment(owner, started.id)).stalledSince).toBeInstanceOf(
+      Date,
+    );
     // The signalled job and two duplicates at once: one batch runs, the others find nothing.
     const all = await Promise.all(
-      [0, 1, 2].map(() =>
-        processEnrollmentBatch(
-          enrollmentDeps(),
-          authorizedTenantScope(c.tenant.id, c.owner.id),
-          started.id,
-        ),
-      ),
+      [0, 1, 2].map(() => processEnrollmentBatch(enrollmentDeps(), scope, started.id)),
     );
     expect(all.map((r) => r.outcome).sort()).toEqual(['ended', 'ended', 'finished']);
     const runs = await runsOf(started.id);
     expect(runs).toHaveLength(60);
     expect(new Set(runs.map((r) => r.contact_id))).toEqual(new Set(ids));
     expect((await enrollments().getEnrollment(owner, started.id)).stalledSince).toBeNull();
-    expect((await findDueEnrollments(fx.dbs.app)).map((d) => d.enrollmentId)).not.toContain(
-      started.id,
-    );
-    // The due list is a definer function only the runtime role may call, and leaves out the
-    // enrolments of a suspended company.
+    expect(await dueAmong([c])).toEqual([]);
+    // The due list is a definer function only the runtime role may call.
     const [grants] = await fx.query<{
       app: boolean;
       platform: boolean;
@@ -1126,27 +1188,90 @@ describe('enrolments after review: the sweep, pacing, consent, the job’s autho
               (SELECT prosecdef FROM pg_proc WHERE oid = 'ops.automation_enrollments_due(integer)'::regprocedure) AS definer`,
     );
     expect(grants).toEqual({ app: true, platform: false, pub: false, definer: true });
+  });
+
+  it('leaves a suspended company’s enrolments out of the due list, and shows no stall while suspended', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const automationId = await publish(owner, c, 'Suspended');
     await contactsOf(c, 1, 'suspended');
     const held = await enrol(owner, automationId, byTag('suspended'), 1);
-    await fx.query(
-      `UPDATE app.automation_enrollments SET next_batch_at = now() - interval '11 minutes'
-        WHERE id = $1`,
-      [held.id],
-    );
+    await overdue(held.id);
+    expect((await dueAmong([c])).map((d) => d.enrollmentId)).toEqual([held.id]);
     await fx.dbs.adminPool.query(`UPDATE app.tenants SET status = 'suspended' WHERE id = $1`, [
       c.tenant.id,
     ]);
     try {
-      expect((await findDueEnrollments(fx.dbs.app)).map((d) => d.enrollmentId)).not.toContain(
-        held.id,
-      );
+      expect(await dueAmong([c])).toEqual([]);
+      const suspended = await fx.ctx(c, c.owner);
+      expect((await enrollments().getEnrollment(suspended, held.id)).stalledSince).toBeNull();
     } finally {
       await fx.dbs.adminPool.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [
         c.tenant.id,
       ]);
     }
-    expect((await findDueEnrollments(fx.dbs.app)).map((d) => d.enrollmentId)).toContain(held.id);
+    expect((await enrollments().getEnrollment(owner, held.id)).stalledSince).toBeInstanceOf(Date);
     await drain(c, held.id);
+  });
+
+  it('ends an enrolment as failed after three signals without progress, its started runs untouched', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const automationId = await publish(owner, c, 'Always failing');
+    await contactsOf(c, 60, 'failing');
+    const started = await enrol(owner, automationId, byTag('failing'), 60);
+    await processEnrollmentBatch(
+      enrollmentDeps(),
+      authorizedTenantScope(c.tenant.id, c.owner.id),
+      started.id,
+    );
+    // Each of its next batch's jobs fails all its retries: the sweep signals it three times.
+    for (let i = 1; i <= 3; i += 1) {
+      await overdue(started.id);
+      const [due] = await dueAmong([c]);
+      expect(await resignalEnrollment(enrollmentDeps(), due!)).toBe('signalled');
+    }
+    await overdue(started.id);
+    const [due] = await dueAmong([c]);
+    expect(await resignalEnrollment(enrollmentDeps(), due!)).toBe('failed');
+    expect(await enrollmentRow(started.id)).toMatchObject({
+      status: 'failed',
+      end_reason: 'stalled',
+      started_count: 50,
+      cancelled_count: 10,
+      inputs: {},
+    });
+    const detail = await enrollments().getEnrollment(owner, started.id);
+    expect(detail).toMatchObject({ status: 'failed', endReason: 'stalled', stalledSince: null });
+    const [active] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.automation_runs
+        WHERE enrollment_id = $1 AND status IN ('running', 'waiting')`,
+      [started.id],
+    );
+    expect(active!.n).toBe(50);
+    expect(
+      await fx.query<{ metadata: Record<string, unknown> }>(
+        `SELECT metadata FROM app.audit_events
+          WHERE subject_id = $1 AND action = 'automation.enrollment_ended'`,
+        [started.id],
+      ),
+    ).toEqual([{ metadata: expect.objectContaining({ status: 'failed', reason: 'stalled' }) }]);
+    // A batch that ever handles a contact starts the count again.
+    await contactsOf(c, 60, 'recovering');
+    const recovering = await enrol(owner, automationId, byTag('recovering'), 60);
+    await overdue(recovering.id);
+    const [first] = await dueAmong([c]);
+    expect(await resignalEnrollment(enrollmentDeps(), first!)).toBe('signalled');
+    await processEnrollmentBatch(
+      enrollmentDeps(),
+      authorizedTenantScope(c.tenant.id, c.owner.id),
+      recovering.id,
+    );
+    const [reset] = await fx.query<{ resignal_count: number }>(
+      'SELECT resignal_count FROM app.automation_enrollments WHERE id = $1',
+      [recovering.id],
+    );
+    expect(reset!.resignal_count).toBe(0);
   });
 
   it('checks marketing consent when each run of a marketing automation starts', async () => {
