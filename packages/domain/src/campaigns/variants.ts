@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import type { FieldIssue } from '@w360/core';
 import { sql, type SQL } from '@w360/db';
 import { linkButtons, type SendSpec } from '../templates/definition';
 import { checkVariables, type CampaignVariables } from './variables';
@@ -88,20 +89,35 @@ export function parseVariantLabel(value: string): VariantLabel {
 /**
  * What is wrong with a draft's variants after A, given their shares in label order (ADR-410), or
  * null: at most `MAX_VARIANTS` in all, each share from 10% to 90% in steps of 5, and A's rest at
- * least 10%, so the shares sum to 100% with no variant below 10%.
+ * least 10%, so the shares sum to 100% with no variant below 10%. The path names the field as a
+ * draft's `variants` gives it (`variants.1.sharePercent` for C's share).
  */
-export function variantSetProblem(shares: readonly number[]): string | null {
+export function variantSetIssue(shares: readonly number[]): FieldIssue | null {
   if (shares.length + 1 > MAX_VARIANTS)
-    return `A campaign tests at most ${MAX_VARIANTS} templates, variants A to ${lastLabel}.`;
+    return {
+      path: 'variants',
+      message: `A campaign tests at most ${MAX_VARIANTS} templates, variants A to ${lastLabel}.`,
+    };
   for (const [i, share] of shares.entries()) {
     const parsed = variantShareSchema.safeParse(share);
     if (!parsed.success)
-      return `Variant ${variantLabelAt(i)}: ${parsed.error.issues[0]?.message ?? 'Choose a valid share'}.`;
+      return {
+        path: `variants.${i}.sharePercent`,
+        message: `Variant ${variantLabelAt(i)}: ${parsed.error.issues[0]?.message ?? 'Choose a valid share'}.`,
+      };
   }
   const taken = shares.reduce((sum, share) => sum + share, 0);
   if (100 - taken < VARIANT_SHARE.min)
-    return `Variant A needs at least ${VARIANT_SHARE.min}% of the recipients: the other variants take ${taken}%.`;
+    return {
+      path: 'variants',
+      message: `Variant A needs at least ${VARIANT_SHARE.min}% of the recipients: the other variants take ${taken}%.`,
+    };
   return null;
+}
+
+/** `variantSetIssue`'s message alone. */
+export function variantSetProblem(shares: readonly number[]): string | null {
+  return variantSetIssue(shares)?.message ?? null;
 }
 
 /**
@@ -174,7 +190,8 @@ export function variantBucketSql(campaignId: string, contactId: SQL): SQL {
 
 /**
  * The SQL condition that a contact falls into `label` when the variants after A take `shares`
- * percent (B first): its bucket within the variant's range, as `variantRanges` gives it.
+ * percent (B first): its bucket within the variant's range, as `variantRanges` gives it (from
+ * inclusive, to exclusive: `int4range`'s default bounds).
  */
 export function variantConditionSql(
   campaignId: string,
@@ -184,8 +201,8 @@ export function variantConditionSql(
 ): SQL {
   const range = variantRanges(shares).find((r) => r.label === label);
   if (!range) throw new Error(`The campaign has no variant ${label}`);
-  const bucket = variantBucketSql(campaignId, contactId);
-  return sql`(${bucket} >= ${range.from} and ${bucket} < ${range.to})`;
+  // A half-open range, so the bucket (an MD5 per row) is computed once, not once per bound.
+  return sql`(int4range(${range.from}::int, ${range.to}::int) @> (${variantBucketSql(campaignId, contactId)})::int)`;
 }
 
 /** The template facts a variant's checks read. */

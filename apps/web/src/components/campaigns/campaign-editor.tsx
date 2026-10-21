@@ -13,6 +13,12 @@ import {
 } from '@/components/segments/segment-builder';
 import type { SendableTemplate, SenderChannel } from '@/components/templates/template-sender';
 import { TemplatePreview } from '@/components/templates/template-preview';
+import {
+  LABELS_AFTER_A,
+  MIN_VARIANT_SHARE,
+  canAddVariant,
+  newVariantShare,
+} from '@/lib/campaign-variants';
 
 /** How a variable is filled (mirrors the domain's campaign variable schema). */
 type Source =
@@ -59,19 +65,7 @@ export interface EditableVariant {
 /** A variant's share a member chooses from: 10% to 90% in steps of 5 (the server checks). */
 const VARIANT_SHARES = Array.from({ length: 17 }, (_, i) => 10 + i * 5);
 
-/** The least share any variant, A included, may have (the server checks). */
-const MIN_SHARE = 10;
-
-/** The labels of the variants after A, in order (ADR-410): a campaign tests up to five templates. */
-const LABELS_AFTER_A = ['B', 'C', 'D', 'E'] as const;
-
 const EMPTY_VARIABLES: Variables = { header: [], body: [], buttons: [] };
-
-/** A new variant's share: half of what A has left, in steps of 5, at least 10% (B starts at 50%). */
-function newVariantShare(variants: EditableVariant[]): number {
-  const rest = 100 - variants.reduce((sum, v) => sum + v.sharePercent, 0);
-  return Math.max(MIN_SHARE, Math.floor(rest / 2 / 5) * 5);
-}
 
 function fill(text: string, values: string[]): string {
   return text.replace(/\{\{\s*(\d+)\s*\}\}/g, (m, n: string) => values[Number(n) - 1] || m);
@@ -373,8 +367,15 @@ export function CampaignEditor({
         {LABELS_AFTER_A.map((label, index) => {
           const o = others[index];
           // Variant B can be added; C to E once the one before is, up to this server's limit
-          // (A included). A draft that already has more keeps them.
-          if (!o && (index > c.variants.length || index + 1 >= variantsLimit)) return null;
+          // (A included), and only while A keeps enough for the new one's default share (ADR-410).
+          // A draft that already has more keeps them.
+          if (
+            !o &&
+            (index > c.variants.length ||
+              index + 1 >= variantsLimit ||
+              !canAddVariant(c.variants.map((v) => v.sharePercent)))
+          )
+            return null;
           const id = `cmp-variant-${label.toLowerCase()}`;
           return (
             <div key={label} className="grid gap-4">
@@ -391,7 +392,7 @@ export function CampaignEditor({
                             {
                               templateId: null,
                               variables: EMPTY_VARIABLES,
-                              sharePercent: index === 0 ? 50 : newVariantShare(c.variants),
+                              sharePercent: newVariantShare(c.variants.map((v) => v.sharePercent)),
                             },
                           ]
                         : c.variants.slice(0, index),
@@ -428,9 +429,10 @@ export function CampaignEditor({
         {c.variants.length > 0 ? (
           <>
             <p className="text-sm">Variant A gets the other {shareOfA}%.</p>
-            {shareOfA < MIN_SHARE ? (
+            {shareOfA < MIN_VARIANT_SHARE ? (
               <p className="text-sm text-destructive">
-                Variant A needs at least {MIN_SHARE}% of the recipients: lower the other shares.
+                Variant A needs at least {MIN_VARIANT_SHARE}% of the recipients: lower the other
+                shares.
               </p>
             ) : null}
           </>

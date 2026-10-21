@@ -658,7 +658,8 @@ test('an A/B/C campaign is drafted with three templates, reviewed by its approve
   }).toPass({ timeout: 30_000 });
 
   // A key that adds contacts and submits drafts: thirty tagged contacts, so every variant gets
-  // some (a 30% share of 30 contacts is empty with probability 0.7^30, about 2 in 100,000).
+  // some (A and C at 30% are each empty with probability 0.7^30, together about 4.5 in 100,000
+  // runs, in each browser project; B at 40% adds about 0.02 in 100,000).
   await page.goto(`/c/${slug}/settings/api-keys`);
   await page.getByLabel('Name', { exact: true }).fill('A/B drafts');
   await page.getByRole('checkbox', { name: /Read campaigns/ }).check();
@@ -740,16 +741,37 @@ test('an A/B/C campaign is drafted with three templates, reviewed by its approve
         version: number;
         settings: {
           variantB: { sharePercent: number } | null;
-          variants: { sharePercent: number }[];
+          variants: { templateId: string; variables: unknown; sharePercent: number }[];
         };
       };
     }
   ).data;
   expect(draft.settings.variantB).toMatchObject({ sharePercent: 40 });
   expect(draft.settings.variants.map((v) => v.sharePercent)).toEqual([40, 30]);
+  // The key gives the variants after A through the API too: this deployment allows five
+  // (CAMPAIGN_VARIANTS_MAX), so a draft of three templates is taken.
+  const patched = await request.patch(`/api/v1/campaigns/${campaignId}`, {
+    headers: auth,
+    data: {
+      expectedVersion: draft.version,
+      variants: draft.settings.variants.map((v) => ({
+        templateId: v.templateId,
+        variables: v.variables,
+        sharePercent: v.sharePercent,
+      })),
+    },
+  });
+  expect(patched.status()).toBe(200);
+  const patchedDraft = (
+    (await patched.json()) as {
+      data: { version: number; settings: { variants: { sharePercent: number }[] } };
+    }
+  ).data;
+  expect(patchedDraft.version).toBe(draft.version + 1);
+  expect(patchedDraft.settings.variants.map((v) => v.sharePercent)).toEqual([40, 30]);
   const submitted = await request.post(`/api/v1/campaigns/${campaignId}/submit`, {
     headers: auth,
-    data: { expectedVersion: draft.version },
+    data: { expectedVersion: patchedDraft.version },
   });
   expect(submitted.status()).toBe(200);
   // The approval email names every template and the split.

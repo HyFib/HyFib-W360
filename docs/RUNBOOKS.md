@@ -530,13 +530,23 @@ steps of 5, and then variants C, D and E the same way, so a campaign tests up to
 the campaign's own template, gets the rest, which must stay at least 10%). Variants after B appear
 only where the deployment sets `CAMPAIGN_VARIANTS_MAX` above 2 (DEPLOYMENT); a member told "A
 campaign can test at most 2 templates for now" is on a deployment that has not raised it. Removing
-a variant removes those after it. What a member sees and what to tell them:
+a variant removes those after it, and "Add variant …" is offered only while A keeps at least 20%
+(so the new one and A both keep 10%). What a member sees and what to tell them:
 
 - The split is close to the share but rarely exact (with 1,000 contacts, a 30% share commonly gives
   between about 27% and 33%): each contact's variant comes from a fixed rule on the campaign and the
   contact, given once when the campaign is submitted and never changed, also after a pause, a
   resume or a worker restart. Taking a submission back and submitting it again gives each contact
-  the same variant.
+  the same variant as long as the shares are unchanged; changing a share, or removing a variant
+  before the last, moves contacts between the variants after it.
+- "The variants are out of order: save the draft again …" means the stored variants skip a label
+  (not something the app writes): saving the draft labels them B, C and on again.
+- "Variant C has recipients waiting but no template: cancel the campaign." on a resume, with a
+  pause whose history names the variant, means a submitted campaign lost a variant's row (not
+  something the app does); cancel it and send a new one.
+- Submitting a campaign with many variants makes one pass over the audience per variant in one
+  transaction; its time with five variants and a large audience is not measured yet (P3-04's
+  10,000-contact staging run). A submission that times out changes nothing and can be retried.
 - A problem that names a variant ("Variant B: The template is not approved by Meta.") blocks
   submitting until that variant is fixed; so does "Variant B: no contact in its share of the
   audience can receive the campaign now" (often a marketing B whose contacts have no marketing

@@ -38,7 +38,19 @@ only; no live Meta traffic.** ADR-405 let a campaign test two templates; its "No
   the largest deviation pinned at 1.12 points; stability and ADR-405's split for two variants; SQL
   ranges; the draft's variants (replace, B alone, both refused, the limit, trimming); results per
   variant; the approval email for three; the API's schemas and mapping; the webhook body for C to
-  E and a refused unknown label; the setting's default and range; approval and resuming checking every variant. Hand mutation of 30 branches: 23 caught by unit tests; the 7 others (the SQL condition's ranges, readiness checking every variant and the stored shares, the runner loading every variant, test sends of C, and the members' and keys' paths passing the limit) are caught only by the integration tests, which did not run here.
+  E and a refused unknown label; the setting's default and range; approval and resuming checking
+  every variant and refusing a waiting label without a row; each refusal's field path;
+  `apps/web/src/lib/campaign-variants.test.ts`: the editor's default shares.
+- Hand mutation of 38 branches (30 first, 8 after the review): 29 caught by the unit tests. The 9
+  others need the database, and each is exercised by a named integration test that did not run
+  here: the SQL condition given every share and readiness checking every variant's template and
+  the stored shares ("checks a third variant's template and the stored shares", and the
+  three-variant test, whose review would throw), the runner loading every variant and test sends
+  of C ("assigns, approves, sends and reports three variants"), the runner's pause for a label
+  without a row ("pauses for a recipient whose variant has no row"), readiness refusing labels
+  out of order ("checks a third variant's template …", whose review would throw), and the
+  members' and keys' paths passing the limit ("refuses a third variant until the deployment allows
+  it" and the API test's refusal with the limit unset).
 - Integration (CI only, `campaigns.test.ts`, `api-campaigns.test.ts`, `webhook-events.test.ts`):
   three variants reviewed, test-sent, submitted, refused for approval while C's template is paused,
   approved, sent through the Graph stand-in and reported, each recipient keeping its variant (SQL
@@ -46,21 +58,44 @@ only; no live Meta traffic.** ADR-405 let a campaign test two templates; its "No
   recipients; the limit at two refusing a third variant, another company's template refused as C,
   shares leaving A under 10%, `variantB` keeping C, trimming; the API creating, editing, reviewing
   and reading three variants; `campaign.recipient_skipped` naming C; the two-variant and plain
-  campaigns of ADR-405 unchanged (their tests kept, with the new `variants` field).
+  campaigns of ADR-405 unchanged (their tests kept, with the new `variants` field); after the
+  review, a paused C template and stored shares of B 50 and C 45 refusing the review and the
+  submission with their exact words, a stored gap in the labels refused and repaired by saving,
+  and a recipient whose variant lost its row pausing the runner and refusing a resume.
 - E2E (CI only, `campaigns.spec.ts`): ADR-405's step extended to a third template: drafted in the
-  editor, reviewed, submitted by a key, approved from the email, sent and reported per variant.
+  editor, reviewed, given again by the key's `PATCH` with three templates (200, as CI sets
+  `CAMPAIGN_VARIANTS_MAX` to 5), submitted by the key, approved from the email, sent and reported
+  per variant.
+
+### Review fixes (before merge)
+
+- **Rollback (Medium):** DEPLOYMENT now lists every campaign with a third variant with its status
+  under the company's scope, and before a rollback sends back those waiting for approval and
+  cancels scheduled, running and paused ones: a pause does not stop a member resuming on older
+  code, and lowering `CAMPAIGN_VARIANTS_MAX` does not reach submitted campaigns.
+- **Tests and accounting (Medium):** integration tests for readiness naming a third variant's
+  unapproved template and refusing stored shares that leave A under 10%; the mutation accounting
+  above names the test that exercises each survivor.
+- **Lows:** the editor offers another variant only while A keeps 20% (`canAddVariant`); refusals
+  carry field paths (`variants`, `variants.1.sharePercent`, `variantB`, `….variables`); a
+  pending label without a variant row pauses the campaign naming it and refuses a resume; the e2e
+  sends `variants` through the API route; ADR-410 restates ADR-405's stability promise and the
+  submission's unmeasured cost (also RUNBOOKS); the SQL condition computes the bucket once per row
+  (`int4range`); a stored gap in the labels is a readiness problem, not a server error; the e2e's
+  odds of an empty variant corrected.
 
 ### Test commands and results (local, 2026-10-21)
 
-| Command                                                       | Result                                                           |
-| ------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `npx eslint . --max-warnings=0 --ignore-pattern '.claude/**'` | clean                                                            |
-| `prettier --check` on the changed files                       | clean                                                            |
-| `pnpm typecheck`                                              | clean                                                            |
-| `pnpm test` (unit)                                            | 2,046 of 2,046 passed (181 files)                                |
-| `pnpm build`                                                  | passed                                                           |
-| hand mutation of 30 bounds, rules, checks and guards          | 23 caught by unit tests; 7 left to the integration tests (below) |
-| `pnpm test:integration`, `pnpm test:e2e`                      | not run here: no local PostgreSQL or browser; CI runs them       |
+| Command                                                       | Result                                                                 |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0 --ignore-pattern '.claude/**'` | clean                                                                  |
+| `prettier --check` on the changed files                       | clean                                                                  |
+| `pnpm typecheck`                                              | clean                                                                  |
+| `pnpm test` (unit, after the review fixes)                    | 2,050 of 2,050 passed (182 files)                                      |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`           | clean                                                                  |
+| `pnpm build`                                                  | passed                                                                 |
+| hand mutation of 38 bounds, rules, checks and guards          | 29 caught by unit tests; 9 exercised only by integration tests (above) |
+| `pnpm test:integration`, `pnpm test:e2e`                      | not run here: no local PostgreSQL or browser; CI runs them             |
 
 ## 2026-10-21 — Choice-type custom contact fields (P3-01, ADR-407)
 

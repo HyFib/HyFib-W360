@@ -117,6 +117,7 @@ import {
   variantInputSchema,
   variantLabelAt,
   variantLimitProblem,
+  variantSetIssue,
   variantSetProblem,
   variantsInputSchema,
   variantTemplateProblems,
@@ -634,6 +635,14 @@ export async function assertVariantTemplatesApproved(
     { label: 'A', templateId: c.templateId },
     ...variants.map((v) => ({ label: v.label, templateId: v.templateId })),
   ];
+  // A variant with recipients but no row (never written by HyFib) cannot be sent (ADR-410).
+  for (const label of pending?.keys() ?? []) {
+    if (!sources.some((source) => source.label === label))
+      throw new AppError(
+        'precondition_failed',
+        `Variant ${label} has recipients waiting but no template: cancel the campaign.`,
+      );
+  }
   for (const source of sources) {
     if (pending !== null && !pending.has(source.label)) continue;
     const template = await loadTemplate(tx, c.tenantId, source.templateId);
@@ -909,7 +918,10 @@ async function evaluateReadiness(
   const shares = variants.slice(1).map((v) => v.sharePercent);
   const setProblem = variantSetProblem(shares);
   if (setProblem) problems.push(setProblem);
-  if (def.ok && channel && variants.every((v) => v.template)) {
+  // Labels follow one another (B, C, …) as drafts are written; a stored gap is refused, not split.
+  const inOrder = variants.every((v, i) => v.label === VARIANT_LABELS[i]);
+  if (!inOrder) problems.push(VARIANTS_OUT_OF_ORDER);
+  if (def.ok && channel && inOrder && variants.every((v) => v.template)) {
     const settings = await loadMessagingSettings(tx, company.id);
     arms = variants.map((v) => {
       const template = v.template as TemplateInfo;
@@ -944,6 +956,10 @@ async function evaluateReadiness(
     schedule: schedule.ok ? { at: schedule.at, adjustment: schedule.adjustment } : null,
   };
 }
+
+/** The refusal of a draft whose stored variants skip a label (ADR-410). */
+export const VARIANTS_OUT_OF_ORDER =
+  'The variants are out of order: save the draft again to label them B, C and on.';
 
 /** The refusal of a variant none of whose contacts can receive the campaign (ADR-405). */
 export const emptyVariantProblem = (label: VariantLabel) =>
@@ -1181,31 +1197,39 @@ export type VariantsChange =
   | { kind: 'replace'; variants: PreparedVariant[] }
   | { kind: 'setB'; variant: PreparedVariant };
 
+/** A refusal of a draft's variants naming the field it is about (ADR-410), as `parseInput` does. */
+function refusal(message: string, path: string): AppError {
+  return new AppError('validation_failed', message, { issues: [{ path, message }] });
+}
+
 function prepareVariantsChange(
   data: Pick<CampaignDraftInput, 'variantB' | 'variants'>,
 ): VariantsChange {
   if (data.variantB !== undefined && data.variants !== undefined)
-    throw new AppError('validation_failed', 'Give either variantB or variants, not both.');
+    throw refusal('Give either variantB or variants, not both.', 'variants');
   const prepare = (
     v: NonNullable<CampaignDraftInput['variantB']>,
     label: VariantLabel,
+    path: string,
   ): PreparedVariant => {
     const parsed = campaignVariablesSchema.safeParse(v.variables ?? {});
     if (!parsed.success)
-      throw new AppError(
-        'validation_failed',
+      throw refusal(
         `Variant ${label}: Choose a value for every template variable.`,
+        `${path}.variables`,
       );
     return { templateId: v.templateId, variables: parsed.data, sharePercent: v.sharePercent };
   };
   if (data.variants !== undefined) {
-    const variants = (data.variants ?? []).map((v, i) => prepare(v, variantLabelAt(i)));
-    const problem = variantSetProblem(variants.map((v) => v.sharePercent));
-    if (problem) throw new AppError('validation_failed', problem);
+    const variants = (data.variants ?? []).map((v, i) =>
+      prepare(v, variantLabelAt(i), `variants.${i}`),
+    );
+    const issue = variantSetIssue(variants.map((v) => v.sharePercent));
+    if (issue) throw refusal(issue.message, issue.path);
     return { kind: 'replace', variants };
   }
   if (data.variantB === null) return { kind: 'replace', variants: [] };
-  if (data.variantB) return { kind: 'setB', variant: prepare(data.variantB, 'B') };
+  if (data.variantB) return { kind: 'setB', variant: prepare(data.variantB, 'B', 'variantB') };
   return { kind: 'keep' };
 }
 
@@ -1288,16 +1312,23 @@ export function nextCampaignVariants(
   stored: readonly StoredCampaignVariant[],
   change: Exclude<VariantsChange, { kind: 'keep' }>,
   limit: number,
-): { variants: PreparedVariant[]; problem: string | null } {
+): { variants: PreparedVariant[]; problem: string | null; path: string | null } {
   const variants =
     change.kind === 'replace'
       ? change.variants
       : [change.variant, ...stored.filter((v) => v.label !== 'B')];
-  const problem = variantSetProblem(variants.map((v) => v.sharePercent));
-  if (problem) return { variants, problem };
+  // The field a refusal names: `variants…`, or `variantB` for a change of B alone.
+  const field = (path: string) =>
+    change.kind === 'replace'
+      ? path
+      : path.startsWith('variants.0.')
+        ? `variantB.${path.slice('variants.0.'.length)}`
+        : 'variantB';
+  const issue = variantSetIssue(variants.map((v) => v.sharePercent));
+  if (issue) return { variants, problem: issue.message, path: field(issue.path) };
   if (variants.length + 1 > limit && variants.length > stored.length)
-    return { variants, problem: variantLimitProblem(limit) };
-  return { variants, problem: null };
+    return { variants, problem: variantLimitProblem(limit), path: field('variants') };
+  return { variants, problem: null, path: null };
 }
 
 /**
@@ -1315,8 +1346,8 @@ async function writeLockedCampaignVariants(
 ): Promise<void> {
   if (change.kind === 'keep') return;
   const stored = await loadCampaignVariants(tx, tenantId, campaignId);
-  const { variants, problem } = nextCampaignVariants(stored, change, limit);
-  if (problem) throw new AppError('validation_failed', problem);
+  const { variants, problem, path } = nextCampaignVariants(stored, change, limit);
+  if (problem) throw refusal(problem, path ?? 'variants');
   for (const variant of variants) {
     if (variant.templateId && !(await loadTemplate(tx, tenantId, variant.templateId)))
       throw notFound('Template');

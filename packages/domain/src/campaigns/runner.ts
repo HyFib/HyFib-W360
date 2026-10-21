@@ -425,6 +425,14 @@ export async function runCampaignTick(
       return result('busy', at);
     }
 
+    // A recipient recorded with a variant the campaign has no row for (never written by HyFib:
+    // variants change only in drafts) cannot be sent: the campaign pauses naming it, rather than
+    // leaving the recipient waiting for good (ADR-410). A label HyFib never writes throws.
+    const orphan = batch
+      .map((b) => parseVariantLabel(b.variant))
+      .find((label) => !variantSources.some((source) => source.label === label));
+    if (orphan) return pause('template_not_approved', { variant: orphan });
+
     // Fresh data for the batch.
     const contactIds = batch.map((b) => b.contactId);
     const people = await tx
@@ -527,7 +535,7 @@ export async function runCampaignTick(
       const person = people.find((p) => p.id === b.contactId);
       const skip = (reason: SkipReason) => skips.push({ recipientId: b.id, reason });
       // The variant recorded when the audience was taken (ADR-405); it never changes.
-      const arm = arms.get(b.variant as VariantLabel);
+      const arm = arms.get(parseVariantLabel(b.variant));
       // A recipient whose variant cannot be sent now (it became pending again after the check
       // above, as a send the worker returned does) waits: the next tick pauses for its template.
       if (!arm) continue;

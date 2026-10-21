@@ -2045,15 +2045,43 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    server and worker runs this release (no image of the release before is left, including canaries
    and jobs that run web code), set `CAMPAIGN_VARIANTS_MAX=5` on the web servers and roll them
    again; servers still at 2 during that roll are of this release, so they read such drafts
-   correctly. Rollback to an image without ADR-410: first set `CAMPAIGN_VARIANTS_MAX=2` (or unset
-   it) and roll the web servers, so no new draft gets a third variant. Then campaigns that already
-   have one must not reach the older code: pause those still sending (an older worker would leave
-   their C to E recipients pending, and report them as A), and have their companies trim drafts to
-   two variants or leave them unsubmitted until the release returns (an older web server would
-   submit one as A and B, C's contacts getting A). The owner role cannot list them across
-   companies (forced row security): connected with the runtime role's credentials and
-   `app.tenant_id` set for a company as above,
-   `SELECT DISTINCT campaign_id FROM app.campaign_variants WHERE label > 'B';` lists that company's.
+   correctly.
+
+   Rollback to an image without ADR-410. A campaign's labels C to E are recorded when it is
+   submitted, so every campaign that has one, whatever its status, must be out of the older code's
+   reach before the older image serves:
+
+   1. Set `CAMPAIGN_VARIANTS_MAX=2` (or unset it) and roll the web servers, so no draft gets a
+      third variant.
+   2. List the campaigns that have one. The owner role cannot read them across companies (forced
+      row security); connected with the runtime role's own credentials (`w360_app`, as the web app
+      connects), run for each company in its own transaction:
+
+      ```sql
+      BEGIN;
+      SELECT set_config('app.tenant_id', '<company id>', true);
+      SELECT DISTINCT v.campaign_id, c.name, c.status
+        FROM app.campaign_variants v
+        JOIN app.campaigns c ON c.tenant_id = v.tenant_id AND c.id = v.campaign_id
+       WHERE v.label > 'B'
+         AND c.status IN ('draft', 'pending_approval', 'scheduled', 'running', 'paused');
+      COMMIT;
+      ```
+
+   3. While the new release still serves, have each company (or support acting with its members)
+      act on every one, in the app or through the API:
+      - `pending_approval`: send it back (Reject; a key's submission can also be withdrawn), so it
+        is a draft again. An older web server would approve it checking A's and B's templates only,
+        showing the approver two of its templates.
+      - `scheduled`, `running` and `paused`: cancel it. **A pause is not enough:** a member can
+        resume a paused campaign on an older web server, which checks A's and B's templates only,
+        and an older worker would then leave C to E's recipients pending for good and report them
+        as A. A cancel (or a return to draft) ends that.
+      - `draft`: trim it to two variants, or leave it unsubmitted until the release returns (an
+        older web server would submit it as A and B, C's contacts getting A's template).
+   4. Run the query again until it lists nothing but drafts left unsubmitted on purpose, then roll
+      back.
+
    Rolling forward needs no step; raise the setting again once every server runs the release.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue

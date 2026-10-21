@@ -30,6 +30,7 @@ import {
   variantOfBucket,
   variantRanges,
   variantSendable,
+  variantSetIssue,
   variantSetProblem,
   variantShareSchema,
   variantTemplateProblems,
@@ -262,9 +263,12 @@ describe('variant assignment for up to five variants (ADR-410)', () => {
     const render = (shares: number[], label: (typeof VARIANT_LABELS)[number]) =>
       new PgDialect().sqlToQuery(variantConditionSql(campaignId, sql`c.id`, label, shares));
     const c = render([30, 25], 'C');
-    expect(c.sql).toContain('md5(');
-    expect(c.params).toEqual(expect.arrayContaining([30, 55, campaignId]));
-    expect(c.sql).toMatch(/>= \$\d+ and .* < \$\d+\)$/);
+    // The bucket once per row, within int4range's half-open [from, to): C takes 30 to 54.
+    expect(c.sql.match(/md5\(/g)).toHaveLength(1);
+    expect(c.sql).toMatch(/^\(int4range\(\$(\d+)::int, \$(\d+)::int\) @> \(/);
+    const [, fromAt, toAt] = /int4range\(\$(\d+)::int, \$(\d+)::int\)/.exec(c.sql)!;
+    expect([c.params[Number(fromAt) - 1], c.params[Number(toAt) - 1]]).toEqual([30, 55]);
+    expect(c.params).toContain(campaignId);
     const a = render([30, 25], 'A');
     expect(a.params).toEqual(expect.arrayContaining([55, 100]));
     expect(() => render([30], 'C')).toThrow(/no variant C/);
@@ -369,6 +373,67 @@ describe('the variants a draft may have (ADR-410)', () => {
     ).toBe(false);
   });
 
+  it('names the field each refusal is about', () => {
+    const issuesOf = (run: () => unknown) => {
+      try {
+        run();
+      } catch (error) {
+        return (error as { issues?: unknown }).issues;
+      }
+      throw new Error('expected a refusal');
+    };
+    expect(
+      issuesOf(() => prepareCampaignDraft({ ...base, variantB: v(40), variants: [] })),
+    ).toEqual([{ path: 'variants', message: 'Give either variantB or variants, not both.' }]);
+    expect(
+      issuesOf(() => prepareCampaignDraft({ ...base, variants: [v(40), v(40), v(15)] })),
+    ).toEqual([
+      {
+        path: 'variants',
+        message: 'Variant A needs at least 10% of the recipients: the other variants take 95%.',
+      },
+    ]);
+    expect(
+      issuesOf(() =>
+        prepareCampaignDraft({
+          ...base,
+          variants: [v(20), { ...v(20), variables: { body: [{ source: 'nope' }] } }],
+        }),
+      ),
+    ).toEqual([
+      {
+        path: 'variants.1.variables',
+        message: 'Variant C: Choose a value for every template variable.',
+      },
+    ]);
+    expect(
+      issuesOf(() =>
+        prepareCampaignDraft({
+          ...base,
+          variantB: { ...v(20), variables: { body: [{ source: 'nope' }] } },
+        }),
+      ),
+    ).toEqual([
+      {
+        path: 'variantB.variables',
+        message: 'Variant B: Choose a value for every template variable.',
+      },
+    ]);
+    expect(variantSetIssue([20, 5])).toEqual({
+      path: 'variants.1.sharePercent',
+      message: 'Variant C: Give each variant 10% to 90% of the recipients.',
+    });
+    const setB = {
+      kind: 'setB' as const,
+      variant: {
+        templateId: null,
+        variables: { header: [], body: [], buttons: [] },
+        sharePercent: 75,
+      },
+    };
+    expect(nextCampaignVariants([stored('B', 30), stored('C', 20)], setB, 5).path).toBe('variantB');
+  });
+
   it('grows past this server’s limit never, keeps C to E when B alone changes, and trims freely', () => {
     expect(DEFAULT_VARIANTS_LIMIT).toBe(2);
     const three = {
@@ -395,7 +460,20 @@ describe('the variants a draft may have (ADR-410)', () => {
     expect(nextCampaignVariants(had, { kind: 'replace', variants: [] }, 2)).toEqual({
       variants: [],
       problem: null,
+      path: null,
     });
+    // Each refusal names its field: the set, a share, or variantB for a change of B alone.
+    expect(nextCampaignVariants([], three, 2).path).toBe('variants');
+    expect(
+      nextCampaignVariants(
+        had,
+        {
+          kind: 'replace',
+          variants: [three.variants[0]!, { ...three.variants[1]!, sharePercent: 65 }],
+        },
+        5,
+      ),
+    ).toMatchObject({ path: 'variants' });
     // B alone keeps the variants after it, so a client of ADR-405 never drops them.
     const setB = {
       kind: 'setB' as const,
@@ -739,6 +817,20 @@ describe('approving and resuming check every variant’s template (ADR-410)', ()
     ]);
     await expect(assertVariantTemplatesApproved(reads.tx, c, 'is no longer')).rejects.toThrow(
       'Variant C’s template is no longer approved by Meta.',
+    );
+    expect(reads.unread()).toBe(0);
+  });
+
+  it('refuses a variant with recipients waiting but no row, before reading a template', async () => {
+    const reads = answering([
+      [row('B', 'b')],
+      [
+        { variant: 'A', n: 3 },
+        { variant: 'C', n: 1 },
+      ],
+    ]);
+    await expect(assertVariantTemplatesApproved(reads.tx, c, 'is not')).rejects.toThrow(
+      'Variant C has recipients waiting but no template: cancel the campaign.',
     );
     expect(reads.unread()).toBe(0);
   });

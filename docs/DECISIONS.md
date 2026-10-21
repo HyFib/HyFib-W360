@@ -18078,7 +18078,17 @@ Decision:
   split as they always did. `variantOfBucket`, `assignVariant` and `variantConditionSql` (each
   variant's range in SQL) are one rule; the snapshot records each label and the runtime role still
   cannot update it, so no contact is rerolled by a retry, a restart, a pause or a resume. Adding a
-  variant to a draft takes its buckets from A only (B keeps its contacts). The unit tests check all
+  variant to a draft takes its buckets from A only (B keeps its contacts). ADR-405's other promises
+  now hold for B and for appending a variant only: a draft taken back and submitted again gives
+  each contact the same variant only if its shares are unchanged, and changing B's share, or
+  replacing or removing a variant before the last, moves the buckets of the variants after it (a
+  draft's variants are labelled in order, so removing C relabels D as C). Stored labels that skip
+  one (never written by the app) are refused before a submission ("The variants are out of order:
+  save the draft again …") rather than split. Each variant's SQL condition is a half-open
+  `int4range` containing the bucket, so the MD5 is computed once per contact per variant; with
+  five variants the submission's transaction makes up to five passes over the audience (one per
+  variant, each classified by its own rules), a cost not measured (the 10,000-contact staging run
+  of P3-04 in BACKLOG covers it). The unit tests check all
   1,593 valid share sets (17 of two variants, 120 of three, 455 of four, 1,001 of five) over the
   10,000 deterministic contacts of ADR-405: every variant's count within three of its own binomial
   standard deviations, Pearson's statistic below the chi-square's 0.999 quantile for its degrees
@@ -18117,11 +18127,31 @@ Decision:
   batch of them stalling the campaign) and names them A in webhooks. So web servers let a draft
   grow past two variants only up to `CAMPAIGN_VARIANTS_MAX` (2 to 5, **2 when unset**,
   `nextCampaignVariants`), which the deployment raises once every server runs this release and
-  lowers before a rollback (DEPLOYMENT has the steps). At 2 a new server writes what ADR-405 writes;
-  a draft that already has more (the setting lowered for a rollback) can still be edited or trimmed,
-  never grown. Workers handle any number and do not read it.
+  lowers before a rollback. At 2 a new server writes what ADR-405 writes; a draft that already has
+  more (the setting lowered for a rollback) can still be edited or trimmed, never grown. Workers
+  handle any number and do not read it. Lowering the setting does not reach campaigns already
+  submitted, whose labels are recorded: before a rollback, those waiting for approval are sent back
+  to draft (an older server would approve them checking two templates), and scheduled, running and
+  paused ones are cancelled, since a member can resume a paused campaign on an older server
+  (DEPLOYMENT lists them per company and has the steps). A recipient whose label has no variant
+  row (never written by the app) pauses the campaign naming it, and resuming is refused for it,
+  rather than the recipient waiting for good.
 
 Not built: more than five variants, shares below 10% or off the 5% steps, a per-variant schedule,
 audience or number, a winner or significance, per-variant results in `campaign.status_changed`,
-detecting older servers automatically (the gate is the deployment's setting), and any
-verification against Meta (the Graph stand-in only).
+detecting older servers automatically (the gate is the deployment's setting), a submission
+pass that computes each contact's bucket once for every variant, and any verification against
+Meta (the Graph stand-in only).
+
+Review (before merge): an independent review found no High issue. Two Medium issues: the rollback
+steps missed campaigns waiting for approval or scheduled, and did not say that a pause does not
+stop a member resuming on older code (DEPLOYMENT now sends back, cancels and lists them with their
+status); and no integration test exercised readiness checking a third variant's template or the
+stored shares, so PROGRESS overstated what the mutation run showed (tests added, the accounting
+redone). Low issues: the editor's default shares could offer a fifth variant leaving A 5% (a
+variant is now offered only while A keeps 20%, `canAddVariant`); the new refusals named no field
+(they now carry paths such as `variants.1.sharePercent` and `variantB`); a recipient whose label
+had no row waited for good (now a pause naming it); no test sent `variants` through the API routes
+(the e2e does); ADR-405's stability promise was not restated for more variants, and the
+submission's cost was not stated (both above); and a stored gap in the labels was a server error
+(now a readiness problem). All were fixed.
