@@ -18363,14 +18363,22 @@ Decision:
   remembers its tracking without it counting as a change (its "Shipment sent" message carries it);
   after that, a tracking not remembered is a change, numbered by its place (`nextTrackingKeys`), so
   going back to a number the shipment had before sends nothing. At most ten trackings are
-  remembered per shipment (`trackingKeysPerShipment`); an eleventh sends nothing. A message still
-  waiting when a newer tracking of its shipment arrives is skipped (`tracking_replaced`), so a
-  quick correction gives one message, with the newest values.
+  remembered per shipment (`trackingKeysPerShipment`); an eleventh sends nothing. A quick
+  correction gives the customer the newest values once, whichever message it lands on
+  (`trackingUpdateDecision`): a "Tracking updated" message goes only while its tracking is still
+  the shipment's current one (a newer one, or a return to one the customer already had, skips it
+  as `tracking_replaced`); it waits five minutes past a "Shipment sent" message of the shipment
+  that is still waiting, because that message carries whatever tracking is current when it goes;
+  and a sent "Shipment sent" records the tracking it carried (`tracking_revision`, its place among
+  the remembered ones), so an update for that tracking or an earlier one is skipped
+  (`tracking_already_sent`).
 - **One message per shipment and key, in the database.** Migration 0323 adds
   `app.commerce_store_shipments` (one row per Shopify fulfillment and store, under its order: the
   statuses as status words, `failed`, the times, the first tracking entry, and `tracking_keys`, the
   digests, at most ten, checked hex) and gives store messages `shipment_id` and `dedupe_key`
-  (`created` or `tracking:<n>`) with `UNIQUE (tenant_id, shipment_id, event, dedupe_key)`.
+  (`created` or `tracking:<n>`), unique per `(tenant_id, shipment_id, event, dedupe_key)` through
+  an index migration 0328 builds `CONCURRENTLY` (a unique constraint added in 0323 would have held
+  `ACCESS EXCLUSIVE` on the table, reads included, for the whole build).
   Shipment messages name the shipment, not the order (`num_nonnulls(order_id, checkout_id,
 shipment_id) = 1`): the old unique key of one message per order and event stays untouched, so
   the migration is expand only and a server of the release before never meets a second message per
@@ -18391,11 +18399,15 @@ shipment_id) = 1`): the old unique key of one message per order and event stays 
   `read_marketplace_orders` (`hasShipmentAccess`, SH-044), the webhook check subscribes
   `FULFILLMENTS_CREATE` and `FULFILLMENTS_UPDATE` with `includeFields` `id`, `order_id`,
   `updated_at`; a delivery only signals a read of the order its `order_id` names (`fulfillmentOrderId`;
-  the body is never stored, and a body without a usable `order_id` is answered 400). The same
+  `order_id` is the only part of the body used, and a body without a usable one is answered 200
+  and logged as `ignored_no_order`: its shape is unconfirmed (SH-048), and a 400 would count as a
+  failed delivery, after enough of which Shopify deletes the subscription, SH-025). The same
   six-hourly check that re-creates lost subscriptions brings older stores up to date: it creates
   only topics missing for HyFib's address, so running it again never subscribes twice, and a
   shipment topic Shopify refuses leaves a reason on the store (`webhook_error`) instead of failing
-  its sync. A store connected before this release has no `read_fulfillments`, which only Shopify's
+  its sync. How Shopify refuses one is unconfirmed (research §5), so every shape counts: `userErrors`,
+  an answer naming no created subscription (as when the payload is withheld with `ACCESS_DENIED`
+  beside the data), and `ACCESS_DENIED` without data for a shipment topic. A store connected before this release has no `read_fulfillments`, which only Shopify's
   approval can add (SH-042): its Order messages page offers "Allow shipment updates in Shopify"
   (`startShipmentAccess`, `commerce.manage`), the customer-access handshake of ADR-049 for the same
   scopes plus `read_fulfillments` (and `read_customers` only if it was asked for before); after the
@@ -18417,7 +18429,9 @@ shipment_id) = 1`): the old unique key of one message per order and event stays 
   `store_order.message_*` triggers watch messages with an order, so the five order events of
   ADR-352 keep their meaning; their skip reasons `shipment_cancelled` and `tracking_replaced` are
   never in those events. No public API or OpenAPI change. The company export has the shipments
-  without their digests.
+  without their digests, and company deletion deletes them (a step between the store messages and
+  the orders). `w360_definer`'s policies on the table reach only the company an erasure runs for
+  (`app.current_tenant_id()`) or the one being deleted.
 
 Not built: WooCommerce shipments (core has none a merchant can turn on, WC-024, and extensions are
 not read); tracking from a shipment's other tracking entries; messages for each delivery event of
@@ -18428,6 +18442,21 @@ on; validating the widened checks of `commerce_store_messages` and `automation_r
 VALID, see 0323); and any check against a real Shopify store (the stand-in only): the body of a
 fulfillment delivery, the order of an order's fulfillments past ten and links Shopify builds itself
 are unconfirmed (research §5).
+
+Review (before merge): an independent review found the isolation design, the dedupe and the
+redaction trigger sound, and one High issue: the new table had no company deletion step or
+deletion policies, so deleting a company would fail on it (the step, grants and tenant-limited
+policies were added, and the erasure policy, at first open to every company's rows for the
+definer, was limited to the erased contact's company). Medium issues: a tracking that arrived while
+"Shipment sent" waited went out twice, in that message and in its own update (now the update waits
+for it and is skipped once it carried the tracking); the unique constraint held `ACCESS EXCLUSIVE`
+for its whole build (now a concurrent index in 0328, and DEPLOYMENT states 0323's locks exactly);
+and only `userErrors` counted as a refused topic (a withheld answer was taken for a success and
+`ACCESS_DENIED` failed the check; both now count, and the stand-in models them). Low issues: a body
+without `order_id` got a 400 (now 200); a return to an earlier tracking still sent a waiting
+update (now skipped); DEPLOYMENT now waits for both rollouts before shipment rules go on; the
+research cites both library versions read; and the rule editor notes that automations read the
+order's latest tracking. All were fixed.
 
 ## ADR-414 Automations started by replies to a campaign (P4-01) (2026-10-21)
 

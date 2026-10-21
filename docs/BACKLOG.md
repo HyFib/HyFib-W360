@@ -642,9 +642,9 @@ verification, app review, Embedded Signup configuration).
   are subscribed once a store has it, and older stores are brought up to date by the six-hourly
   check after a manager allows shipment updates (until then shipments are read with orders,
   including every three hours while in transit); tracking cleared with the customer's details.
-  T: `stores.test.ts` (7 shipment tests), unit tests `stores/shipment-messages.test.ts`, e2e
-  `stores.spec.ts` (a shipment message set up and sent); 26 deliberate regressions, 19 caught by
-  unit tests. **Remaining:** checks with a development store (a fulfillment delivery's body,
+  T: `stores.test.ts` (9 shipment tests), unit tests `stores/shipment-messages.test.ts`, e2e
+  `stores.spec.ts` (a shipment message set up and sent); 34 deliberate regressions, 22 caught by
+  unit tests (migrations 0323 and 0328). **Remaining:** checks with a development store (a fulfillment delivery's body,
   approving the new scope on an installed store, research §5); WooCommerce shipments (core has none
   merchants can turn on, WC-024); messages per delivery event of a shipment; outgoing webhook events
   for shipment messages; a shipment's own tracking in automation placeholders. **Not built yet:**

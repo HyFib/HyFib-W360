@@ -57,12 +57,15 @@ import {
   readStoreVariables,
   resolveStoreVariables,
   storeMessageSendAt,
+  trackingUpdateDecision,
+  currentTrackingRevision,
   type SavedOrderChange,
   type SendWindow,
   type StoreMessageEvent,
   type StoreMessageSkipReason,
   type StoreValues,
 } from './messages-model';
+import { shipmentTrackingKey } from './model';
 import { startStoreAutomation } from './order-automations';
 import { loadEntitlements } from '../plans/entitlements';
 
@@ -436,6 +439,10 @@ export async function processStoreMessage(
     }
 
     const storeName = store.name ?? store.shopDomain ?? new URL(store.storeUrl).hostname;
+    // A sent "Shipment sent" message records the tracking it carried (ADR-413).
+    let carriedRevision = 0;
+    const carried = () =>
+      row.event === 'shipment_created' ? { trackingRevision: carriedRevision } : {};
     let phone: string | null;
     let customerName: string | null;
     let values: StoreValues;
@@ -537,10 +544,41 @@ export async function processStoreMessage(
         return skip('order_cancelled');
       }
       if (shipment?.failed) return skip('shipment_cancelled');
-      // A newer tracking of the same shipment came meanwhile: its own message goes instead.
+      if (shipment) {
+        // Which remembered tracking the shipment has now: what this message would carry.
+        carriedRevision = currentTrackingRevision(
+          shipment.trackingKeys,
+          shipmentTrackingKey(shipment.trackingNumber, shipment.trackingUrl),
+        );
+      }
       if (row.event === 'tracking_updated' && shipment) {
-        const revision = Number(/^tracking:(\d+)$/.exec(row.dedupeKey ?? '')?.[1] ?? 0);
-        if (revision < shipment.trackingKeys.length) return skip('tracking_replaced');
+        const [created] = await tx
+          .select({
+            state: commerceStoreMessages.state,
+            trackingRevision: commerceStoreMessages.trackingRevision,
+            sendAt: commerceStoreMessages.sendAt,
+          })
+          .from(commerceStoreMessages)
+          .where(
+            and(
+              eq(commerceStoreMessages.tenantId, tenantId),
+              eq(commerceStoreMessages.shipmentId, shipment.id),
+              eq(commerceStoreMessages.event, 'shipment_created'),
+            ),
+          );
+        const decision = trackingUpdateDecision({
+          revision: Number(/^tracking:(\d+)$/.exec(row.dedupeKey ?? '')?.[1] ?? 0),
+          currentRevision: carriedRevision,
+          created: created ?? null,
+        });
+        if (decision === 'wait_for_created' && created) {
+          return reschedule(
+            new Date(Math.max(now.getTime(), created.sendAt.getTime()) + 5 * 60_000),
+          );
+        }
+        if (decision === 'tracking_replaced' || decision === 'tracking_already_sent') {
+          return skip(decision);
+        }
       }
       phone = order.customerPhone;
       if (!phone) return skip('no_phone');
@@ -593,7 +631,12 @@ export async function processStoreMessage(
         if (!started.ok) return skip(started.reason);
         await tx
           .update(commerceStoreMessages)
-          .set({ state: 'started', automationRunId: started.runId, contactId: started.contactId })
+          .set({
+            state: 'started',
+            automationRunId: started.runId,
+            contactId: started.contactId,
+            ...carried(),
+          })
           .where(
             and(eq(commerceStoreMessages.tenantId, tenantId), eq(commerceStoreMessages.id, row.id)),
           );
@@ -783,7 +826,7 @@ export async function processStoreMessage(
       .where(and(eq(conversations.tenantId, tenantId), eq(conversations.id, conversation.id)));
     await tx
       .update(commerceStoreMessages)
-      .set({ state: 'queued', messageId, contactId })
+      .set({ state: 'queued', messageId, contactId, ...carried() })
       .where(
         and(eq(commerceStoreMessages.tenantId, tenantId), eq(commerceStoreMessages.id, row.id)),
       );

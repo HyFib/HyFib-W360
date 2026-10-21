@@ -116,6 +116,12 @@ export interface StandInShop {
   withhold: boolean;
   /** Checkouts refused as a whole (for example a staff permission, SH-037). */
   denyCheckouts: boolean;
+  /**
+   * How a subscription to a topic the token's scopes do not allow is refused (Shopify's own shape
+   * is unconfirmed, research §5): `userErrors` in the payload, a null payload withheld with
+   * ACCESS_DENIED beside the data, or ACCESS_DENIED without data.
+   */
+  topicRefusal: 'user_errors' | 'access_denied_with_data' | 'access_denied';
   /** Points left in the cost bucket (SH-011); a query needing more is THROTTLED. */
   available: number;
 }
@@ -264,6 +270,7 @@ export async function startShopifyStandIn(options: {
       checkouts: new Map(),
       withhold: false,
       denyCheckouts: false,
+      topicRefusal: 'user_errors',
       available: 1000,
     };
     shops.set(domain, shop);
@@ -779,6 +786,20 @@ export async function startShopifyStandIn(options: {
         }
         const needed = TOPIC_SCOPES[topic];
         if (needed && !needed.some((scope) => shop.scopes.includes(scope))) {
+          const denied = {
+            message: `Access denied for webhookSubscriptionCreate field (${topic}).`,
+            extensions: { code: 'ACCESS_DENIED' },
+          };
+          if (shop.topicRefusal === 'access_denied') {
+            return { errors: [denied], extensions: cost };
+          }
+          if (shop.topicRefusal === 'access_denied_with_data') {
+            return {
+              data: { webhookSubscriptionCreate: null },
+              errors: [denied],
+              extensions: cost,
+            };
+          }
           return {
             data: {
               webhookSubscriptionCreate: {

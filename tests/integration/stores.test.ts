@@ -6256,8 +6256,30 @@ describe('Shipment messages (ADR-413)', () => {
         /FULFILLMENTS_CREATE subscription.*HyFib reads shipments with their orders instead/,
       ),
     });
+    // The refusal may come in other shapes (unconfirmed, research §5): no subscription in a
+    // withheld answer, or ACCESS_DENIED without data. Each is shown the same way, never a success
+    // and never a failed check.
+    for (const shape of ['access_denied_with_data', 'access_denied'] as const) {
+      legacy.topicRefusal = shape;
+      legacy.subscriptions = [];
+      await recheck(oldStore);
+      expect(
+        legacy.subscriptions.map((s) => s.topic),
+        shape,
+      ).not.toContain('FULFILLMENTS_CREATE');
+      expect(legacy.subscriptions, shape).toHaveLength(7);
+      expect(await storeRow(oldStore), shape).toMatchObject({
+        state: 'connected',
+        sync_error: null,
+        webhook_error: expect.stringMatching(
+          /FULFILLMENTS_CREATE.*HyFib reads shipments with their orders instead/,
+        ),
+      });
+    }
+    legacy.topicRefusal = 'user_errors';
 
-    // A shipment delivery without its order, or for a shop HyFib does not hold, reads nothing.
+    // A shipment delivery without its order is answered 200 and reads nothing (a 400 would count
+    // as a failed delivery, SH-025); one for a shop HyFib does not hold reads nothing either.
     const body = JSON.stringify({ id: 1, updated_at: iso() });
     const hmac = createHmac('sha256', CLIENT_SECRET).update(body).digest('base64');
     const headers = (shopDomain: string) => ({
@@ -6268,8 +6290,8 @@ describe('Shipment messages (ADR-413)', () => {
       webhookId: `ship-${randomBytes(4).toString('hex')}`,
     });
     expect(await handleShopifyWebhook(webhookDeps(), headers(shop))).toMatchObject({
-      status: 400,
-      log: { outcome: 'malformed' },
+      status: 200,
+      log: { outcome: 'ignored_no_order' },
     });
     expect(await handleShopifyWebhook(webhookDeps(), headers(newShop()))).toMatchObject({
       status: 200,
@@ -6310,6 +6332,93 @@ describe('Shipment messages (ADR-413)', () => {
     expect(await shipmentSummary(storeId)).toEqual([
       ['760101', 'shipment_created', 'created', 'started', null],
       ['760102', 'shipment_created', 'created', 'pending', null],
+    ]);
+  });
+
+  it('gives the newest tracking once when it changes while a shipment’s messages wait', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, orderUpdate);
+    // Tracking updates have a fallback so a shipment without tracking still gets its first message.
+    const vars = update({ source: 'order', field: 'tracking_number', fallback: 'on its way' });
+    for (const event of ['shipment_created', 'tracking_updated'] as const) {
+      await saveRule(owner, c, storeId, event, {
+        templateId: template.id,
+        variables: vars,
+        delayMinutes: 30,
+      });
+    }
+    const after = later(31 * MINUTE_MS);
+    const pendingId = async (dedupeKey: string, shipment: string) =>
+      (await shipmentMessageRows(storeId)).find(
+        (r) => r.dedupe_key === dedupeKey && r.shipment_external_id === shipment,
+      )?.id as string;
+
+    // Shipped without tracking; its tracking arrives while "Shipment sent" still waits.
+    const a = shipped('790101');
+    shopify.upsertOrder(shop, { id: '7901', phone: '+919812377901', fulfillments: [a] });
+    await orderSignal(shop, '7901', 'orders/create');
+    await drain(c, storeId);
+    shopify.upsertOrder(shop, {
+      id: '7901',
+      fulfillments: [{ ...a, updatedAt: iso(1_000), trackingInfo: tracking('AWB91') }],
+    });
+    await fulfillmentSignal(shop, '7901', '790101', 'fulfillments/update');
+    await drain(c, storeId);
+    // The update falls due first: it waits for the shipment's first message.
+    expect(
+      await processStoreMessage(
+        messageDeps(after),
+        scopeOf(c),
+        await pendingId('tracking:1', '790101'),
+      ),
+    ).toMatchObject({ outcome: 'rescheduled' });
+    // "Shipment sent" goes with the tracking it finds, and the update is not sent again.
+    expect(
+      await processStoreMessage(
+        messageDeps(after),
+        scopeOf(c),
+        await pendingId('created', '790101'),
+      ),
+    ).toMatchObject({ outcome: 'queued' });
+    expect(await runMessages(c, storeId, later(45 * MINUTE_MS))).toEqual([
+      { outcome: 'skipped', reason: 'tracking_already_sent' },
+    ]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(templatesTo('919812377901').map((t) => bodyTexts(t)?.[2])).toEqual(['AWB91']);
+    const [created] = await fx.query<{ tracking_revision: number }>(
+      `SELECT tracking_revision FROM app.commerce_store_messages WHERE id = $1`,
+      [await pendingId('created', '790101')],
+    );
+    expect(created?.tracking_revision).toBe(1);
+
+    // A→B→A after the first message: B's update waits, the shipment is back on A, which the
+    // customer already has, so B's update is not sent.
+    const b = shipped('790201', { trackingInfo: tracking('AWB92') });
+    shopify.upsertOrder(shop, { id: '7902', phone: '+919812377902', fulfillments: [b] });
+    await orderSignal(shop, '7902', 'orders/create');
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId, after)).toMatchObject([{ outcome: 'queued' }]);
+    shopify.upsertOrder(shop, {
+      id: '7902',
+      fulfillments: [{ ...b, updatedAt: iso(1_000), trackingInfo: tracking('AWB93') }],
+    });
+    await fulfillmentSignal(shop, '7902', '790201', 'fulfillments/update');
+    await drain(c, storeId);
+    shopify.upsertOrder(shop, {
+      id: '7902',
+      fulfillments: [{ ...b, updatedAt: iso(2_000), trackingInfo: tracking('AWB92') }],
+    });
+    await fulfillmentSignal(shop, '7902', '790201', 'fulfillments/update');
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId, after)).toEqual([
+      { outcome: 'skipped', reason: 'tracking_replaced' },
+    ]);
+    expect((await shipmentSummary(storeId)).filter((r) => r[0] === '790201')).toEqual([
+      ['790201', 'shipment_created', 'created', 'queued', null],
+      ['790201', 'tracking_updated', 'tracking:2', 'skipped', 'tracking_replaced'],
     ]);
   });
 

@@ -2,7 +2,7 @@
 
 ## 2026-10-21 — Store follow-ups per shipment (P4-06f, ADR-413)
 
-Status: **Implemented (migration 0323); unit tests run locally, integration and e2e tests in CI
+Status: **Implemented (migrations 0323 and 0328); unit tests run locally, integration and e2e tests in CI
 only; no live Shopify or Meta traffic.** An order message rule fired once per order and event, so
 an order shipped in several parcels got one "shipped" message and a tracking number added later
 got none; BACKLOG P4-06f listed this as not built.
@@ -21,13 +21,17 @@ got none; BACKLOG P4-06f listed this as not built.
   number (case and spaces ignored) and link, the carrier alone no change, at most ten remembered;
   nothing for cancelled or failed shipments, cancelled orders or the past; test orders and late
   events recorded as skipped; new skip reasons `shipment_cancelled` and `tracking_replaced`.
-- **Copy and dedupe** (migration 0323, `worker.ts`): `app.commerce_store_shipments` kept with each
-  order read, never backwards, under row locks; store messages gain `shipment_id` and `dedupe_key`
-  with a unique key per shipment, event and key; shipment messages name no order, so the old key
-  and the outgoing webhook triggers are untouched (expand only, three checks widened `NOT VALID`).
+- **Copy and dedupe** (migrations 0323 and 0328, `worker.ts`): `app.commerce_store_shipments` kept
+  with each order read, never backwards, under row locks, deleted with the company; store messages
+  gain `shipment_id`, `dedupe_key` and `tracking_revision`, unique per shipment, event and key
+  through an index 0328 builds concurrently; shipment messages name no order, so the old key and
+  the outgoing webhook triggers are untouched (expand only, checks on large tables widened
+  `NOT VALID`).
 - **Sending** (`order-messages.ts`): ADR-048's checks, delay and sending hours, the shipment's own
-  carrier, number and link in the existing variable mapping (fallback or `missing_variable`), a
-  replaced tracking skipped; an automation instead of a template (ADR-050's generic path).
+  carrier, number and link in the existing variable mapping (fallback or `missing_variable`); a
+  tracking update goes only while its tracking is current, waits for a waiting "Shipment sent" and
+  is skipped once that message carried it (`trackingUpdateDecision`), so a correction reaches the
+  customer once; an automation instead of a template (ADR-050's generic path).
 - **Subscriptions** (`model.ts`, `shopify.ts`, `webhook.ts`, `service.ts`): every authorization asks
   for `read_fulfillments` (not required); with it the webhook check subscribes `FULFILLMENTS_CREATE`
   and `FULFILLMENTS_UPDATE` (`includeFields` `id`, `order_id`, `updated_at`), whose deliveries signal
@@ -48,15 +52,16 @@ got none; BACKLOG P4-06f listed this as not built.
 
 ### Tests
 
-- Unit (`stores/shipment-messages.test.ts`, 19 tests; `messages-model.test.ts`,
+- Unit (`stores/shipment-messages.test.ts`, 22 tests; `messages-model.test.ts`,
   `webhooks/webhooks.test.ts` updated): the events' availability, automations and delays; detection
   of a new shipment and of a new tracking, the rule's start to the second, the 48-hour bound, test
   orders, cancelled shipments and orders; tracking keys (case, spaces, number against link, empty),
   first-seen not counted, going back not counted, the bound of ten; dedupe key shapes; parsing
   fulfillments (ids, statuses, failed, https links only, at most ten, missing times); the scopes,
   `includeFields` and `order_id` parsing; the approval shortfall messages; the skip reasons never
-  reported by order webhooks.
-- Integration (CI only, `stores.test.ts`, 7 new tests): one message per shipment and per new
+  reported by order webhooks; the current tracking revision and every tracking update decision
+  (replaced, a return to an earlier tracking, waiting for "Shipment sent", already sent).
+- Integration (CI only, `stores.test.ts`, 9 new tests): one message per shipment and per new
   tracking with each shipment's own number, a duplicate and a repeated delivery, a carrier-only and
   a back-to-earlier change sending nothing, the order page, the report and no outgoing webhook
   event; two reads of a new shipment and of a tracking at once giving one message each, a stale read
@@ -64,37 +69,66 @@ got none; BACKLOG P4-06f listed this as not built.
   failed, a cancelled order, a test order and a late shipment; sending hours, permissions,
   isolation and WooCommerce refused; new stores subscribed with trimmed payloads, an older store
   left as it was, brought up to date once after its approval, never subscribed twice, a refused
-  topic shown, malformed and unknown-shop deliveries; an automation started per shipment; the
-  transit re-read finding a new tracking without a webhook; erasure and `customers/redact` clearing
-  tracking for good. Existing tests updated for the new scope and the two extra subscriptions.
+  topic shown in each of its three shapes, deliveries without an order answered 200 and for an
+  unknown shop; an automation started per shipment; a tracking arriving while "Shipment sent"
+  waits sent once (the update rescheduled, then skipped as already sent) and an A→B→A change
+  sending nothing more; the transit re-read finding a new tracking without a webhook; erasure and
+  `customers/redact` clearing tracking for good. `company-data.test.ts`'s deletion checks now cover
+  the new table (not re-run here). Existing tests updated for the new scope and the two extra subscriptions.
 - E2E (CI only, `stores.spec.ts`): a new store subscribed to the shipment topics, "Shipment sent"
   set up in the browser, a `fulfillments/create` delivery sending the template with the shipment's
   tracking, a repeated delivery sending nothing, the report and the order page.
-- Hand mutation of 26 rules, bounds and checks: 19 caught by the unit tests (detection, bounds,
-  tracking keys, parsing, scopes, `order_id`, `includeFields`, the shortfall message, the transit
-  rules). The 7 others need the database or the stand-ins, each exercised by a named integration
-  test that did not run here: shipment topics created without the scope ("subscribes new stores
-  to the shipment webhooks and brings existing stores up to date once"), a replaced tracking or a
-  cancelled shipment still sent ("sends nothing about the past, cancelled shipments or orders, test
-  orders or late events, and only the newest tracking"), the order's tracking instead of the
-  shipment's and the fulfillment topics not routed ("sends one message per shipment and per new
-  tracking, each with its own shipment's tracking"), a redacted order's shipment keeping its
-  tracking on a later read ("clears shipments' tracking with the customer's details, for good"),
-  and a stale shipment read applied ("records one message when the same shipment is read twice at
-  once, and never goes backwards").
+- Hand mutation of 34 rules, bounds and checks (26 first, 8 after the review): 23 fail the unit
+  tests, but one of them (the transit rules) only through a constant's assertion, so it is counted
+  with the integration ones: 22 caught by the unit tests (detection, bounds, tracking keys, the
+  current revision and the update decision, parsing, scopes, `order_id`, `includeFields`, the
+  shortfall message). The 12 others need the database or the stand-ins, each exercised by a named
+  integration test that did not run here: the transit rules ("reads orders in transit again and
+  finds a shipment's new tracking when no webhook comes"); shipment topics created without the
+  scope, an answer without a subscription taken for success, `ACCESS_DENIED` failing the check and
+  a delivery without an order refused ("subscribes new stores to the shipment webhooks and brings
+  existing stores up to date once"); a replaced tracking or a cancelled shipment still sent ("sends
+  nothing about the past, cancelled shipments or orders, test orders or late events, and only the
+  newest tracking"); the carried tracking not recorded ("gives the newest tracking once when it
+  changes while a shipment's messages wait"); the order's tracking instead of the shipment's and
+  the fulfillment topics not routed ("sends one message per shipment and per new tracking, each
+  with its own shipment's tracking"); a redacted order's shipment keeping its tracking on a later
+  read ("clears shipments' tracking with the customer's details, for good"); and a stale shipment
+  read applied ("records one message when the same shipment is read twice at once, and never goes
+  backwards").
+
+### Review fixes (before merge)
+
+- **Company deletion (High):** `app.commerce_store_shipments` gets a deletion step (475, after the
+  store messages, before the orders and stores), `SELECT (tenant_id, id)` and `DELETE` for
+  `w360_definer` and the two `tenant_deletion_*` policies; the erasure policy, at first `USING
+(true)`, is limited to the company in context.
+- **Tracking sent twice (Medium):** a tracking that arrived while "Shipment sent" waited went out in
+  both messages. A sent "Shipment sent" now records the tracking it carried (`tracking_revision`),
+  and an update waits for a waiting one and is skipped for a tracking it carried.
+- **Lock (Medium):** the unique key is a concurrent index in 0328 (`-- migrate:no-transaction`), no
+  longer a constraint built under `ACCESS EXCLUSIVE`; DEPLOYMENT states 0323's locks exactly.
+- **Refusal shapes (Medium):** an answer naming no created subscription is a refusal, and
+  `ACCESS_DENIED` for a shipment topic is shown, not a failed check; the stand-in models
+  `userErrors`, a withheld answer and `ACCESS_DENIED`; the shape is a research note and a release
+  checklist item.
+- **Lows:** a body without `order_id` is answered 200 (`ignored_no_order`); a return to an earlier
+  tracking skips a waiting update; shipment rules go on only after both rollouts; the research
+  cites `@shopify/shopify-api` 11.14.1 and 15.0.0, both read; SECURITY says `order_id` is used;
+  the transit rules reclassified above; the rule editor's automation note.
 
 ### Test commands and results (local, 2026-10-21)
 
-| Command                                                                         | Result                                                         |
-| ------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `npx eslint . --max-warnings=0`                                                 | clean                                                          |
-| `npx prettier --check . --ignore-path .prettierignore --ignore-path .gitignore` | clean                                                          |
-| `pnpm typecheck`                                                                | clean                                                          |
-| `pnpm test` (unit)                                                              | 2,159 of 2,159 passed (187 files)                              |
-| `tsc --noEmit -p tests/integration`, `-p tests/e2e`                             | clean                                                          |
-| `pnpm build`                                                                    | passed                                                         |
-| hand mutation of 26 rules, bounds and checks                                    | 19 caught by unit tests; 7 exercised only by integration tests |
-| `pnpm test:integration`, `pnpm test:e2e`                                        | not run here: no local PostgreSQL or browser; CI runs them     |
+| Command                                                                         | Result                                                          |
+| ------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`                                                 | clean                                                           |
+| `npx prettier --check . --ignore-path .prettierignore --ignore-path .gitignore` | clean                                                           |
+| `pnpm typecheck`                                                                | clean                                                           |
+| `pnpm test` (unit)                                                              | 2,162 of 2,162 passed (187 files)                               |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`                             | clean                                                           |
+| `pnpm build`                                                                    | passed                                                          |
+| hand mutation of 34 rules, bounds and checks                                    | 22 caught by unit tests; 12 exercised only by integration tests |
+| `pnpm test:integration`, `pnpm test:e2e`                                        | not run here: no local PostgreSQL or browser; CI runs them      |
 
 ## 2026-10-21 — Saved replies that carry a file (P3-06, W-087, ADR-411)
 

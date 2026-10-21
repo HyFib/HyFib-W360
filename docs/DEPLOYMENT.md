@@ -2019,26 +2019,35 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    deleted (which removes their values and leaves those segments refused as naming a field that does
    not exist).
 
-   Migration 0323 (ADR-413, shipment messages) is expand only. It creates
-   `app.commerce_store_shipments` (empty; tenant row security, grants), a trigger on
-   `app.commerce_store_orders` that clears shipments' tracking when an order is redacted, and gives
-   `app.commerce_store_messages` the null columns `shipment_id` and `dedupe_key` with
-   `UNIQUE (tenant_id, shipment_id, event, dedupe_key)`. It replaces the event and subject checks of
+   Migrations 0323 and 0328 (ADR-413, shipment messages) are expand only. 0323 creates
+   `app.commerce_store_shipments` (empty; tenant row security, grants, a company deletion step
+   between the store messages and the orders, and `w360_definer` policies limited to the company
+   being erased or deleted), a trigger on `app.commerce_store_orders` that clears shipments' tracking
+   when an order is redacted, and gives `app.commerce_store_messages` the null columns `shipment_id`,
+   `dedupe_key` and `tracking_revision`. It replaces the event and subject checks of
    `app.commerce_store_messages`, the event and action checks of `app.commerce_store_message_rules`
    (validated: at most nine rows a store) and the `store_event` check of `app.automation_runs` with
-   wider ones; every value the old checks allowed is still allowed. The two on the large tables are
+   wider ones; every value the old checks allowed is still allowed. Those on the large tables are
    left `NOT VALID` (new and changed rows are checked; rows already there passed the narrower
-   check), so the migration does not scan them under its lock. The unique key builds an index on
-   `app.commerce_store_messages`, which blocks writes to it while it builds (order messages wait,
-   nothing fails); on a large table apply it in a quiet hour. Locks: `ACCESS EXCLUSIVE` briefly on
-   the three altered tables and `SHARE ROW EXCLUSIVE` on `app.commerce_store_orders` for the trigger.
-   Rollout: apply 0323, then roll out workers and web as usual. A server of the release before
-   ignores the new table and columns: shipment rules cannot be switched on from it, and it never
-   writes a second message per order and event (shipment messages name no order). During the rollout
-   an old web server showing a store's report could meet a shipment message's event and fail to
-   render that page, so switch shipment rules on only after the web rollout ends. Rolling back an
-   image leaves the table, trigger, columns and checks; older code then ignores them (shipment
-   messages already waiting are never sent by older workers, which skip them as an order deleted).
+   check), so nothing is scanned. Locks: `ALTER TABLE` takes `ACCESS EXCLUSIVE` on
+   `app.commerce_store_messages`, `app.commerce_store_message_rules` and `app.automation_runs`
+   (reads included) and creating the trigger `SHARE ROW EXCLUSIVE` on `app.commerce_store_orders`,
+   each held until 0323 commits; with no scan and no index build that is the time to change the
+   catalogue, but a long transaction on one of those tables makes the migration wait for it, and
+   everything after it wait behind the migration (set a `lock_timeout` for the run, as for other
+   migrations). 0328 (`-- migrate:no-transaction`) then builds the unique index
+   `(tenant_id, shipment_id, event, dedupe_key)` with `CREATE UNIQUE INDEX CONCURRENTLY`: order
+   messages keep being written and read while it builds. It must succeed before the new release
+   serves, since recording shipment messages relies on it (`ON CONFLICT` infers it); if it fails,
+   drop the `INVALID` index it leaves (RUNBOOKS §10J) and run the migrations again.
+   Rollout: apply 0323 and 0328, then roll out workers and web as usual. A server of the release
+   before ignores the new table and columns: shipment rules cannot be switched on from it, and it
+   never writes a second message per order and event (shipment messages name no order). Switch
+   shipment rules on only after **both** the worker and the web rollouts end: an old worker skips a
+   shipment message it meets for good (as "The order was deleted", having no order id), and an old
+   web server showing a store's report fails to render a shipment message's event. Rolling back an
+   image leaves the table, trigger, columns, index and checks; older code ignores them, and shipment
+   messages still waiting are skipped by older workers as above, so switch shipment rules off first.
 
    ADR-410 (campaigns that test up to five templates) has no migration: the labels B to Z, the
    shares of 10% to 90% in steps of 5, the unique label per campaign and the grants of 0317 already

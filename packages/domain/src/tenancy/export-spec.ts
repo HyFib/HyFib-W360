@@ -653,6 +653,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'automation_run_id',
       'shipment_id',
       'dedupe_key',
+      'tracking_revision',
     ],
   },
   {

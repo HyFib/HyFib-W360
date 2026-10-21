@@ -79,16 +79,20 @@ CREATE TRIGGER commerce_store_orders_redact_shipments
 -- Shipment messages ------------------------------------------------------------------------------
 -- shipment_id: the shipment a shipment message is about (its order is the shipment's);
 -- dedupe_key: which of the shipment's messages it is, `created` or `tracking:<n>` for the n-th
--- distinct tracking seen for it. At most one message per shipment, event and key.
+-- distinct tracking seen for it. At most one message per shipment, event and key: the unique index
+-- that holds this is built CONCURRENTLY by 0328, outside this transaction, so this migration takes
+-- only brief locks. tracking_revision: the tracking a sent "Shipment sent" message carried (its
+-- place among the shipment's remembered trackings, 0 for none), so a tracking update carrying the
+-- same values is not sent again (ADR-413).
 --
 -- The checks are replaced NOT VALID: new and changed rows are checked at once, and every row
 -- already there passed the narrower checks they replace (no row has a shipment yet). Validating
--- them here would scan this table under the lock this change takes; it is left to a later reviewed
--- migration. The unique key builds an index on the table (a write lock while it builds; see
--- docs/DEPLOYMENT.md).
+-- them here would scan this table under the ACCESS EXCLUSIVE lock this change takes until commit;
+-- it is left to a later reviewed migration.
 ALTER TABLE app.commerce_store_messages
   ADD COLUMN shipment_id uuid,
   ADD COLUMN dedupe_key text,
+  ADD COLUMN tracking_revision smallint,
   DROP CONSTRAINT commerce_store_messages_event_check,
   ADD CONSTRAINT commerce_store_messages_event_check CHECK (event IN ('order_placed',
     'cod_confirmation', 'order_shipped', 'order_delivered', 'order_cancelled', 'shipment_created',
@@ -101,9 +105,10 @@ ALTER TABLE app.commerce_store_messages
     AND (dedupe_key IS NOT NULL) = (shipment_id IS NOT NULL)
     AND (dedupe_key IS NULL OR dedupe_key ~ '^(created|tracking:[1-9][0-9]?)$')
     AND (dedupe_key IS NULL OR (dedupe_key = 'created') = (event = 'shipment_created'))) NOT VALID,
+  ADD CONSTRAINT commerce_store_messages_tracking_revision CHECK (tracking_revision IS NULL
+    OR (event = 'shipment_created' AND tracking_revision BETWEEN 0 AND 10)) NOT VALID,
   ADD CONSTRAINT commerce_store_messages_shipment_fk FOREIGN KEY (tenant_id, shipment_id)
-    REFERENCES app.commerce_store_shipments (tenant_id, id) ON DELETE CASCADE NOT VALID,
-  ADD CONSTRAINT commerce_store_messages_shipment_uq UNIQUE (tenant_id, shipment_id, event, dedupe_key);
+    REFERENCES app.commerce_store_shipments (tenant_id, id) ON DELETE CASCADE NOT VALID;
 
 -- Rules: one per store and event, as before. Shipment rules may start an automation (ADR-050's
 -- generic path); their delay is the default 0 to 24 hours. A store has at most nine rules, so these
@@ -135,11 +140,27 @@ GRANT UPDATE (status, display_status, failed, remote_created_at, remote_updated_
   tracking_company, tracking_number, tracking_url, tracking_keys, synced_at, updated_at)
   ON app.commerce_store_shipments TO w360_app;
 
+-- The message's job records the tracking a sent "Shipment sent" message carried.
+GRANT UPDATE (tracking_revision) ON app.commerce_store_messages TO w360_app;
+
 -- Erasure (erase_contact, SECURITY DEFINER) redacts store orders, and the trigger above then
--- clears their shipments' tracking as w360_definer: only these columns, only from the trigger's
--- query (which names the company and the order).
-CREATE POLICY definer_redact ON app.commerce_store_shipments TO w360_definer
-  USING (true) WITH CHECK (true);
-GRANT SELECT (tenant_id, order_id, tracking_number, tracking_url, tracking_keys),
+-- clears their shipments' tracking as w360_definer: only these columns, and only in the company
+-- whose context the erasure runs in.
+CREATE POLICY definer_redact_read ON app.commerce_store_shipments FOR SELECT TO w360_definer
+  USING (tenant_id = (SELECT app.current_tenant_id()));
+CREATE POLICY definer_redact ON app.commerce_store_shipments FOR UPDATE TO w360_definer
+  USING (tenant_id = (SELECT app.current_tenant_id()))
+  WITH CHECK (tenant_id = (SELECT app.current_tenant_id()));
+GRANT SELECT (tenant_id, id, order_id, tracking_number, tracking_url, tracking_keys),
   UPDATE (tracking_number, tracking_url, tracking_keys)
   ON app.commerce_store_shipments TO w360_definer;
+
+-- Deleted with the company (ADR-055): after the store messages (470) that name the shipments and
+-- before the orders (740) and stores (750) they name.
+INSERT INTO ops.tenant_deletion_steps (ordinal, tables, mode) VALUES
+  (475, ARRAY['app.commerce_store_shipments']::regclass[], 'batch');
+GRANT DELETE ON app.commerce_store_shipments TO w360_definer;
+CREATE POLICY tenant_deletion_read ON app.commerce_store_shipments FOR SELECT TO w360_definer
+  USING (tenant_id = (SELECT ops.deleting_tenant_id()));
+CREATE POLICY tenant_deletion_delete ON app.commerce_store_shipments FOR DELETE TO w360_definer
+  USING (tenant_id = (SELECT ops.deleting_tenant_id()));

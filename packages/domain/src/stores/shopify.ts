@@ -491,6 +491,14 @@ export class ShopifyAdmin {
         `Shopify did not create the ${topic} subscription: ${typeof message === 'string' ? message.slice(0, 200) : 'unknown error'}`,
       );
     }
+    // No subscription in the answer (for example withheld with ACCESS_DENIED beside the data):
+    // nothing was created, whatever else the answer says.
+    if (typeof asRecord(payload?.webhookSubscription)?.id !== 'string') {
+      throw new StoreApiError(
+        'rejected',
+        `Shopify did not create the ${topic} subscription: its answer named no subscription`,
+      );
+    }
   }
 
   /** Uninstalls HyFib from the shop (SH-028); an app that is already gone is fine. */

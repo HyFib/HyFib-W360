@@ -325,6 +325,8 @@ export const commerceStoreMessages = appSchema.table('commerce_store_messages', 
   checkoutId: uuid('checkout_id'),
   shipmentId: uuid('shipment_id'),
   dedupeKey: text('dedupe_key'),
+  /** The tracking a sent "Shipment sent" message carried (its place among the remembered ones). */
+  trackingRevision: smallint('tracking_revision'),
   event: text('event', { enum: STORE_MESSAGE_EVENTS }).notNull(),
   state: text('state', { enum: STORE_MESSAGE_STATES }).notNull().default('pending'),
   skipReason: text('skip_reason'),

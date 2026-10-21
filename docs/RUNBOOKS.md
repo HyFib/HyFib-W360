@@ -1337,8 +1337,12 @@ order page list them with the order; besides the order message reasons above:
 
 - "The shipment was cancelled, or failed" — Shopify reports it `CANCELLED`, `ERROR` or `FAILURE`
   (or displayed cancelled or failed) by the time it was due; a shipment first seen so gets nothing.
-- "The shipment's tracking changed again" — a newer tracking of the same shipment arrived while
-  this one waited for its delay or the sending hours; only the newest is sent.
+- "The shipment's tracking changed again" — while this one waited for its delay or the sending
+  hours, the shipment's tracking became a newer one, or went back to one it had before; only the
+  shipment's current tracking is sent, once.
+- "The shipment's first message already carried this tracking" — the tracking arrived while
+  "Shipment sent" waited, and that message went with it. A tracking update due while "Shipment
+  sent" still waits is moved five minutes past it.
 - "A template variable had no value" — Shopify gave the shipment no tracking number (or link) and
   the variable has no fallback: give the variable a fallback, or use "Tracking updated" for the
   number that comes later.
@@ -1355,19 +1359,26 @@ delivered or shipment rule is on. A manager clicks "Allow shipment updates in Sh
 approves; the worker exchanges the approval and subscribes `fulfillments/create` and
 `fulfillments/update` in the same run. The store page's "Webhooks" line shows a refusal ("Shopify
 did not create the FULFILLMENTS_CREATE subscription … HyFib reads shipments with their orders
-instead"): the grant was withdrawn or the app lacks the scope in the Partner Dashboard
-(docs/DEPLOYMENT.md, Shopify app step 2). The web log's `shopify webhook` lines for
-`fulfillments/*` show `fetch_signalled`, `duplicate`, or `malformed` (no usable `order_id` in the
-body: research SH-048, unconfirmed against a real store; the order is still read later).
+instead", or "Shopify denied access …" for the same topic): the grant was withdrawn or the app
+lacks the scope in the Partner Dashboard (docs/DEPLOYMENT.md, Shopify app step 2); the store keeps
+syncing. The web log's `shopify webhook` lines for `fulfillments/*` show `fetch_signalled`,
+`duplicate`, or `ignored_no_order` (answered 200 so Shopify keeps the subscription: the body had no
+usable `order_id`, research SH-048, unconfirmed against a real store; the order is still read by
+the hourly read and the transit check). Many `ignored_no_order` lines mean Shopify's body differs
+from the REST resource: report it, as the shipment webhooks then only add load.
 
-**Migration 0323 failed.** It runs in one transaction, so a failure applies nothing. It creates
-`app.commerce_store_shipments` (with `ops.apply_tenant_rls`, grants for `w360_app` and column grants
-and a policy for `w360_definer`), a trigger on `app.commerce_store_orders`, two columns and a unique
-key on `app.commerce_store_messages`, and replaces three checks `NOT VALID`; a failure on the
+**Migration 0323 or 0328 failed.** 0323 runs in one transaction, so a failure applies nothing. It
+creates `app.commerce_store_shipments` (with `ops.apply_tenant_rls`, grants for `w360_app`, column
+grants and policies for `w360_definer`, and a company deletion step), a trigger on
+`app.commerce_store_orders` and three columns on `app.commerce_store_messages`, and replaces checks
+(those on the large tables `NOT VALID`); a failure on the
 definer's grants usually means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). A
 lock timeout means a long transaction held `app.commerce_store_messages`,
 `app.commerce_store_message_rules`, `app.commerce_store_orders` or `app.automation_runs`: run it
-again in a quieter moment.
+again in a quieter moment. 0328 builds the unique index concurrently, outside a transaction; a
+failure (a duplicate, a cancelled build) can leave an `INVALID` index:
+`DROP INDEX CONCURRENTLY app.commerce_store_messages_shipment_uq;` then run the migrations again.
+The release must not serve until 0328 has applied (shipment messages are recorded through it).
 
 ## 10K. Cart reminders (Shopify checkouts)
 

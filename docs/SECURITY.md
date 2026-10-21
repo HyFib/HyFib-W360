@@ -775,11 +775,14 @@ Phase 4 rules (Cart reminders, P4-06d):
   `commerce.manage` and uses the customer access handshake (the same checks, bound to the member who
   started it), audited as `commerce.store_shipment_access_requested` and
   `commerce.store_shipment_access_approved`. A shipment webhook only signals a read of the order its
-  `order_id` names in the store its verified shop header maps to; nothing in the body is used. A
-  shipment's tracking and its digests are cleared whenever its order is redacted (a trigger;
-  `w360_definer` holds only `SELECT (tenant_id, order_id, tracking_number, tracking_url,
-tracking_keys)` and `UPDATE (tracking_number, tracking_url, tracking_keys)` on
-  `app.commerce_store_shipments`, for erasure). No permission changes.
+  `order_id` names in the store its verified shop header maps to; `order_id` is the only part of
+  the body used, and a body without a usable one is answered 200 and logged (`ignored_no_order`),
+  reading nothing. A shipment's tracking and its digests are cleared whenever its order is redacted
+  (a trigger; `w360_definer` holds only `SELECT (tenant_id, id, order_id, tracking_number,
+tracking_url, tracking_keys)`, `UPDATE (tracking_number, tracking_url, tracking_keys)` and
+  `DELETE` on `app.commerce_store_shipments`, through policies limited to the company in whose
+  context an erasure runs, `app.current_tenant_id()`, or the one being deleted,
+  `ops.deleting_tenant_id()`). No permission changes.
 - Least privilege at Shopify: HyFib asks for `read_customers` only after a manager allows customer
   access for that store. The new authorization has the connection's checks (HMAC with the app
   secret, timestamp, shop, a single-use state bound to the member who started it). Its code is

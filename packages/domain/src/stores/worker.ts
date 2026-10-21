@@ -1197,13 +1197,22 @@ async function ensureShopifyWebhooks(
     if (!existing.has(topic)) await admin.createWebhook(topic, uri);
   }
   if (!hasShipmentAccess(grantedScopes)) return null;
-  try {
-    for (const topic of SHOPIFY_SHIPMENT_TOPICS) {
-      if (!existing.has(topic)) await admin.createWebhook(topic, uri);
+  for (const topic of SHOPIFY_SHIPMENT_TOPICS) {
+    if (existing.has(topic)) continue;
+    try {
+      await admin.createWebhook(topic, uri);
+    } catch (error) {
+      // Refused in any shape (user errors, no subscription, or access denied for this topic;
+      // which one Shopify gives is unconfirmed, research §5): shown on the store, not a failure.
+      if (
+        !(error instanceof StoreApiError) ||
+        (error.failure !== 'rejected' && error.failure !== 'unauthorized')
+      ) {
+        throw error;
+      }
+      const detail = error.message.includes(topic) ? error.message : `${topic}: ${error.message}`;
+      return `${detail.slice(0, 300)} HyFib reads shipments with their orders instead.`;
     }
-  } catch (error) {
-    if (!(error instanceof StoreApiError) || error.failure !== 'rejected') throw error;
-    return `${error.message.slice(0, 300)} HyFib reads shipments with their orders instead.`;
   }
   return null;
 }

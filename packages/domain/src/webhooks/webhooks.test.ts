@@ -10025,7 +10025,7 @@ describe('skip reason filters for skipped order messages (ADR-354)', () => {
     'not_marketing_template',
   ];
   // Shipment messages (ADR-413) send no webhook events, so their own reasons are never reported.
-  const shipmentOnly = ['shipment_cancelled', 'tracking_replaced'];
+  const shipmentOnly = ['shipment_cancelled', 'tracking_replaced', 'tracking_already_sent'];
 
   it('are the reasons a store’s Messages page explains, but cart reminders’ own', () => {
     expect(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS).toEqual(
@@ -10142,6 +10142,7 @@ describe('the events of a store’s cart reminders (ADR-355)', () => {
     // Shipment messages' own (ADR-413).
     'shipment_cancelled',
     'tracking_replaced',
+    'tracking_already_sent',
   ];
 
   /** A transaction that answers its reads, in order, with `answers`; another read fails the test. */

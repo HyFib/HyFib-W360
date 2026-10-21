@@ -12,6 +12,8 @@ import {
   eventAvailable,
   isShipmentEvent,
   nextTrackingKeys,
+  currentTrackingRevision,
+  trackingUpdateDecision,
   variablesFit,
   type EnabledRule,
   type SavedShipmentChange,
@@ -273,6 +275,43 @@ describe('tracking changes', () => {
   });
 });
 
+describe('tracking updates at send time', () => {
+  const A = shipmentTrackingKey('AWB1', null) as string;
+  const B = shipmentTrackingKey('AWB2', null) as string;
+  const decide = (
+    revision: number,
+    currentRevision: number,
+    created: { state: string; trackingRevision: number | null } | null = null,
+  ) => trackingUpdateDecision({ revision, currentRevision, created });
+
+  it('know which remembered tracking the shipment has now', () => {
+    expect(currentTrackingRevision([A, B], B)).toBe(2);
+    expect(currentTrackingRevision([A, B], A)).toBe(1);
+    expect(currentTrackingRevision([A, B], null)).toBe(0);
+    expect(currentTrackingRevision([A], B)).toBe(0);
+  });
+
+  it('send only the shipment’s current tracking: newer ones and returns replace it', () => {
+    expect(decide(2, 2)).toBe('send');
+    expect(decide(1, 2)).toBe('tracking_replaced');
+    // A→B→A: B's message waits while the shipment is back on A, which the customer has.
+    expect(decide(2, 1)).toBe('tracking_replaced');
+    expect(decide(1, 0)).toBe('tracking_replaced');
+  });
+
+  it('wait for a waiting “Shipment sent”, and never repeat the tracking it carried', () => {
+    expect(decide(1, 1, { state: 'pending', trackingRevision: null })).toBe('wait_for_created');
+    expect(decide(1, 1, { state: 'queued', trackingRevision: 1 })).toBe('tracking_already_sent');
+    expect(decide(1, 1, { state: 'started', trackingRevision: 2 })).toBe('tracking_already_sent');
+    expect(decide(2, 2, { state: 'queued', trackingRevision: 1 })).toBe('send');
+    expect(decide(1, 1, { state: 'queued', trackingRevision: 0 })).toBe('send');
+    // Not sent at all: the update goes.
+    expect(decide(1, 1, { state: 'skipped', trackingRevision: null })).toBe('send');
+    // A replaced tracking is skipped even while the first message waits.
+    expect(decide(1, 2, { state: 'pending', trackingRevision: null })).toBe('tracking_replaced');
+  });
+});
+
 describe('Shopify shipments', () => {
   const fulfillment = (over: Record<string, unknown> = {}) => ({
     id: 'gid://shopify/Fulfillment/7001',
@@ -396,6 +435,7 @@ describe('shipment webhooks', () => {
     expect(fulfillmentOrderId({ order_id: 820982911946154500 })).toBeNull();
     expect(fulfillmentOrderId({ order_id: 450789469 })).toBe('450789469');
     expect(fulfillmentOrderId({ order_id: '450789469' })).toBe('450789469');
+    // shopify-api 15.0.0 types the REST resource's ids as strings (SH-048).
     for (const bad of [0, -1, 1.5, '12a', '', '123456789012345678901', null, undefined, {}]) {
       expect(fulfillmentOrderId({ order_id: bad }), String(bad)).toBeNull();
     }

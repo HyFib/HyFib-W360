@@ -306,6 +306,15 @@ export async function handleShopifyWebhook(
     const externalId = resource?.orderOfFulfillment
       ? fulfillmentOrderId(body)
       : resourceId(body, gidType);
+    // A shipment delivery whose body names no usable order (its shape is unconfirmed, SH-048) is
+    // answered 200 and logged: a 400 would count as a failure, and Shopify deletes subscriptions
+    // after repeated failures. The hourly read and the transit check still read the order.
+    if (resource?.orderOfFulfillment && !externalId) {
+      return {
+        status: 200,
+        log: { outcome: 'ignored_no_order', topic, tenantIds: [target.tenantId] },
+      };
+    }
     if (!resource || !externalId) return { status: 400, log: { outcome: 'malformed', topic } };
     const outcome = await deps.db.run(scope, async (tx) => {
       if (!(await recordDelivery(tx, scope, target.storeId, deliveryId, topic))) return 'duplicate';

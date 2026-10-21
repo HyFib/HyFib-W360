@@ -403,6 +403,11 @@ export function StoreMessageRuleForm({
             No automation starts from order messages yet. Create one under Automations with “An
             order event in a store” as its start, publish it, then choose it here.
           </Alert>
+        ) : isShipmentEvent(rule.event) ? (
+          <p className="text-xs text-muted-foreground">
+            In the automation, the order’s tracking fields are the order’s latest tracking, which
+            may belong to another of its shipments than the one that started it.
+          </p>
         ) : null
       ) : template ? (
         <div className="grid gap-3">

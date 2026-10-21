@@ -190,6 +190,7 @@ export const STORE_MESSAGE_SKIP_REASONS = {
   shipment_cancelled: 'The shipment was cancelled, or failed, before the message was sent.',
   tracking_replaced:
     'The shipment’s tracking changed again before this message was sent; only the newest is sent.',
+  tracking_already_sent: 'The shipment’s first message already carried this tracking.',
   customer_erased: 'The customer’s details were erased.',
   no_phone: 'The order has no phone number HyFib can message (or the store withheld it).',
   contact_erased: 'The contact was erased.',
@@ -425,6 +426,48 @@ export function detectShipmentEvents(input: {
     found.push({ event: rule.event, occurredAt, dedupeKey, skip });
   }
   return found;
+}
+
+/**
+ * Which of a shipment's remembered trackings it has now (1, 2, …; 0 for none or one not
+ * remembered), from the digest of its current tracking.
+ */
+export function currentTrackingRevision(
+  keys: readonly string[],
+  currentKey: string | null,
+): number {
+  return currentKey ? keys.indexOf(currentKey) + 1 : 0;
+}
+
+/** What a due "Tracking updated" message does (ADR-413). */
+export type TrackingUpdateDecision =
+  'send' | 'wait_for_created' | 'tracking_replaced' | 'tracking_already_sent';
+
+/**
+ * A "Tracking updated" message for tracking `revision`, at its send time. It goes only while that
+ * is still the shipment's tracking (a newer one, or a return to an earlier one, replaced it). It
+ * waits while the shipment's "Shipment sent" message is still waiting, since that message carries
+ * the tracking current when it goes; and once that message went carrying this tracking or a later
+ * one, this one is not sent again. So a quick correction, whichever message it lands on, gives the
+ * customer the newest values once.
+ */
+export function trackingUpdateDecision(input: {
+  revision: number;
+  currentRevision: number;
+  created: { state: string; trackingRevision: number | null } | null;
+}): TrackingUpdateDecision {
+  if (input.revision !== input.currentRevision) return 'tracking_replaced';
+  const created = input.created;
+  if (created?.state === 'pending') return 'wait_for_created';
+  if (
+    created &&
+    (created.state === 'queued' || created.state === 'started') &&
+    created.trackingRevision !== null &&
+    input.revision <= created.trackingRevision
+  ) {
+    return 'tracking_already_sent';
+  }
+  return 'send';
 }
 
 /** The parts of a checkout's copy that cart reminders are about. */
