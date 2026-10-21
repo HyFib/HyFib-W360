@@ -2096,11 +2096,22 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    deletes (no file stays without a reply for longer than that, and such files are exported); and
    changing the text of a reply that carries a photo, video or document past 1,024 characters is
    not refused, so a new server cuts the caption to 1,024 characters when the reply is inserted and
-   says so. Apply 0321, then roll out web servers; offer files once the rollout ends. Storage: files
-   live in PostgreSQL (there is no object storage), at most 16 MB each and 100 MB a company in all,
-   so database size, backups and replicas grow with them; watch
-   `pg_total_relation_size('app.saved_reply_files')` and its TOAST table. A company's export carries
-   each file as base64 (about a third larger than the file), two files a page. Rolling an image
+   says so. Apply 0321, then roll out web servers. There is no switch: supervisors can attach files
+   as soon as the first new web server serves them, so while older ones still run, the two cases
+   above can happen; both stay safe (no file is sent that a member did not review, and a leftover
+   file is deleted later). Storage: files live in PostgreSQL (there is no object storage), at most
+   16 MB each and 100 MB a company in all, so database size, backups and replicas grow with them;
+   watch `pg_total_relation_size('app.saved_reply_files')` and its TOAST table. The column is
+   stored uncompressed out of line (`STORAGE EXTERNAL`), so a range of a file reads only its own
+   chunks. Memory per request on the web servers: node-postgres receives `bytea` as hex text (twice
+   the bytes) and decodes it into a buffer, so reading a whole 16 MB file holds about 48 MB at its
+   peak; that happens when a supervisor attaches a file (the posted body, up to 16 MB, plus the
+   insert's hex text), when a member sends one (read, then uploaded to Meta from the same buffer),
+   when an export writes one (plus its base64 text, about 21 MB) and when a preview is opened
+   without a Range header. A Range request (what browsers' media players send) reads only its part.
+   Nothing bounds how many such requests run at once beyond the web server's own concurrency, so
+   size web memory for a few at a time. A company's export carries each file as base64 (about a
+   third larger than the file), two files a page. Rolling an image
    back leaves the tables and grants in place; the older release ignores them, and the files stay
    until a release with ADR-411 deletes their replies or the company is deleted.
 

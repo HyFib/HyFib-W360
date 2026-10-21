@@ -188,20 +188,70 @@ describe('the files saved replies carry (ADR-411)', () => {
       'SELECT id FROM app.memberships WHERE tenant_id = $1 AND user_id = $2',
       [c.tenant.id, c.owner.id],
     );
+    // Each filler is a reply's file, as the service would have stored it: a file no reply names
+    // would be deleted before the next one is stored, and count for nothing.
+    const fillers: { replyId: string; fileId: string }[] = [];
     for (let i = 0; i < Math.floor(SAVED_REPLY_FILES_MAX_TOTAL_BYTES / big); i += 1) {
+      const replyId = await addReply(owner, `filler-${i}`, 'Brochure');
+      const fileId = uuidv7();
       await fx.query(
         `INSERT INTO app.saved_reply_files (id, tenant_id, kind, mime_type, filename, size_bytes,
            sha256, content, created_by_membership_id)
          SELECT $1, $2, 'document', 'application/pdf', $3, $4,
                 encode(sha256(convert_to(repeat('z', $4), 'UTF8')), 'hex'),
                 convert_to(repeat('z', $4), 'UTF8'), $5`,
-        [uuidv7(), c.tenant.id, `filler-${i}.pdf`, big - i, member!.id],
+        [fileId, c.tenant.id, `filler-${i}.pdf`, big - i, member!.id],
       );
+      await fx.query(
+        `INSERT INTO app.saved_reply_attachments (id, tenant_id, saved_reply_id, file_id,
+           attached_by_membership_id) VALUES ($1, $2, $3, $4, $5)`,
+        [uuidv7(), c.tenant.id, replyId, fileId, member!.id],
+      );
+      fillers.push({ replyId, fileId });
     }
+    const total = async () =>
+      Number(
+        (
+          await fx.query<{ bytes: string }>(
+            'SELECT coalesce(sum(size_bytes), 0)::text AS bytes FROM app.saved_reply_files WHERE tenant_id = $1',
+            [c.tenant.id],
+          )
+        )[0]!.bytes,
+      );
+    const room = SAVED_REPLY_FILES_MAX_TOTAL_BYTES - (await total());
+    expect(room).toBeGreaterThan(0);
+    expect(room).toBeLessThan(8 * 1024 * 1024);
     const third = await addReply(owner, 'third', 'Menu');
+    const fourth = await addReply(owner, 'fourth', 'Menu again');
+    const fifth = await addReply(owner, 'fifth', 'Another menu');
+    // Past the limit: refused, nothing stored.
     await expect(
       replies().attachSavedReplyFile(owner, third, png('c', 8 * 1024 * 1024)),
     ).rejects.toMatchObject({ code: 'conflict' });
+    expect(await total()).toBe(SAVED_REPLY_FILES_MAX_TOTAL_BYTES - room);
+    // Exactly to the limit: allowed.
+    await replies().attachSavedReplyFile(owner, third, png('exact', room));
+    expect(await total()).toBe(SAVED_REPLY_FILES_MAX_TOTAL_BYTES);
+    // The same file for another reply is shared and counts once, so it fits at the limit.
+    await replies().attachSavedReplyFile(owner, fourth, png('exact', room));
+    expect(await total()).toBe(SAVED_REPLY_FILES_MAX_TOTAL_BYTES);
+    // One byte of a new file does not.
+    await expect(replies().attachSavedReplyFile(owner, fifth, png('d', 1))).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    // Replacing a file only its reply has frees it: 16 MB out, 8 MB in.
+    await replies().attachSavedReplyFile(owner, fillers[0]!.replyId, png('e', 8 * 1024 * 1024));
+    expect(
+      await fx.query('SELECT id FROM app.saved_reply_files WHERE id = $1', [fillers[0]!.fileId]),
+    ).toEqual([]);
+    expect(await total()).toBe(SAVED_REPLY_FILES_MAX_TOTAL_BYTES - big + 8 * 1024 * 1024);
+    // Replacing a file another reply still has frees nothing: the third reply's shared file stays,
+    // so 8 MB and a byte more no longer fit.
+    await expect(
+      replies().attachSavedReplyFile(owner, third, png('f', 8 * 1024 * 1024 + 1)),
+    ).rejects.toMatchObject({ code: 'conflict' });
+    await replies().attachSavedReplyFile(owner, third, png('g', 8 * 1024 * 1024));
+    expect(await total()).toBe(SAVED_REPLY_FILES_MAX_TOTAL_BYTES);
   });
 
   it('refuses in the database what the service never writes: bytes that do not match, other types, another company’s rows', async () => {
@@ -424,8 +474,50 @@ describe('the files saved replies carry (ADR-411)', () => {
     await expect(
       apiUpdateSavedReply({ db: fx.dbs.app }, key, reply, { body: 'z'.repeat(1025) }),
     ).rejects.toMatchObject({ code: 'validation_failed' });
+    // A text an older server stored past 1,024 characters with the photo still lets the title
+    // change; only a change of the text is refused.
+    await fx.query('UPDATE app.saved_replies SET body = $2 WHERE id = $1', [
+      reply,
+      'w'.repeat(1500),
+    ]);
+    expect(
+      (await apiUpdateSavedReply({ db: fx.dbs.app }, key, reply, { title: 'Prices again' })).title,
+    ).toBe('Prices again');
     await apiDeleteSavedReply({ db: fx.dbs.app }, key, reply);
     expect(await storedFiles(c.tenant.id)).toEqual([]);
+  });
+
+  it('reads only the part of a file a Range request asks for, from the database', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reply = await addReply(owner, 'clip');
+    const bytes = new Uint8Array(randomBytes(4096));
+    const file = await replies().attachSavedReplyFile(owner, reply, {
+      name: 'clip.mp4',
+      type: 'video/mp4',
+      bytes,
+    });
+    const part = await replies().openSavedReplyFile(owner, file.fileId, (size) => {
+      expect(size).toBe(4096);
+      return { kind: 'part', start: 1000, end: 2999 };
+    });
+    expect(part?.part).toEqual({ kind: 'part', start: 1000, end: 2999 });
+    expect(Buffer.from(part!.content)).toEqual(Buffer.from(bytes.subarray(1000, 3000)));
+    const last = await replies().openSavedReplyFile(owner, file.fileId, () => ({
+      kind: 'part',
+      start: 4095,
+      end: 4095,
+    }));
+    expect(Buffer.from(last!.content)).toEqual(Buffer.from(bytes.subarray(4095)));
+    const whole = await replies().openSavedReplyFile(owner, file.fileId);
+    expect(Buffer.from(whole!.content)).toEqual(Buffer.from(bytes));
+    // Stored uncompressed out of line, so a slice reads only its own chunks.
+    expect(
+      await fx.query(
+        `SELECT attstorage FROM pg_attribute
+          WHERE attrelid = 'app.saved_reply_files'::regclass AND attname = 'content'`,
+      ),
+    ).toEqual([{ attstorage: 'e' }]);
   });
 
   it('deletes the files an older server left without a reply before storing another', async () => {

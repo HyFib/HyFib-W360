@@ -7,7 +7,7 @@ import { FileSender } from './file-sender';
 /**
  * The reply box and, while a reply can be sent, the "Send a file" card. They share one thing: a
  * saved reply's file the member inserts from the reply box goes to the card (ADR-411), where the
- * member reviews it and sends it, or removes it. Each insertion starts the card afresh.
+ * member reviews it and sends it, or removes it. A file is inserted only into an empty card.
  */
 export function ReplyTools({
   slug,
@@ -28,8 +28,10 @@ export function ReplyTools({
 }) {
   const [inserted, setInserted] = useState<ComposerInsertedFile | null>(null);
   // A new key for each insertion starts the card afresh; clearing it keeps the card (and its
-  // "File sent.").
+  // "File sent."). The composer inserts a file only while the card holds no file or caption, so
+  // starting afresh never discards what the member chose.
   const [insertions, setInsertions] = useState(0);
+  const [cardInUse, setCardInUse] = useState(false);
   return (
     <>
       <Composer
@@ -40,6 +42,7 @@ export function ReplyTools({
         savedReplies={savedReplies}
         {...(latestMessageId ? { latestMessageId } : {})}
         typingIndicator={typingIndicator}
+        fileCardInUse={cardInUse}
         {...(disabledReason === null
           ? {
               onInsertFile: (file: ComposerInsertedFile) => {
@@ -62,6 +65,7 @@ export function ReplyTools({
               {...(latestMessageId ? { latestMessageId } : {})}
               inserted={inserted}
               onClearInserted={() => setInserted(null)}
+              onContentChange={setCardInUse}
             />
           </CardContent>
         </Card>

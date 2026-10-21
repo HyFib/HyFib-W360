@@ -281,7 +281,8 @@ export function createFileRepliesService(deps: FileRepliesDeps) {
         return {
           name: row.filename,
           type: row.mimeType,
-          bytes: new Uint8Array(row.content) as Uint8Array<ArrayBuffer>,
+          // The driver's bytes, not copied again (a 16 MB file is already read twice over).
+          bytes: row.content as Uint8Array<ArrayBuffer>,
         };
       });
     },

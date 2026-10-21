@@ -73,6 +73,16 @@ export function mapDatabaseError(error: unknown): unknown {
   }
 }
 
+/**
+ * True when the error is a foreign key violation on the given constraint: a row the statement
+ * names was deleted meanwhile, for example by a writer that does not take the lock the service
+ * takes (a server of an earlier release).
+ */
+export function isForeignKeyViolation(error: unknown, constraint: string): boolean {
+  const pgError = findPgError(error);
+  return pgError?.code === '23503' && pgError.constraint === constraint;
+}
+
 /** True when the error is a unique violation on the given constraint/index name. */
 export function isUniqueViolation(error: unknown, constraint?: string): boolean {
   const pgError = findPgError(error);

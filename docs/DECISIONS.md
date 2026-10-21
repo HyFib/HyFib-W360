@@ -18238,14 +18238,23 @@ id)`, composite foreign keys to the company's replies (cascade), files and membe
   the composer and the file card together, gives the card the file (a preview for a photo, a link
   otherwise) with the text, placeholders filled, as its caption (cut to 1,024 characters with a
   notice if the filled text is longer). Nothing is sent: the member reviews it and presses Send
-  file, or removes it. The card posts `savedReplyId` and `savedReplyFileId` in place of a file;
+  file, or removes it. A file is inserted only into an empty card: when the card already holds a
+  file or a caption the member chose, the reply is not inserted and the member is told, so nothing
+  they chose is discarded. The card posts `savedReplyId` and `savedReplyFileId` in place of a file;
   `queueSavedReplyFileReply` reads the bytes only while that reply still carries that very file
   (otherwise 409: insert it again) and sends them through `queueFileReply`'s own path: the reply's
   checks (window, number, the collision warning), the upload to Meta for the conversation's number,
   the queued reply and its retry key. Each send uploads the file again.
 - **Preview route:** `/c/<company>/settings/saved-replies/files/<id>` gives a file to members who
   reply or supervise, with `FILE_POLICY` (proxy.ts's `FILE_ROUTE` now matches it), `nosniff`, no
-  caching, and only photos, recordings and videos inline (`mediaPresentation`).
+  caching, and only photos, recordings and videos inline (`mediaPresentation`). It answers a single
+  byte range (ADR-382's `byteRange`, 206 or 416) as media players ask, reading only that part from
+  the database (`substring` on the column); the column is stored uncompressed out of line
+  (`STORAGE EXTERNAL` in 0321), so a slice reads only its own TOAST chunks. The files are mostly
+  compressed formats already, so little is lost; a plain-text document loses its compression,
+  within the 16 MB and 100 MB bounds. Bytes are passed on as the driver decoded them, without
+  another copy; a whole 16 MB file still holds about 48 MB on the web server at its peak (the
+  driver's hex text and the decoded buffer), which DEPLOYMENT states.
 - **API (additive, P5-08):** each saved reply carries `attachment` (its id, `type`, MIME type,
   name, size and `caption`, whether the text goes as its caption) or null; never the content, a
   storage key or a link. Keys cannot add or remove files; `PATCH` keeps the file and refuses a text
@@ -18257,8 +18266,23 @@ id)`, composite foreign keys to the company's replies (cascade), files and membe
 Not built: automations (keyword or routing) drawing on saved replies or their files, templates or
 bots stored as reply material (the rest of W-087), keys adding or removing files, more than one
 file per reply, stickers, files over 16 MB, object storage (and with it moving these bytes out of
-PostgreSQL), reusing one upload to Meta for repeated sends of the same file, and any verification
-against Meta (the Graph stand-in only).
+PostgreSQL), reusing one upload to Meta for repeated sends of the same file, a bound on how many
+whole-file reads run at once, and any verification against Meta (the Graph stand-in only).
+
+Review (before merge): an independent review found the design safe and no further problem in
+research M-202. One High issue: the integration test of the company's 100 MB total inserted its
+filler files without replies, so the sweep of files no reply names deleted them and the test could
+not pass; the fillers now belong to replies, and the test also checks the limit exactly, a shared
+file counted once, and a replaced file freed only when unshared. One Medium issue: the preview read
+and copied whole files and ignored Range requests, which media players need (Safari often will not
+play a video without them); it now answers ranges reading only the part, the column is stored
+uncompressed, the extra copies are gone on the preview and send paths, and DEPLOYMENT states the
+per-request memory. Lows: DEPLOYMENT implied a switch for offering files (none exists; reworded);
+a change of only the title or shortcut was refused when an older server had stored a long text
+with a photo (the caption limit is now checked only when the text changes); a reply deleted by an
+older server during an attach was a server error (now not found, from the foreign key's
+violation); and inserting a reply replaced a file or caption the member had already put in the
+card (now refused with a message). All were fixed.
 
 ## ADR-412 Call-to-action URL buttons and taking reactions back: not built, no source (P5-08) (2026-10-21)
 

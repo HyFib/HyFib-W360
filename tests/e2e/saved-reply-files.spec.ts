@@ -65,6 +65,16 @@ test('a saved reply with a photo is attached in the conversation, reviewed and s
   // Inserting the reply attaches its photo, with the text as the caption; nothing is sent yet.
   const saved = page.getByLabel('Insert a saved reply');
   await expect(saved).toBeEnabled();
+  // A caption the member already wrote in Send a file is never discarded: nothing is inserted.
+  const caption = page.getByLabel(/^Caption/);
+  await caption.fill('My own caption');
+  await saved.selectOption({ label: '/prices · Price list (with a photo)' });
+  await expect(
+    page.getByText(/already holds a file or a caption, so “Price list” was not/),
+  ).toBeVisible();
+  await expect(caption).toHaveValue('My own caption');
+  await expect(page.getByTestId('inserted-file')).toHaveCount(0);
+  await caption.fill('');
   await saved.selectOption({ label: '/prices · Price list (with a photo)' });
   const inserted = page.getByTestId('inserted-file');
   await expect(inserted).toContainText('from the saved reply “Price list”: prices.png');

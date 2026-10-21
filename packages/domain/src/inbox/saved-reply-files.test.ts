@@ -20,6 +20,7 @@ import { EXPORT_TABLES } from '../tenancy/export-spec';
 import { exportRow } from '../tenancy/export';
 import {
   createSavedRepliesService,
+  savedReplyGoneError,
   writeDeleteSavedReply,
   writeUpdateSavedReply,
 } from './saved-replies';
@@ -29,6 +30,7 @@ import {
   checkSavedReplyText,
   deleteUnusedSavedReplyFiles,
   readableSavedReplyFile,
+  savedReplyFileContent,
   savedReplyTextLimit,
   takesCaption,
   writeAttachSavedReplyFile,
@@ -108,6 +110,16 @@ function recorder(answers: unknown[][]) {
         return Promise.resolve();
       },
     }),
+    update: () => ({
+      set: () => ({
+        where: () => ({
+          returning: () => {
+            steps.push(['update']);
+            return Promise.resolve(next());
+          },
+        }),
+      }),
+    }),
     delete: () => ({
       where: () => ({
         // Awaited without `returning`: a plain delete.
@@ -173,7 +185,7 @@ describe('what a saved reply’s text may be with a file (ADR-411)', () => {
   });
 
   it('refuses a change of the text that the reply’s photo cannot carry, before writing', async () => {
-    const tx = recorder([[{ fileId: OLD_FILE, kind: 'image' }]]);
+    const tx = recorder([[{ fileId: OLD_FILE, kind: 'image' }], [{ body: 'Short' }]]);
     expect(
       (
         await refusal(
@@ -187,7 +199,32 @@ describe('what a saved reply’s text may be with a file (ADR-411)', () => {
         )
       )[2],
     ).toEqual(['body']);
-    expect(tx.steps).toEqual([['lock', [`saved-replies:${TENANT}`]], ['join']]);
+    expect(tx.steps).toEqual([['lock', [`saved-replies:${TENANT}`]], ['join'], ['read']]);
+  });
+
+  it('lets the title change on a reply whose long text an older server stored with its photo', async () => {
+    const long = 'x'.repeat(1025);
+    const tx = recorder([[{ fileId: OLD_FILE, kind: 'image' }], [{ body: long }], [{ id: REPLY }]]);
+    expect(
+      await writeUpdateSavedReply(
+        tx.tx,
+        TENANT,
+        REPLY,
+        { shortcut: 'hi', title: 'Renamed', body: long },
+        { membershipId: MEMBER },
+      ),
+    ).toBe(true);
+    expect(tx.steps.map((s) => s[0])).toEqual(['lock', 'join', 'read', 'update']);
+    // Within the limit, the stored text is not read again.
+    const short = recorder([[{ fileId: OLD_FILE, kind: 'image' }], [{ id: REPLY }]]);
+    await writeUpdateSavedReply(
+      short.tx,
+      TENANT,
+      REPLY,
+      { shortcut: 'hi', title: 'Hi', body: 'Short' },
+      { membershipId: MEMBER },
+    );
+    expect(short.steps.map((s) => s[0])).toEqual(['lock', 'join', 'update']);
   });
 });
 
@@ -422,6 +459,49 @@ describe('giving a saved reply a file (ADR-411)', () => {
       'delete returning',
     ]);
     expect(tx.unread()).toBe(0);
+  });
+
+  it('reads only the part of a file a Range request asks for, and nothing for a part past its end', async () => {
+    const meta = { filename: 'clip.mp4', mimeType: 'video/mp4', sizeBytes: 10 };
+    const sizes: number[] = [];
+    const part = recorder([[meta], [{ content: Buffer.from('2345') }]]);
+    expect(
+      await savedReplyFileContent(part.tx, TENANT, OLD_FILE, (size) => {
+        sizes.push(size);
+        return { kind: 'part', start: 2, end: 5 };
+      }),
+    ).toEqual({ ...meta, part: { kind: 'part', start: 2, end: 5 }, content: Buffer.from('2345') });
+    expect(sizes).toEqual([10]);
+    expect(part.steps).toEqual([['read'], ['read']]);
+    const past = recorder([[meta]]);
+    expect(
+      (await savedReplyFileContent(past.tx, TENANT, OLD_FILE, () => ({ kind: 'unsatisfiable' })))
+        ?.content.byteLength,
+    ).toBe(0);
+    expect(past.steps).toEqual([['read']]);
+    const whole = recorder([[meta], [{ content: new Uint8Array(10) }]]);
+    expect((await savedReplyFileContent(whole.tx, TENANT, OLD_FILE))?.part).toEqual({
+      kind: 'whole',
+    });
+    expect(await savedReplyFileContent(recorder([[]]).tx, TENANT, OLD_FILE)).toBeNull();
+  });
+
+  it('answers a reply deleted during an attach (an older server’s delete) as not found', () => {
+    const gone = Object.assign(new Error('insert or update violates foreign key constraint'), {
+      code: '23503',
+      constraint: 'saved_reply_attachments_reply_fk',
+    });
+    expect(savedReplyGoneError(gone)).toMatchObject({ code: 'not_found' });
+    const other = Object.assign(new Error('fk'), {
+      code: '23503',
+      constraint: 'saved_reply_attachments_file_fk',
+    });
+    expect(savedReplyGoneError(other)).toBe(other);
+    const unique = Object.assign(new Error('dup'), {
+      code: '23505',
+      constraint: 'saved_reply_attachments_reply_fk',
+    });
+    expect(savedReplyGoneError(unique)).toBe(unique);
   });
 
   it('deletes unused files only when given some, each once', async () => {
@@ -724,5 +804,8 @@ describe('saved replies’ files in the API, the export and the database (ADR-41
     expect(migration).toContain("(125, ARRAY['app.saved_reply_attachments']::regclass[], 'batch')");
     expect(migration).toContain("(126, ARRAY['app.saved_reply_files']::regclass[], 'batch')");
     expect(migration).not.toMatch(/GRANT UPDATE/);
+    expect(migration).toContain(
+      'ALTER TABLE app.saved_reply_files ALTER COLUMN content SET STORAGE EXTERNAL;',
+    );
   });
 });

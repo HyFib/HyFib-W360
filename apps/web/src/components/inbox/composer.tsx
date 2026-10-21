@@ -81,6 +81,7 @@ export function Composer({
   latestMessageId,
   typingIndicator = false,
   onInsertFile,
+  fileCardInUse = false,
 }: {
   slug: string;
   conversationId: string;
@@ -92,6 +93,8 @@ export function Composer({
   typingIndicator?: boolean;
   /** Gives the file card a saved reply's file; without it, replies with files are not offered. */
   onInsertFile?: (file: ComposerInsertedFile) => void;
+  /** The file card holds a file or a caption already, which an insertion must not discard. */
+  fileCardInUse?: boolean;
 }) {
   const router = useRouter();
   const id = useId();
@@ -185,6 +188,13 @@ export function Composer({
         chosen.missing.includes('name')
           ? `Inserted “${chosen.title}”. This customer has no name on file, so {{name}} was left empty: check the text.`
           : `Inserted “${chosen.title}”. Review it before sending.`,
+      );
+      return;
+    }
+    if (fileCardInUse) {
+      setNotice(null);
+      setError(
+        `Send a file below already holds a file or a caption, so “${chosen.title}” was not inserted. Send it or clear it first.`,
       );
       return;
     }

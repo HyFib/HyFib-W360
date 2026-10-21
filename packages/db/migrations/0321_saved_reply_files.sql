@@ -52,6 +52,12 @@ CREATE TABLE app.saved_reply_files (
   CONSTRAINT saved_reply_files_created_by_fk FOREIGN KEY (tenant_id, created_by_membership_id)
     REFERENCES app.memberships (tenant_id, id)
 );
+-- Stored out of line and uncompressed: the preview answers a media player's Range requests with
+-- `substring(content from … for …)`, which then reads only the TOAST chunks of that part instead of
+-- decompressing the whole value. The files are mostly photos, videos, recordings, PDFs and Office
+-- files, which are compressed already (pglz would save little and cost CPU on every insert); a
+-- plain-text document loses its compression, bounded by the 16 MB and 100 MB limits.
+ALTER TABLE app.saved_reply_files ALTER COLUMN content SET STORAGE EXTERNAL;
 SELECT ops.apply_tenant_rls('app.saved_reply_files');
 -- Inserted whole and deleted, never updated. `content` is read to send, preview and export a file.
 GRANT SELECT, INSERT, DELETE ON app.saved_reply_files TO w360_app;

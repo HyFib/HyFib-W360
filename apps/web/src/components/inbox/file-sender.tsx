@@ -1,5 +1,5 @@
 'use client';
-import { useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Field, Input, Textarea } from '@w360/ui';
 import { ClientButton, ClientForm } from '@/components/client-form';
@@ -65,12 +65,15 @@ export function FileSender({
   latestMessageId,
   inserted = null,
   onClearInserted,
+  onContentChange,
 }: {
   slug: string;
   conversationId: string;
   latestMessageId?: string;
   inserted?: InsertedSavedReplyFile | null;
   onClearInserted?: () => void;
+  /** Told whether the card holds a file or a caption, so an insertion never discards them. */
+  onContentChange?: (inUse: boolean) => void;
 }) {
   const p = useId();
   const router = useRouter();
@@ -78,6 +81,10 @@ export function FileSender({
   const [picker, setPicker] = useState(0);
   const [file, setFile] = useState<File | null>(null);
   const [caption, setCaption] = useState(inserted?.caption ?? '');
+  const inUse = file !== null || inserted !== null || caption.trim() !== '';
+  useEffect(() => {
+    onContentChange?.(inUse);
+  }, [inUse, onContentChange]);
   const [key, setKey] = useState(clientKey);
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState<string | null>(null);

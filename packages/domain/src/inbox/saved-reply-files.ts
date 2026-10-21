@@ -378,19 +378,53 @@ export async function readableSavedReplyFile(
   return { ...view, readable: readable === true && REPLY_FILE_TYPES[view.mimeType] === view.kind };
 }
 
-/** A stored file with its bytes, for showing it to members (preview); null when there is none. */
+/** The part of a file a request asks for, decided from the file's size (`byteRange`). */
+export type SavedReplyFilePart =
+  { kind: 'whole' } | { kind: 'part'; start: number; end: number } | { kind: 'unsatisfiable' };
+
+/** A stored file, or the part of it asked for, to show members (preview). */
+export interface SavedReplyFileRead {
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  part: SavedReplyFilePart;
+  /** The bytes asked for (all of them, the part, or none), as the driver read them. */
+  content: Uint8Array;
+}
+
+/**
+ * A stored file for showing it to members, or only the part a Range request asks for (ADR-411):
+ * the size is read first, then `choose` decides the part, and only that part's bytes are read
+ * (`substring` on the column, which is stored uncompressed so a slice reads only its own chunks).
+ * Null when there is no such file.
+ */
 export async function savedReplyFileContent(
   tx: Tx,
   tenantId: string,
   fileId: string,
-): Promise<{ filename: string; mimeType: string; content: Uint8Array } | null> {
-  const [row] = await tx
+  choose: (sizeBytes: number) => SavedReplyFilePart = () => ({ kind: 'whole' }),
+): Promise<SavedReplyFileRead | null> {
+  const where = and(eq(savedReplyFiles.tenantId, tenantId), eq(savedReplyFiles.id, fileId));
+  const [meta] = await tx
     .select({
       filename: savedReplyFiles.filename,
       mimeType: savedReplyFiles.mimeType,
-      content: savedReplyFiles.content,
+      sizeBytes: savedReplyFiles.sizeBytes,
     })
     .from(savedReplyFiles)
-    .where(and(eq(savedReplyFiles.tenantId, tenantId), eq(savedReplyFiles.id, fileId)));
-  return row ?? null;
+    .where(where);
+  if (!meta) return null;
+  const part = choose(meta.sizeBytes);
+  if (part.kind === 'unsatisfiable') return { ...meta, part, content: new Uint8Array(0) };
+  const [row] = await tx
+    .select({
+      content:
+        part.kind === 'part'
+          ? sql<Uint8Array>`substring(${savedReplyFiles.content} from ${part.start + 1}::int for ${part.end - part.start + 1}::int)`
+          : savedReplyFiles.content,
+    })
+    .from(savedReplyFiles)
+    .where(where);
+  if (!row) return null;
+  return { ...meta, part, content: row.content };
 }

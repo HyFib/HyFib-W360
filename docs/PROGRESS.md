@@ -33,7 +33,8 @@ coupon copy-code button, and Meta's sample app shows one only inside a limited-t
   only while the reply still carries that file, through `queueFileReply`'s path (window, number,
   collision warning, Meta upload). Members who reply but do not manage saved replies use them.
 - **Preview route:** `/c/<company>/settings/saved-replies/files/<id>` for members who reply or
-  supervise, under `FILE_POLICY` (`FILE_ROUTE` extended).
+  supervise, under `FILE_POLICY` (`FILE_ROUTE` extended), answering single byte ranges by
+  reading only that part.
 - **API (additive):** each saved reply carries `attachment` (id, type, MIME type, name, size,
   `caption`) or null; never content or a storage location. `PATCH` keeps the file and refuses a
   text over 1,024 characters with a captioned file; `DELETE` deletes an unshared file. OpenAPI
@@ -47,43 +48,68 @@ coupon copy-code button, and Meta's sample app shows one only inside a limited-t
 
 ### Tests
 
-- Unit: `inbox/saved-reply-files.test.ts` (new, 22 tests: caption limits for each kind, the
-  update's and the attach's refusals before writing, the file checks before the lock, storing
+- Unit: `inbox/saved-reply-files.test.ts` (new, 25 tests: caption limits for each kind, the
+  update's and the attach's refusals before writing, a title change allowed over a stored long
+  text, ranged reads (part, past the end, whole), a reply deleted during an attach answered as not
+  found, the file checks before the lock, storing
   with SHA-256 and cleaned name, sharing, an unchanged re-attach, the 100 MB total at and past the
   limit with a replaced file freed only when unshared, removal and deletion of a reply's file, the
   orphan sweep, unreadable files, the permission split for managing, inserting, previewing and
   sending, the send schema, the API's attachment and description, the export's base64 and paging,
-  migration 0321 against `REPLY_FILE_TYPES`); `api/saved-replies.test.ts` (lock order, the file's
+  migration 0321 against `REPLY_FILE_TYPES` and its `STORAGE EXTERNAL`); `api/saved-replies.test.ts` (lock order, the file's
   read in every write, `attachment` in answers); `lib/document-routes.test.ts` (the preview route's
   policy).
 - Integration (CI only): `saved-reply-files.test.ts` (sharing, replacing and deleting with the last
-  reply; caption limits both ways and the company's total; database checks, composite foreign keys,
+  reply; caption limits both ways; the company's 100 MB total with filler files that belong to
+  replies: refused past it, allowed exactly at it, a shared file counted once, a replaced file
+  freed only when unshared; ranged reads of the stored bytes and the column's storage; a title
+  change through the API over a stored long text; database checks, composite foreign keys,
   RLS across companies and no `UPDATE`; the permission split; a send through the Graph stand-in and
   a refused send after the file changed; the API's details, `PATCH` and `DELETE`; an older server's
   orphan swept; two concurrent attaches and a delete racing a replace) and `company-data.test.ts`
   (the export carries the file as base64; the deletion deletes both tables).
 - E2E (CI only): `saved-reply-files.spec.ts`: a supervisor attaches a photo in Settings, the reply
-  is inserted in a conversation (preview and caption shown, nothing sent), sent through the Graph
+  is refused while Send a file holds the member's own caption (kept), then inserted in a
+  conversation (preview and caption shown, nothing sent), sent through the Graph
   stand-in as an image with its caption, and shown in the thread.
-- Hand mutation of 30 rules, bounds and checks: 28 caught by the unit tests (26 at first; tests for
-  deleting a reply's file and for the API's create answer were added for the other two). The 2
-  others need the database and are exercised by named integration tests that did not run here: the
-  unused-file deletion's `NOT EXISTS` ("stores a file once, shares it between replies and deletes
-  it with the last reply that has it", and the concurrency test) and the send's condition on the
-  inserted file ("sends an inserted file through the inbox’s file path, and refuses one changed
-  since").
+- Hand mutation of 37 rules, bounds and checks (30 first, 7 after the review): 33 caught by the
+  unit tests (26 at first; tests for deleting a reply's file and for the API's create answer were
+  added for two more; after the review, 5 of the 7 new ones, and the two rewritten update
+  mutations still caught). The 4 others are exercised only by named tests that did not run here:
+  the unused-file deletion's `NOT EXISTS` ("stores a file once, shares it between replies and
+  deletes it with the last reply that has it", and the concurrency test), the send's condition on
+  the inserted file ("sends an inserted file through the inbox’s file path, and refuses one changed
+  since"), the range slice's offset in SQL ("reads only the part of a file a Range request asks
+  for, from the database") and the composer keeping an occupied card (e2e "a saved reply with a
+  photo is attached in the conversation, reviewed and sent through WhatsApp"). The preview route's
+  206 and 416 answers have no automated test (the e2e's image loads it whole).
+
+### Review fixes (before merge)
+
+- **Cap test (High):** the filler files of the 100 MB test had no reply, so the sweep of files no
+  reply names deleted them and the test could not pass. They now belong to replies, and the test
+  covers the exact limit, a shared file counted once and a replaced file freed only when unshared.
+- **Memory and ranges (Medium):** the preview answers single byte ranges (206, 416), reading only
+  that part with `substring`; 0321 stores the column uncompressed out of line (`STORAGE EXTERNAL`)
+  so slices read only their chunks; the extra copies on the preview and send paths are gone;
+  DEPLOYMENT states the per-request memory (about 48 MB for a whole 16 MB file).
+- **Lows:** DEPLOYMENT no longer implies a switch for offering files; the caption limit is checked
+  only when the text changes, so a title change works over a long text an older server stored; a
+  reply deleted by an older server during an attach answers not found (`isForeignKeyViolation` on
+  `saved_reply_attachments_reply_fk`) instead of a server error; inserting a reply never replaces a
+  file or caption the member put in Send a file (refused with a message).
 
 ### Test commands and results (local, 2026-10-21)
 
-| Command                                                      | Result                                                                 |
-| ------------------------------------------------------------ | ---------------------------------------------------------------------- |
-| `npx eslint . --max-warnings=0`                              | clean                                                                  |
-| `prettier --check .`                                         | clean                                                                  |
-| `pnpm typecheck` (includes `tests/integration`, `tests/e2e`) | clean                                                                  |
-| `pnpm test` (unit)                                           | 2,162 of 2,162 passed (187 files)                                      |
-| `pnpm build`                                                 | passed                                                                 |
-| hand mutation of 30 rules, bounds and checks                 | 28 caught by unit tests; 2 exercised only by integration tests (above) |
-| `pnpm test:integration`, `pnpm test:e2e`                     | not run here: no local PostgreSQL or browser; CI runs them             |
+| Command                                                      | Result                                                                        |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`                              | clean                                                                         |
+| `prettier --check .`                                         | clean                                                                         |
+| `pnpm typecheck` (includes `tests/integration`, `tests/e2e`) | clean                                                                         |
+| `pnpm test` (unit, after the review fixes)                   | 2,165 of 2,165 passed (187 files)                                             |
+| `pnpm build`                                                 | passed                                                                        |
+| hand mutation of 37 rules, bounds and checks                 | 33 caught by unit tests; 4 exercised only by integration or e2e tests (above) |
+| `pnpm test:integration`, `pnpm test:e2e`                     | not run here: no local PostgreSQL or browser; CI runs them                    |
 
 ## 2026-10-21 — Automations started by replies to a campaign (P4-01, ADR-414)
 

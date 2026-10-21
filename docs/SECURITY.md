@@ -1433,7 +1433,7 @@ Phase 5 rules (Public API, P5-08):
   sent only while that reply still carries that very file, through the inbox's file path and its
   checks (window, number, collision). Both `inbox.reply` and `inbox.supervise` open a file at
   `/c/<company>/settings/saved-replies/files/<id>` (`FILE_POLICY`, `nosniff`, no caching, only
-  photos, recordings and videos shown inline). The tables are tenant tables with forced row
+  photos, recordings and videos shown inline, a single byte range answered by reading only that part). The tables are tenant tables with forced row
   security, composite foreign keys (an attachment names its company's reply, file and member), the
   runtime role holding `SELECT`, `INSERT` and `DELETE` only (a stored file is never changed), and
   checks of each file's type pair, size (1 byte to 16 MB), name and SHA-256 against its bytes.
