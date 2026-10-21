@@ -3467,7 +3467,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   and cancel a staff deletion.
 - **Step-up:** exporting and asking for the deletion need a sign-in within the last 15 minutes
   (ADR-056).
-- **Not built yet:** stored exports and other formats.
+- **Stored exports (ADR-415):** an owner with a recent sign-in asks; the `company.export` worker
+  job writes the streamed export's lines from one read-only snapshot, gzip-compressed, into
+  `app.company_export_parts` in 1 MiB parts each sealed with the keyring (at most 512 MiB, one ready
+  file per company, kept 7 days, deleted by the minute billing sweep); owners and administrators
+  are emailed a link to the page; owners download it through the app, each part opened and checked
+  as it is read. One export of a company is read at a time (the export lock), and one stored export
+  waits or is written at a time (a unique index); a crashed run's lease runs out and the next run
+  takes over, fenced by its attempt number.
+- **Not built yet:** other formats and object storage.
 
 ## 7. Commercial model and billing **[built: plans and entitlements, paying for plans by Razorpay subscription, wallet, top-ups, auto-recharge, statements and receipts, usage and rates, staff refunds of unused credit, daily settlement reconciliation — verified against a local Razorpay stand-in only; tax invoices planned]**
 

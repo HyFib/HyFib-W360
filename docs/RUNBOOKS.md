@@ -4956,6 +4956,33 @@ after the download started is logged by the web as `company export stopped` (wit
 Large companies stream for as long as the read takes; `idle_in_transaction_session_timeout` (60 s)
 ends an export whose reader stops reading for a minute.
 
+**Stored exports (ADR-415).** An owner asks in Settings → Company data; the `company.export` job
+prepares the file (`stored export ready` in the worker log, with its bytes, parts and attempt) and
+owners and administrators get "Company data export ready". The page lists the last 10 with their
+status. A stored export waiting or being written makes the streamed export answer 409 ("being
+prepared"), and a streamed export running makes asking answer 409; that is by design (one export
+of a company at a time).
+
+- _Stuck "Waiting to start"._ The job found the export lock taken (`stored export` with outcome
+  `locked`) or was lost; the minute billing sweep signals every waiting export again
+  (`stored exports swept`). After 24 hours waiting it fails as `timed_out`. If nothing moves, check
+  the `company.export` queue (section 3).
+- _Stuck "Being prepared"._ A run renews its 5-minute lease with every part and at least every
+  minute. A crashed run's lease runs out and the sweep's signal starts a new run (attempt + 1) that
+  starts the file again; the fourth start fails it as `interrupted`.
+- _Failed._ The page and the owners' email say why: `too_large` (past 512 MiB compressed: the
+  company uses the streamed export), `requester_not_allowed` (the owner who asked is no longer one),
+  `interrupted`, `timed_out`, or `error` (the worker logged `stored export failed` with the error;
+  `failure_code` holds a database error's SQLSTATE). The owner can ask again at once.
+- _A download stops._ The web logs `stored export download stopped` (company and export ids). A
+  part missing (the export expired or a newer one replaced it meanwhile) or failing its check stops
+  the download; the page's SHA-256 tells a complete file. A part that does not open with any
+  configured key means a key was removed while parts still used it: section 13 removes a key only
+  when the console counts nothing sealed with it, parts included.
+- _Space._ `SELECT pg_size_pretty(pg_total_relation_size('app.company_export_parts'))`. Each company
+  holds at most one ready file of 512 MiB compressed (about 700 MB sealed); expired ones are deleted
+  every minute.
+
 **A deletion is scheduled.** The company is `pending_deletion` until `due_at` (14 days) and works as
 suspended. Any owner cancels in Settings → Company data until the run starts; after that the page
 says it can no longer be cancelled. The register is `ops.tenant_deletions` (the company's platform
@@ -4998,6 +5025,10 @@ grants and security events stay. Meta events for its numbers are quarantined as 
 
 **Migration 0028 failed.** It runs in one transaction and needs the bootstrap roles; fix the cause
 and run the migrations again.
+
+**Migration 0325 failed.** It creates two new tables and two functions and replaces
+`ops.sealed_value_keys` in one transaction (dropped as `w360_definer`, as in 0288); a failure rolls
+it all back. Fix the cause (usually the bootstrap roles) and run the migrations again.
 
 **Migration 0067 failed.** It adds columns to `ops.tenant_deletions` (existing rows become owners'
 deletions; nothing is rewritten), replaces `app.cancel_tenant_deletion` (dropped as `w360_definer`

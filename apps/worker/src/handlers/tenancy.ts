@@ -1,6 +1,14 @@
 import type { Job } from 'pg-boss';
 import { QUEUES } from '@w360/contracts';
-import { authorizeJob, findDueTenantDeletions, runTenantDeletion } from '@w360/domain';
+import { toError } from '@w360/core';
+import {
+  authorizeJob,
+  findDueTenantDeletions,
+  runStoredExport,
+  runTenantDeletion,
+  sweepStoredExports,
+  type StoredExportDeps,
+} from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 
 /**
@@ -87,4 +95,86 @@ export async function sweepTenantDeletions(rt: WorkerRuntime): Promise<number> {
     );
   }
   return due.length;
+}
+
+function storedExportDeps(rt: WorkerRuntime): StoredExportDeps {
+  return {
+    db: rt.db,
+    clock: rt.clock,
+    keyring: rt.keyring,
+    jobs: rt.jobs,
+    signer: rt.signer,
+    appBaseUrl: rt.config.APP_BASE_URL,
+  };
+}
+
+/**
+ * `company.export`: one run of a stored company export (ADR-415). The company comes from the
+ * verified envelope and the export from its row in that company; the run decides whether to start,
+ * take over a crashed run or give up, and records a failure itself (its error is logged here). A
+ * company waiting for deletion or suspended still exports (ADR-055); a deleted one is rejected.
+ */
+export function companyExportHandler(rt: WorkerRuntime) {
+  return async ([job]: Job<unknown>[]): Promise<void> => {
+    if (!job) return;
+    const auth = await authorizeJob(rt, job.data, {
+      expectedKind: 'company.export',
+      requireActiveTenant: false,
+      requireActiveActor: false,
+    });
+    if (auth.outcome !== 'authorized' || !auth.scope) {
+      rt.logger.warn({ jobId: job.id, outcome: auth.outcome }, 'stored export job dropped');
+      return;
+    }
+    const exportId = auth.envelope.ref;
+    const tenantId = auth.scope.tenantId;
+    const result = await runStoredExport(storedExportDeps(rt), auth.scope, exportId);
+    if (result.outcome === 'failed') {
+      rt.logger.warn(
+        {
+          jobId: job.id,
+          tenantId,
+          exportId,
+          reason: result.reason,
+          ...(result.error ? { err: toError(result.error) } : {}),
+        },
+        'stored export failed',
+      );
+      return;
+    }
+    if (result.outcome === 'ready') {
+      rt.logger.info(
+        {
+          jobId: job.id,
+          tenantId,
+          exportId,
+          bytes: result.byteSize,
+          parts: result.partCount,
+          attempt: result.attempt,
+        },
+        'stored export ready',
+      );
+      return;
+    }
+    // missing, finished, busy (a live run holds it), locked (another export of the company is
+    // being read: the sweep signals it again) or lost_lease (another run took it over).
+    rt.logger.info({ jobId: job.id, tenantId, exportId, outcome: result.outcome }, 'stored export');
+  };
+}
+
+/** Expires stored exports and signals waiting or crashed ones (from the minute billing sweep). */
+export async function sweepCompanyExports(rt: WorkerRuntime): Promise<void> {
+  const result = await sweepStoredExports(storedExportDeps(rt));
+  for (const failure of result.failed) {
+    rt.logger.warn(
+      { tenantId: failure.tenantId, exportId: failure.exportId, err: toError(failure.error) },
+      'stored export sweep failed for an export; will retry',
+    );
+  }
+  if (result.expired + result.signalled > 0) {
+    rt.logger.info(
+      { expired: result.expired, signalled: result.signalled },
+      'stored exports swept',
+    );
+  }
 }

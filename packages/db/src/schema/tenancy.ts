@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   inet,
   integer,
@@ -140,6 +141,51 @@ export const auditEvents = appSchema.table('audit_events', {
     .notNull()
     .default(sql`'{}'::jsonb`)
     .$type<Record<string, unknown>>(),
+});
+
+/** A stored company export's status (migration 0325, ADR-415). */
+export const COMPANY_EXPORT_STATUSES = ['queued', 'running', 'ready', 'failed', 'expired'] as const;
+export type CompanyExportStatus = (typeof COMPANY_EXPORT_STATUSES)[number];
+
+/** Why a stored company export failed: codes only, never data (ADR-129). */
+export const COMPANY_EXPORT_FAILURE_REASONS = [
+  'too_large',
+  'requester_not_allowed',
+  'interrupted',
+  'timed_out',
+  'error',
+] as const;
+export type CompanyExportFailureReason = (typeof COMPANY_EXPORT_FAILURE_REASONS)[number];
+
+/** One request for a stored company export (migration 0325, ADR-415). */
+export const companyExports = appSchema.table('company_exports', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  requestedByMembershipId: uuid('requested_by_membership_id').notNull(),
+  status: text('status', { enum: COMPANY_EXPORT_STATUSES }).notNull().default('queued'),
+  attempts: smallint('attempts').notNull().default(0),
+  leaseUntil: tz('lease_until'),
+  requestedAt: tz('requested_at').notNull().defaultNow(),
+  startedAt: tz('started_at'),
+  finishedAt: tz('finished_at'),
+  expiresAt: tz('expires_at'),
+  deletedAt: tz('deleted_at'),
+  byteSize: bigint('byte_size', { mode: 'number' }),
+  sha256: text('sha256'),
+  partCount: integer('part_count'),
+  failureReason: text('failure_reason', { enum: COMPANY_EXPORT_FAILURE_REASONS }),
+  failureCode: text('failure_code'),
+});
+
+/** A part of a stored company export's file, sealed with the keyring (migration 0325). */
+export const companyExportParts = appSchema.table('company_export_parts', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  exportId: uuid('export_id').notNull(),
+  attempt: smallint('attempt').notNull(),
+  seq: integer('seq').notNull(),
+  byteSize: integer('byte_size').notNull(),
+  ciphertext: text('ciphertext').notNull(),
 });
 
 export const userPreferences = appSchema.table('user_preferences', {

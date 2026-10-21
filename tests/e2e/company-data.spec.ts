@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { gunzipSync } from 'node:zlib';
 import pg from 'pg';
@@ -86,6 +87,59 @@ test('an owner downloads the company export, schedules the deletion and cancels 
   await expect(page.getByText('This company is being deleted')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Delete the company' })).toBeVisible();
   await waitForEmail(email, 'Company deletion cancelled');
+});
+
+test('an owner asks for a stored export, the worker prepares it, and the owner downloads it', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { email, slug, name } = await newCompany(page, 'stored');
+  await page.goto(`/c/${slug}/settings/data`);
+  await expect(page.getByRole('heading', { name: 'Stored exports' })).toBeVisible();
+  await page.getByRole('button', { name: 'Prepare a stored export' }).click();
+  // Told when asked for, and again when the worker has prepared it; the email links to the page.
+  await waitForEmail(email, 'Company data export requested');
+  const readyText = await waitForEmail(email, 'Company data export ready', 90_000);
+  expect(readyText).toContain(`/c/${slug}/settings/data`);
+  expect(readyText).not.toContain('/settings/data/exports/');
+
+  await page.reload();
+  const item = page.getByTestId('stored-export').first();
+  await expect(item).toContainText('Ready');
+  await expect(item).toContainText('SHA-256');
+  await expectNoHorizontalOverflow(page);
+  const downloading = page.waitForEvent('download');
+  await item.getByRole('link', { name: 'Download the stored export' }).click();
+  const download = await downloading;
+  expect(download.suggestedFilename()).toMatch(
+    new RegExp(`^hyfib-w360-${slug}-\\d{4}-\\d{2}-\\d{2}\\.jsonl\\.gz$`),
+  );
+  const file = await readFile(await download.path());
+  const sha256 = createHash('sha256').update(file).digest('hex');
+  await expect(item).toContainText(sha256);
+  const lines = gunzipSync(file)
+    .toString('utf8')
+    .trimEnd()
+    .split('\n')
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(lines[0]).toMatchObject({ format: 'hyfib-w360-company-export', company: { slug, name } });
+  expect(lines.at(-1)).toMatchObject({ end: true });
+  await waitForEmail(email, 'Company data export downloaded');
+
+  // Someone not signed in cannot fetch it by its address.
+  const href = await item
+    .getByRole('link', { name: 'Download the stored export' })
+    .getAttribute('href');
+  expect(href).toMatch(new RegExp(`^/c/${slug}/settings/data/exports/[0-9a-f-]{36}$`));
+  const outsider = await page.context().browser()!.newContext();
+  try {
+    const response = await outsider.request.get(new URL(href!, page.url()).toString(), {
+      maxRedirects: 0,
+    });
+    expect(response.status()).not.toBe(200);
+  } finally {
+    await outsider.close();
+  }
 });
 
 test('when the deletion is due, the worker deletes the company and tells its owner', async ({

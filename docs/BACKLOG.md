@@ -1742,8 +1742,12 @@ verification, app review, Embedded Signup configuration).
   locally verified]** (ADR-090: platform owners schedule a company's deletion on its platform page
   with the address typed and a reason the owners and administrators are emailed and read in the
   company; the same 14 days and job; whoever scheduled a deletion cancels it, so owners cannot
-  cancel HyFib's and staff cannot cancel an owner's). Remaining: stored exports, other formats, a
-  deletion job run on staging, legal review of the kept records.
+  cancel HyFib's and staff cannot cancel an owner's). **[Stored exports built; database and
+  browser tests run only in CI]** (ADR-415, migration 0325: an owner asks, a worker job writes the
+  same export into the company's rows in sealed 1 MiB parts, at most 512 MiB and one ready file a
+  company, kept 7 days; emailed a link to the page; downloaded by owners through the app with the
+  step-up, audited; one export of a company at a time, stored and streamed together). Remaining:
+  other formats, object storage, a deletion job run on staging, legal review of the kept records.
 
 ## Phase 6 — AI, calling, channels, connectors, enterprise
 

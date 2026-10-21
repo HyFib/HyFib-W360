@@ -31,6 +31,8 @@ import {
   processPlanPaymentRefund,
   processStoreJob,
   queueTextMessage,
+  requestStoredExport,
+  runStoredExport,
   runTenantDeletion,
   writeCompanyExport,
   type DeletionRunDeps,
@@ -1471,6 +1473,14 @@ describe('running a deletion', () => {
     });
     // A saved reply with a file (ADR-411), deleted with the company: the attachment, then the file.
     await savedReplyWithFile(owner);
+    // A stored export with its file (ADR-415), deleted with the company, parts first.
+    const stored = await requestStoredExport(serviceDeps(), owner);
+    const run = await runStoredExport(
+      { ...serviceDeps(), limits: { partBytes: 4_096 } },
+      authorizedTenantScope(c.tenant.id, null),
+      stored.id,
+    );
+    expect(run.outcome).toBe('ready');
     const other = await busyCompany();
     const tables = await companyTables();
     const otherBefore = await rowCounts(other.c.tenant.id, tables);
@@ -1485,6 +1495,8 @@ describe('running a deletion', () => {
     expect(before['app.team_closed_days']).toBe(1);
     expect(before['app.saved_reply_files']).toBe(1);
     expect(before['app.saved_reply_attachments']).toBe(1);
+    expect(before['app.company_exports']).toBe(1);
+    expect(before['app.company_export_parts']).toBeGreaterThan(1);
 
     const result = await runTenantDeletion(runDeps(), c.tenant.id);
     expect(result.outcome).toBe('finished');

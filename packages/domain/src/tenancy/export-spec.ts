@@ -25,6 +25,10 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
   'app.channel_onboarding_sessions': 'Embedded Signup session bookkeeping.',
   'app.commerce_store_events': 'Deduplication records of store webhooks.',
   'app.commerce_store_fetches': 'Bookkeeping of reads from stores.',
+  'app.company_export_parts':
+    'The stored copies of earlier exports themselves (ADR-415), kept 7 days; an export never holds another.',
+  'app.company_exports':
+    'Bookkeeping of stored exports (ADR-415): who asked and when, and the file’s size and hash; the audit log, which is exported, records each request and download.',
   'app.contact_changes':
     'Positions of the API’s contact change feed (ADR-114): which contact changed in which transaction, and the names of the parts it changed (ADR-329); the contacts themselves are exported.',
   'app.conversation_viewers':

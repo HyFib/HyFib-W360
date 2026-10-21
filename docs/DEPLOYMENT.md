@@ -2195,6 +2195,24 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    and refuses to save it until it is unticked. The table, the runs' check and the endpoints' check can stay
    after a rollback; older code never writes `campaign_reply`.
 
+   Migration 0325 (ADR-415) creates `app.company_exports` and `app.company_export_parts` (new,
+   empty tables, with their row level security, grants, deletion steps 37 and 38 and policies),
+   the sweep's `ops.company_exports_due`, and replaces `ops.sealed_value_keys` (dropped as
+   `w360_definer` and created again, as in 0288) with the stored exports' parts added. It is
+   additive and quick. A web server of the release before neither offers nor serves stored
+   exports, and its streamed export does not see a stored export waiting (it takes the same export
+   lock, so the two are still never read at once; only the "being prepared" refusal is new). A worker
+   of the release before neither runs `company.export` jobs nor sweeps them: deploy workers first,
+   as usual, so an export asked for on a new web server is prepared. The queue `company.export` is
+   created by the migration command from the queue list.
+
+   Space: stored exports live in PostgreSQL, sealed (about a third larger than the compressed
+   file), at most 512 MiB compressed per company and one ready file per company, kept 7 days. Plan
+   for the database, its write-ahead log and its backups to hold up to about 700 MB for each company
+   that keeps an export, twice that while a new one is written; most companies' exports are a few
+   megabytes. Expired parts are deleted by the minute sweep, and the space is reused after vacuum.
+   `SELECT pg_size_pretty(pg_total_relation_size('app.company_export_parts'))` shows the total.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -177,3 +177,14 @@ export async function cancelCompanyDeletionAction(slug: string): Promise<ActionR
     return null;
   });
 }
+
+/** Asks for a stored export of the company's data (ADR-415); the worker prepares it. */
+export async function requestStoredExportAction(slug: string): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { storedExports } = await getRuntime();
+    await storedExports.request(ctx, await requestMeta());
+    refresh();
+    return null;
+  });
+}

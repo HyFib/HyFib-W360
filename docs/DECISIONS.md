@@ -18568,3 +18568,102 @@ choosing several campaigns or buttons in one trigger; the button in webhooks; re
 reply that arrives before the send worker records WhatsApp's acceptance of the campaign message
 (it names a WAMID not stored yet, so it starts what any other message would); any verification
 against Meta (the Graph stand-in only).
+
+## ADR-415 Stored company exports, kept encrypted in PostgreSQL for 7 days (P5-11) (2026-10-21)
+
+Context: Settings → Company data streams the company export (ADR-055) from one read-only
+transaction straight to the browser. For a large company the download can outlast a browser or
+proxy timeout, and a file that broke, or was lost afterwards, can only be fetched again by reading
+the whole company again. ADR-055 chose not to store it: "no object storage exists, and a stored copy
+of a whole company would be one more thing to protect and expire". P5-11 lists "stored exports" as
+remaining. HyFib still has no object storage (the `S3_*` settings are parsed by `s3ConfigFrom` and
+read by nothing; no S3 client is a dependency), so this slice stores the file where the data already
+is, and answers ADR-055's objection rather than setting it aside.
+
+Decision:
+
+- **Asking.** An owner (`tenant.export`, also while suspended, restricted or pending deletion, as
+  for the streamed export) with a sign-in in the last 15 minutes (ADR-056) presses "Prepare a stored
+  export". `requestStoredExport` records an `app.company_exports` row (`queued`), audits
+  `tenant.export_requested`, emails every owner and administrator and queues a signed
+  `company.export` job keyed by the export, in one transaction. Administrators hold no
+  `tenant.export`, as before: they are told, they cannot ask or download.
+- **The same export.** The run opens the company's read-only, repeatable-read snapshot and writes
+  exactly the streamed export's lines (`writeExportLines`, now shared by both: the same header,
+  tables, listed columns, exclusions and end line). Both stored-export tables are excluded from the
+  export with a reason (an export never holds another, and the audit log, which is exported,
+  records each request and download).
+- **Stored in PostgreSQL, sealed, in bounded parts.** The gzip output is cut into parts of 1 MiB of
+  compressed bytes (`CompressedParts`, which hands each part on before compressing more, so a run
+  holds about two parts in memory), each sealed with the keyring like every other value HyFib keeps
+  sealed (AES-256-GCM, associated data `company-export-part:<company>:<part id>`, so a part copied
+  to another company or row does not open) and inserted in its own short transaction into
+  `app.company_export_parts`. The sealed text is the keyring's base64url format (a third larger than
+  the bytes) so the keyring sweep re-seals parts like other sealed values (`company_export_part` in
+  `ops.sealed_value_keys`, migration 0325): an old key is removed only once no part uses it. Its
+  column is stored out of line uncompressed (`STORAGE EXTERNAL`: sealed bytes do not compress), so
+  the sweep's look at a value's first 40 characters reads one slice. The row records the size, the
+  SHA-256 of the whole file and the part count.
+- **Bounded per company: 512 MiB.** A file past 512 MiB compressed stops as soon as the next part
+  would pass it, keeps no part and fails with `too_large`, whose words (on the page and in the
+  owners' email) send the owner to the streamed export. A company keeps one ready file: when a new
+  export is ready, older ready ones are expired and their parts deleted in the same transaction, so
+  a company holds at most 512 MiB, and twice that only while a new one is written. Why 512 MiB: a
+  message line is a few hundred bytes of JSON that gzip shrinks several times, so 512 MiB holds
+  millions of messages, far beyond the companies whose streamed download a timeout cuts; a larger
+  bound would put gigabytes of write-ahead log and backup per request on the shared database for
+  the rare company that can still stream. The bound is a constant, as ADR-411's file limits are.
+- **ADR-055's objection, answered.** Protection: the copy is ciphertext at rest and in backups
+  (sealed with the deployment's keys, which the database never holds), in the company's own rows
+  under forced row level security; only an owner of that company who signed in recently can
+  download it, every download is audited (`tenant.export_downloaded`) and emailed to owners and
+  administrators, and no email carries a link that downloads (they link to Settings → Company data).
+  Expiry: 7 days after it is ready (a week covers a weekend and an owner who is away for days; more
+  would keep a whole-company copy longer than its purpose needs), or sooner when a newer one is
+  ready; the minute sweep deletes the parts and records the export as `expired` with `deleted_at`.
+  Why the database is acceptable: the copy is bounded (512 MiB a company), short-lived (7 days),
+  encrypted, and of data the same database already holds in the clear to its runtime role; it adds
+  no new place holding company data, no new credentials and no new provider. Company deletion
+  removes it (`tenant.delete` steps 37 and 38, parts before exports). What remains true from ADR-055:
+  backups keep the ciphertext until they expire (DATA-RETENTION), as they keep every deleted row.
+- **One export of a company at a time, stored and streamed together.** The streamed export and the
+  stored run both read under the company's export lock (an advisory lock held for their snapshot
+  transaction), so no two exports of a company are ever read at once. A unique index allows one
+  stored export `queued` or `running` per company, so of several owners asking at once one is
+  recorded and the rest are refused (409). Asking takes the lock too, so it is refused while a
+  streamed export runs; the streamed export is refused while a stored export waits or is written
+  ("being prepared"). A run that meets the lock (a stream that started between the stored export's
+  request and its run) leaves the export queued and the minute sweep signals it again. The streamed
+  export itself is otherwise unchanged.
+- **Crashes never block for good.** A run claims the export (`attempts` + 1, `running`, a 5-minute
+  lease from the database's clock), renews the lease with every part and at least every minute,
+  and writes parts and finishes only while the export's `attempts` is still its own (a fencing
+  token: a run that lost its lease writes parts nobody reads and cannot mark the export ready; the
+  part key includes the attempt). A crashed run's lease runs out; the job's retry or the minute
+  sweep, which signals every waiting export and every running one whose lease ran out, starts a new
+  run, which takes over and reads only its own parts (earlier runs' are deleted at ready). The
+  fourth start fails the export as `interrupted`; an export that could not start in 24 hours fails
+  as `timed_out`; an owner who stopped being one before the run fails it as `requester_not_allowed`.
+- **Failures recorded and visible, with no data.** A failure stores a reason code and, for a
+  database error, its SQLSTATE only (ADR-129), deletes the export's parts, emails the owners and
+  administrators the reason in words and shows it on the page; the error itself goes to the
+  worker's log. The owner can ask again at once.
+- **Downloading.** `GET /c/{slug}/settings/data/exports/{id}` re-checks the session, the permission
+  and the step-up itself, finds the export in the company's scope only (another company's id, an
+  expired, failed or unknown one: 404), audits and emails, then streams the parts through the app,
+  each read and opened in its own short read-only transaction, checking each part's size and, at the
+  end, the whole file's size and SHA-256 against the record: a mismatch stops the download with an
+  error, so a client is left with an incomplete file, never a wrong one. The page shows the SHA-256
+  to compare. No storage-signed or bearer link exists.
+- **Migration 0325.** `app.company_exports` and `app.company_export_parts`: `tenant_id NOT NULL`,
+  `UNIQUE (tenant_id, id)`, composite foreign keys (the requester's membership, the export),
+  `ops.apply_tenant_rls`, the runtime role granted select and insert and only the state columns'
+  updates (no delete of an export record; parts are inserted, deleted and re-sealed), a check that
+  each status carries exactly its columns, the deletion steps and policies, the sweep's
+  `ops.company_exports_due` (SECURITY DEFINER, search path pinned, ids only, executable by the
+  runtime role only) and `ops.sealed_value_keys` again with the parts.
+
+Not built: object storage (a separate decision), formats other than JSON Lines, choosing tables,
+more than one ready file per company, a size estimate before the run (the size is known only as the
+file is written; the run stops at the bound), and resuming a run from its last part (a takeover
+starts the file again).
