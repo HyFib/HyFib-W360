@@ -789,5 +789,8 @@ test('an A/B campaign is drafted with two templates, reviewed by its approver an
   await expect(recipientsRow.getByRole('cell').nth(1)).toHaveText(String(20 - sentB));
   await expect(recipientsRow.getByRole('cell').nth(2)).toHaveText(String(sentB));
   await page.getByRole('link', { name: 'Recipients' }).click();
-  await expect(page.getByRole('columnheader', { name: 'Variant' })).toBeVisible();
+  // The recipients page itself: the results' headers "Variant A" and "Variant B" also contain the
+  // word, and stay on screen until the navigation ends.
+  await expect(page).toHaveURL(new RegExp(`/campaigns/${campaignId}/recipients$`));
+  await expect(page.getByRole('columnheader', { name: 'Variant', exact: true })).toBeVisible();
 });
