@@ -22,8 +22,14 @@ two messages took two campaigns over hand-split audiences. This closes P3-04's "
   summed once (no wallet reservation exists for campaigns, ADR-023). Approval and resuming check
   both templates; the approval email names both and the split; the messaging-limit notice counts
   all recipients.
-- **Runner:** sends each recipient its recorded variant's template and variables; pauses when either
-  template can no longer be sent. Test sends take a variant.
+- **Runner:** sends each recipient its recorded variant's template and variables; pauses when the
+  template of a variant that still has pending recipients can no longer be sent (a finished
+  variant, or a B that got no recipients, is never checked; resuming and approving follow the same
+  rule). Test sends take a variant.
+- **Review fixes (before merge):** exact integration assertions updated for the new fields (six);
+  the finished-variant rule above; the top-level template fields described as variant A's; the
+  `campaign.submitted` audit records each variant's category and share; 0317 alters the recipients
+  before creating the table that locks the campaigns; the e2e checks each variant's exact cell.
 - **Results:** a Variants card side by side with the results' denominators, descriptive only (no
   winner, no significance); the recipients page and CSV name each recipient's variant.
 - **API and webhooks (additive):** `variantB` on draft create/edit and in settings, `variants` on
@@ -44,7 +50,7 @@ two messages took two campaigns over hand-split audiences. This closes P3-04's "
   assigns (SQL equal to TypeScript), prices, sends and reports per variant; a campaign without B is
   unchanged; another company's template is refused as B; a marketing B without opt-in skips only
   its own recipients; assignments survive a resubmission, pause, resume and ticks, and the runtime
-  role cannot update them; the API creates, edits, reviews and reads variants.
+  role cannot update them; a finished variant whose template Meta paused never pauses the other, while one still sending does (and a resume names it); a B that got no recipients is ignored; the API creates, edits, reviews and reads variants.
 - E2E (CI only, `campaigns.spec.ts`): an A/B campaign drafted in the editor, reviewed with its
   Variants table, submitted by a key, approved by the owner from the approval email, sent per
   variant and reported per variant.

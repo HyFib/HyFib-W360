@@ -780,9 +780,11 @@ test('an A/B campaign is drafted with two templates, reviewed by its approver an
   expect(listed.filter((r) => r.variant === 'B')).toHaveLength(sentB);
   await page.reload();
   const countsTable = page.getByRole('table').filter({ hasText: 'Variant B' });
-  await expect(countsTable.getByRole('row').filter({ hasText: 'Recipients' })).toContainText(
-    String(sentB),
-  );
+  // The columns are Count, Variant A and Variant B: each variant's exact cell.
+  await expect(countsTable.getByRole('columnheader').nth(2)).toHaveText('Variant B');
+  const recipientsRow = countsTable.getByRole('row').filter({ hasText: 'Recipients' });
+  await expect(recipientsRow.getByRole('cell').nth(1)).toHaveText(String(20 - sentB));
+  await expect(recipientsRow.getByRole('cell').nth(2)).toHaveText(String(sentB));
   await page.getByRole('link', { name: 'Recipients' }).click();
   await expect(page.getByRole('columnheader', { name: 'Variant' })).toBeVisible();
 });

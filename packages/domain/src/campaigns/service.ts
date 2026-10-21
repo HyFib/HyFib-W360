@@ -397,15 +397,26 @@ export async function resumeLockedCampaign(
   by: CampaignResumer,
   now: Date,
 ): Promise<void> {
-  const template = await loadTemplate(tx, c.tenantId, c.templateId);
-  if (!template || template.status !== 'approved')
-    throw new AppError('precondition_failed', 'The template is not approved by Meta.');
-  await assertVariantBApproved(
-    tx,
-    c.tenantId,
-    c.id,
-    'Variant B’s template is not approved by Meta.',
-  );
+  // Without B, A's template is checked as always; with B, each variant's only while it has
+  // pending recipients (ADR-405), as the runner checks them.
+  const pending = await variantsStillSending(tx, c.tenantId, c.id);
+  if (pending === null || pending.has('A')) {
+    const template = await loadTemplate(tx, c.tenantId, c.templateId);
+    if (!template || template.status !== 'approved')
+      throw new AppError(
+        'precondition_failed',
+        pending === null
+          ? 'The template is not approved by Meta.'
+          : 'Variant A’s template is not approved by Meta.',
+      );
+  }
+  if (pending?.has('B'))
+    await assertVariantBApproved(
+      tx,
+      c.tenantId,
+      c.id,
+      'Variant B’s template is not approved by Meta.',
+    );
   const channel = await loadChannel(tx, c.tenantId, c.channelAccountId);
   if (!channel || channel.status !== 'active')
     throw new AppError('precondition_failed', 'The WhatsApp number is not active.');
@@ -601,6 +612,19 @@ export async function requeueReleased(
         inArray(campaignRecipients.messageId, messageIds),
       ),
     );
+}
+
+/**
+ * The variants of a campaign with variant B that still have pending recipients (ADR-405), or null
+ * for a campaign without B (whose one template is always checked).
+ */
+async function variantsStillSending(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+): Promise<Set<string> | null> {
+  if (!(await loadCampaignVariant(tx, tenantId, campaignId))) return null;
+  return new Set((await pendingByVariant(tx, tenantId, campaignId)).keys());
 }
 
 /** Refuses with `message` when the campaign has a variant B whose template is not approved. */
@@ -1297,8 +1321,12 @@ export interface CampaignSubmission {
   schedule: { at: Date; adjustment: ScheduleAdjustment | null };
   /** Variant A's (the campaign's own template's) category. */
   category: 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
-  /** Variant B's share of the recipients in percent (ADR-405); null without variant B. */
-  variantShare: number | null;
+  /**
+   * Each variant's label, template category and share (ADR-405), for the audit; null without
+   * variant B. No template names, as audits record none.
+   */
+  variants:
+    { label: VariantLabel; category: TemplateInfo['category']; sharePercent: number }[] | null;
   /** The columns a submission sets, whatever follows it. */
   submitted: Partial<typeof campaigns.$inferInsert>;
 }
@@ -1368,7 +1396,13 @@ export async function submitLockedDraft(
     snapshot,
     schedule: r.schedule,
     category: r.template.category,
-    variantShare: withB ? (r.arms.find((a) => a.label === 'B')?.sharePercent ?? null) : null,
+    variants: withB
+      ? r.arms.map((arm) => ({
+          label: arm.label,
+          category: arm.template.category,
+          sharePercent: arm.sharePercent,
+        }))
+      : null,
     submitted: {
       audienceUsed: r.definition,
       audienceCount: snapshot.total,
@@ -1496,8 +1530,12 @@ async function approvalVariants(
   }));
 }
 
-/** A campaign's pending recipients by variant. */
-async function pendingByVariant(
+/**
+ * A campaign's pending recipients by variant (ADR-405). With variant B, a variant's template is
+ * checked (by the runner, a resume and an approval) only while the variant has pending recipients,
+ * so a finished variant never holds the other back.
+ */
+export async function pendingByVariant(
   tx: Tx,
   tenantId: string,
   campaignId: string,
@@ -2398,6 +2436,7 @@ export function createCampaignsService(deps: CampaignDeps) {
               pending: snapshot.pending,
               approvalRequired: settings.approvalRequired,
               category: submission.category,
+              ...(submission.variants ? { variants: submission.variants } : {}),
             },
           },
           meta,
@@ -2438,16 +2477,26 @@ export function createCampaignsService(deps: CampaignDeps) {
           throw forbidden(
             'An API key submitted this campaign, so it sends under the authority of the member who approves it: approving it needs permission to send campaigns.',
           );
-        const template = await loadTemplate(tx, ctx.tenant.id, c.templateId);
-        if (!template || template.status !== 'approved')
-          throw new AppError('precondition_failed', 'The template is no longer approved by Meta.');
-        // Both variants are approved together (ADR-405).
-        await assertVariantBApproved(
-          tx,
-          ctx.tenant.id,
-          campaignId,
-          'Variant B’s template is no longer approved by Meta.',
-        );
+        // Both variants are approved together (ADR-405), each checked while it has pending
+        // recipients (a B that got none, from a web server of the release before, is ignored).
+        const pending = await variantsStillSending(tx, ctx.tenant.id, campaignId);
+        if (pending === null || pending.has('A')) {
+          const template = await loadTemplate(tx, ctx.tenant.id, c.templateId);
+          if (!template || template.status !== 'approved')
+            throw new AppError(
+              'precondition_failed',
+              pending === null
+                ? 'The template is no longer approved by Meta.'
+                : 'Variant A’s template is no longer approved by Meta.',
+            );
+        }
+        if (pending?.has('B'))
+          await assertVariantBApproved(
+            tx,
+            ctx.tenant.id,
+            campaignId,
+            'Variant B’s template is no longer approved by Meta.',
+          );
         const scheduled = c.scheduledAt ?? now;
         if (campaignApprovalDeadline(scheduled, c.stopAfterHours).getTime() <= now.getTime()) {
           throw new AppError(

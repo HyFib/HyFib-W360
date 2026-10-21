@@ -680,8 +680,18 @@ const webhookCampaignSchema = z.object({
     .describe(
       'Why it completed, when the status is completed: every recipient was processed, or its sending time ran out. Null otherwise.',
     ),
-  templateId: z.uuid().nullable(),
-  templateName: z.string().nullable().describe('The template’s name when the event is delivered.'),
+  templateId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'Variant A’s (the campaign’s own) template; a campaign with variant B also sends B’s (see `variants` in GET /campaigns/{id}).',
+    ),
+  templateName: z
+    .string()
+    .nullable()
+    .describe(
+      'Variant A’s (the campaign’s own) template’s name when the event is delivered; see `variants` in GET /campaigns/{id} for variant B’s.',
+    ),
   scheduledAt: z.iso.datetime().nullable().describe('When it was set to start.'),
   startedAt: z.iso.datetime().nullable(),
   completedAt: z.iso.datetime().nullable(),
@@ -735,11 +745,18 @@ export const campaignRecipientSkippedPayloadSchema = envelope(
       id: z.uuid(),
       name: z.string().describe('The campaign’s name when the event is delivered.'),
       status: campaignStatusSchema.describe('Its status when the event is delivered.'),
-      templateId: z.uuid().nullable(),
+      templateId: z
+        .uuid()
+        .nullable()
+        .describe(
+          'Variant A’s (the campaign’s own) template; the recipient’s template is its variant’s (see `recipient.variant`).',
+        ),
       templateName: z
         .string()
         .nullable()
-        .describe('The template’s name when the event is delivered.'),
+        .describe(
+          'Variant A’s (the campaign’s own) template’s name when the event is delivered; see `recipient.variant`.',
+        ),
     }),
     contact: contactSchema.describe(
       'The recipient’s contact as it is when the event is delivered (a contact merged into another is the one it was merged into), as erasure left it.',

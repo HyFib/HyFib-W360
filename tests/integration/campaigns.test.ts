@@ -2234,4 +2234,72 @@ describe('A/B template variants (ADR-405)', () => {
       {},
     );
   });
+
+  it('checks a variant’s template only while it has pending recipients, so a finished B never holds A back', async () => {
+    const s = await setup();
+    const owner = await fx.ctx(s.c, s.c.owner);
+    for (let i = 0; i < 30; i += 1)
+      await s.contact(`+9198450000${String(i).padStart(2, '0')}`, { name: `F${i}` });
+    const noticeId = await approvedTemplate(s, 'store_news_finished', notice);
+    const variantB = {
+      templateId: noticeId,
+      variables: { header: [], body: [] },
+      sharePercent: 50,
+    };
+    const { id: stillSending } = await s.draft('B still sending', { variantB });
+    const { id: finished } = await s.draft('B finished', { variantB });
+    await s.campaigns.submitCampaign(owner, stillSending, { expectedVersion: 1 }, {});
+    await s.campaigns.submitCampaign(owner, finished, { expectedVersion: 1 }, {});
+    // B's recipients of the second campaign were all handled; then Meta paused B's template.
+    await fx.query(
+      `UPDATE app.campaign_recipients SET state = 'skipped', skip_reason = 'suppressed'
+        WHERE campaign_id = $1 AND variant = 'B'`,
+      [finished],
+    );
+    await fx.query(`UPDATE app.message_templates SET status = 'paused' WHERE id = $1`, [noticeId]);
+
+    // While B has pending recipients, its template pauses the campaign and a resume names B.
+    expect(await s.tick(stillSending)).toMatchObject({
+      outcome: 'paused',
+      pauseReason: 'template_not_approved',
+    });
+    await expectAppError(
+      s.campaigns.resumeCampaign(owner, stillSending, {}),
+      'precondition_failed',
+      /Variant B’s template is not approved/,
+    );
+
+    // Once B has none, A keeps sending, and a member's pause and resume are not refused for B.
+    const aPending = (await variantRows(finished)).filter(
+      (r) => r.variant === 'A' && r.state === 'pending',
+    ).length;
+    expect(aPending).toBeGreaterThan(0);
+    expect(await s.tick(finished)).toMatchObject({ outcome: 'progress', queued: aPending });
+    await s.campaigns.pauseCampaign(owner, finished, {});
+    await s.campaigns.resumeCampaign(owner, finished, {});
+    expect(await campaignRow(finished)).toMatchObject({ status: 'running' });
+    await fx.query(`UPDATE app.message_templates SET status = 'approved' WHERE id = $1`, [
+      noticeId,
+    ]);
+  });
+
+  it('ignores a variant B that got no recipients, as when a web server of the release before submitted the draft', async () => {
+    const s = await setup();
+    const owner = await fx.ctx(s.c, s.c.owner);
+    for (let i = 0; i < 6; i += 1)
+      await s.contact(`+9198460000${String(i).padStart(2, '0')}`, { name: `O${i}` });
+    const { id } = await s.draft('Old web server');
+    await s.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {});
+    // The draft had a variant B without a template, which the older server's snapshot ignored.
+    await fx.query(
+      `INSERT INTO app.campaign_variants (id, tenant_id, campaign_id, label, share_percent)
+       VALUES (gen_random_uuid(), $1, $2, 'B', 50)`,
+      [s.c.tenant.id, id],
+    );
+    expect((await variantRows(id)).every((r) => r.variant === 'A')).toBe(true);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 6 });
+    await s.campaigns.pauseCampaign(owner, id, {});
+    await s.campaigns.resumeCampaign(owner, id, {});
+    expect(await campaignRow(id)).toMatchObject({ status: 'running' });
+  });
 });

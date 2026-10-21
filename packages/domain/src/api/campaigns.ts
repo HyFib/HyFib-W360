@@ -105,8 +105,16 @@ export const apiCampaignSchema = z.object({
     .describe(
       'Why it completed: every recipient was processed, or its sending time ran out. Null otherwise.',
     ),
-  templateId: z.uuid().nullable(),
-  templateName: z.string().nullable(),
+  templateId: z
+    .uuid()
+    .nullable()
+    .describe(
+      "Variant A's (the campaign's own) template; a campaign with variant B also sends B's (see `variants` in GET /campaigns/{id} and each recipient's `variant`).",
+    ),
+  templateName: z
+    .string()
+    .nullable()
+    .describe("Variant A's (the campaign's own) template's name; see `variants` for variant B's."),
   channel: z
     .object({
       id: z.uuid(),
@@ -845,7 +853,7 @@ const draftFields = {
     .uuid()
     .nullable()
     .describe(
-      "The template it sends, as GET /templates lists it; null for none yet. A member submits it only with an approved marketing or utility template of the number's WhatsApp account.",
+      "The template it sends, as GET /templates lists it (variant A's, the campaign's own, when it has variant B: see `variantB`); null for none yet. A member submits it only with an approved marketing or utility template of the number's WhatsApp account.",
     ),
   variables: apiVariablesSchema,
   audience: apiAudienceSchema,
@@ -1438,6 +1446,7 @@ export async function apiSubmitCampaign(
           pending: submission.snapshot.pending,
           approvalRequired: true,
           category: submission.category,
+          ...(submission.variants ? { variants: submission.variants } : {}),
           source: 'api',
         },
         correlationId: ctx.requestId,

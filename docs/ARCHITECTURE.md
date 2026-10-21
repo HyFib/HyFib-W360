@@ -402,7 +402,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `campaign_recipients.variant`, never updated (no grant). The review classifies and prices each
   arm (`estimateFromTable` at its category, summed by `combineEstimates`), refuses a variant
   nobody in its share can receive, and the messaging-limit notice counts all of them. Approval,
-  resuming and the runner check both templates (`variantSendable`); a tick sends each recipient
+  resuming and the runner check each variant's template (`variantSendable`) while that variant has
+  pending recipients (`pendingByVariant`), so a finished variant never holds the other back; a tick
+  sends each recipient
   its recorded variant's template, checked against its variant's consent purpose and the
   frequency cap for marketing variants, priced at its category. `campaignVariantAnalytics` counts
   each variant as `campaignAnalytics` counts the campaign; the page, `GET /campaigns/{id}`

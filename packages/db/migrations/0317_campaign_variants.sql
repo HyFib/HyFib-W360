@@ -11,6 +11,17 @@
 -- on its recipient row. The runtime role inserts recipients but holds no UPDATE on `variant`, so a
 -- recorded variant never changes; a retry or restart of the runner reads it from the row.
 
+-- The variant each recipient was given when the audience was taken: A for every recipient of a
+-- campaign without variants, and for every row already there. Altered first, before the new
+-- table's foreign key locks app.campaigns, so this migration takes the recipients' lock before the
+-- campaigns' one, never after it (a runner tick updates recipients, then its campaign). A constant
+-- default adds the column without rewriting the table; the check is added NOT VALID so
+-- app.campaign_recipients is not read under this migration's lock, and 0318 validates it without
+-- blocking writes. No UPDATE is granted on the column: it is written once, with the snapshot.
+ALTER TABLE app.campaign_recipients
+  ADD COLUMN variant text NOT NULL DEFAULT 'A',
+  ADD CONSTRAINT campaign_recipients_variant CHECK (variant ~ '^[A-Z]$') NOT VALID;
+
 CREATE TABLE app.campaign_variants (
   id uuid PRIMARY KEY,
   tenant_id uuid NOT NULL,
@@ -43,15 +54,6 @@ SELECT ops.apply_tenant_rls('app.campaign_variants');
 -- Members and keys add, change and remove a draft's variant (the service allows it on drafts only).
 GRANT SELECT, INSERT, DELETE ON app.campaign_variants TO w360_app;
 GRANT UPDATE (template_id, variables, share_percent, updated_at) ON app.campaign_variants TO w360_app;
-
--- The variant each recipient was given when the audience was taken: A for every recipient of a
--- campaign without variants, and for every row already there. A constant default adds the column
--- without rewriting the table; the check is added NOT VALID so app.campaign_recipients is not read
--- under this migration's lock, and 0318 validates it without blocking writes. No UPDATE is granted
--- on the column: it is written once, with the snapshot.
-ALTER TABLE app.campaign_recipients
-  ADD COLUMN variant text NOT NULL DEFAULT 'A',
-  ADD CONSTRAINT campaign_recipients_variant CHECK (variant ~ '^[A-Z]$') NOT VALID;
 
 -- Deleted with the company (ADR-055): after the messages (700) and before the campaigns (710) and
 -- templates (730) the variants name.

@@ -489,8 +489,11 @@ of the same number's account, with its own variables, for 10% to 90% of the reci
 - The cost estimate prices each variant's contacts at its own category's rate, once; the spending
   cap counts both. Meta bills the company directly: no wallet funds are reserved for campaigns.
 - Approvers see both templates and the split on the campaign's page and in the approval email;
-  approving approves both. If either template stops being approved, the whole campaign pauses
-  ("its template can no longer be sent") and resumes once both are approved again.
+  approving approves both. A variant's template is checked only while that variant still has
+  contacts waiting: if it stops being approved then, the whole campaign pauses ("its template can
+  no longer be sent"; the history names the variant) and resumes once it is approved again. A
+  variant that has finished (nobody of it waiting) is not checked, so Meta pausing its template
+  later never stops the other variant, and a resume is not refused for it.
 - The Variants table on the page gives each variant's counts and rates with the same denominators
   as the results. It picks no winner and computes no significance: tell members that a difference
   between small groups can be chance, and to compare counts, not only percentages.

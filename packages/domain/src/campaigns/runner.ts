@@ -40,6 +40,7 @@ import {
   emailCampaignCompleted,
   emailCampaignPaused,
   loadCampaignSettings,
+  pendingByVariant,
   recordCampaignEvent,
   recountedCounters,
   releaseQueuedSends,
@@ -269,7 +270,10 @@ export async function runCampaignTick(
       return row ?? null;
     };
     // Each variant's template and mapping (ADR-405): A is the campaign's own; B, when the campaign
-    // has one, its second. Either one no longer sendable pauses the whole campaign.
+    // has one, its second. Without B, A is checked as campaigns always were. With B, a variant is
+    // checked only while it still has pending recipients: one no longer sendable then pauses the
+    // whole campaign, but a variant that finished (or never got a recipient, as when a web server
+    // of the release before submitted the draft) never holds the other back.
     const [variantRow] = await tx
       .select({ templateId: campaignVariants.templateId, variables: campaignVariants.variables })
       .from(campaignVariants)
@@ -288,8 +292,10 @@ export async function runCampaignTick(
         templateId: variantRow.templateId,
         variables: variantRow.variables,
       });
+    const pending = variantRow ? await pendingByVariant(tx, tenantId, campaignId) : null;
     const arms = new Map<VariantLabel, RunnerArm>();
     for (const source of variantSources) {
+      const checked = pending === null || pending.has(source.label);
       const template = await loadTemplate(source.templateId);
       const spec = template ? sendSpecFor(template.category, template.components) : null;
       const variables = readCampaignVariables(source.variables);
@@ -302,6 +308,7 @@ export async function runCampaignTick(
           variables,
         )
       ) {
+        if (!checked) continue;
         return pause('template_not_approved', variantRow ? { variant: source.label } : {});
       }
       arms.set(source.label, {
@@ -516,7 +523,9 @@ export async function runCampaignTick(
       const skip = (reason: SkipReason) => skips.push({ recipientId: b.id, reason });
       // The variant recorded when the audience was taken (ADR-405); it never changes.
       const arm = arms.get(b.variant as VariantLabel);
-      if (!arm) throw new Error(`Campaign recipient ${b.id} has a variant the campaign does not`);
+      // A recipient whose variant cannot be sent now (it became pending again after the check
+      // above, as a send the worker returned does) waits: the next tick pauses for its template.
+      if (!arm) continue;
       if (!person || person.erasedAt) {
         skip('contact_erased');
         continue;

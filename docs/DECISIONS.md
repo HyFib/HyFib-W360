@@ -17324,15 +17324,25 @@ Decision:
   it is queued again, as before.
 - **Four-eyes approval sees both.** The page of a campaign waiting for approval shows a Variants
   card (both templates and the split) before the approver acts, and approving approves both:
-  `approveCampaign` and resuming refuse when B's template is no longer approved, as for A's. The
+  `approveCampaign` and resuming refuse when a variant's template is no longer approved while that
+  variant has pending recipients (the refusal names it). The `campaign.submitted` audit records
+  each variant's label, category and share (no template names, as audits record none). The
   approval email adds one line naming both templates, their shares and pending recipients, and
   that approving approves both and no winner is picked (split into lines a notice takes, template
   names being long at most). The messaging-limit notice (ADR-400) counts every variant's
   recipients, as the number sends them all.
 - **Sending.** A tick loads both variants' templates and pauses the campaign
-  (`template_not_approved`, the event naming the variant) when either can no longer be sent with
-  its mapping (`variantSendable`); otherwise it sends each recipient its recorded variant's
-  template with that variant's variables, checked against its variant's consent purpose. Pausing,
+  (`template_not_approved`, the event naming the variant) when a variant that still has pending
+  recipients can no longer be sent with its mapping (`variantSendable`); otherwise it sends each
+  recipient its recorded variant's template with that variant's variables, checked against its
+  variant's consent purpose. **A variant is checked only while it has pending recipients**
+  (`pendingByVariant`), by the runner, a resume and an approval alike: a variant that finished
+  never holds the other back (Meta pausing B's template after B's last send would otherwise pause
+  the campaign for good, B being no longer editable), and a B that got no recipients (a draft
+  submitted by a web server of the release before, whose snapshot gives everyone A) is ignored.
+  Without B, A's template is checked as before, pending or not. A recipient that becomes pending
+  again during a tick after its variant was skipped as finished waits for the next tick, which
+  then checks that variant. Pausing,
   resuming, cancelling, retries, the send worker's checks and the exactly-once guards are
   unchanged: they act on recipients and messages, whichever template they carry. Test sends take a
   variant (A by default).
@@ -17350,14 +17360,18 @@ Decision:
   `variants` (each variant's template, share and results, null for a draft or without B);
   `GET /campaigns/{id}/recipients` gives each recipient's `variant` ("A" or "B"), as does
   `campaign.recipient_skipped` in `recipient.variant`. All described in the OpenAPI document with
-  schema tests. `campaign.status_changed` keeps the campaign's results without a per-variant
+  schema tests. The campaign's top-level `templateId` and `templateName` (the list, the detail,
+  `campaign.status_changed`, `campaign.recipient_skipped`) stay variant A's, the campaign's own,
+  and now say so, pointing to `variants` and `recipient.variant`. `campaign.status_changed` keeps the campaign's results without a per-variant
   breakdown (the detail gives it).
 - **Tenant rules.** `app.campaign_variants`: `tenant_id NOT NULL`, `UNIQUE (tenant_id, id)`,
   composite foreign keys to the company's campaign and template (another company's template id
   matches no row; the service, reading under the company's scope, answers 404 first), forced row
   security, grants of `SELECT`, `INSERT`, `DELETE` and `UPDATE` of the template, mapping and share
   only, exported (export spec), deleted with the company at step 705 (after messages, before
-  campaigns and templates). The recipients' check is added `NOT VALID` and validated by 0318.
+  campaigns and templates). The recipients' column is added first, before the new table's foreign
+  key locks the campaigns (a runner tick takes the recipients, then the campaign), and its check
+  is added `NOT VALID` and validated by 0318.
 
 Known limits: the split is close to the share, not exact (a small audience can split far from it,
 and a variant nobody in its share can receive blocks submitting); the hash is fixed per campaign and
@@ -17365,3 +17379,16 @@ contact, so a contact's variant cannot be rerolled; both variants send from the 
 Not built: more than two variants, a per-variant schedule or audience, a winner or significance,
 per-variant results in `campaign.status_changed`, and any verification against Meta (the Graph
 stand-in only).
+
+Review (before merge): an independent review found one High issue: three existing integration
+tests compared recipients, the skipped-recipient webhook's body and the draft review with an exact
+`toEqual`, which the added `variant` and `variants` fields would have failed in CI; they and three
+more exact comparisons of the campaign detail (the pause, resume and cancel answers set against
+`GET /campaigns/{id}` without its added fields) now name the new fields. A Medium issue: a variant
+that finished before Meta paused its template paused the campaign for good, as the runner, a
+resume and an approval checked both templates unconditionally; each variant is now checked only
+while it has pending recipients (above), with integration tests. Low issues: a draft with variant B
+submitted by a web server of the release before could get stuck (now ignored, and DEPLOYMENT says
+to use variants after the web rollout); the top-level template fields did not say they are
+variant A's; the audit recorded only A's category, and an unread submission field was removed; and
+0317 took the campaigns' lock before the recipients' (now the reverse). All were fixed.

@@ -681,6 +681,7 @@ describe('listing a campaign’s recipients (ADR-127)', () => {
       queuedAt: expect.any(String),
       repliedAt: expect.any(String),
       optedOutAt: null,
+      variant: 'A',
     });
     // A STOP is a reply and the opt-out it records.
     expect(byContact.get(bina)).toMatchObject({
@@ -706,6 +707,7 @@ describe('listing a campaign’s recipients (ADR-127)', () => {
       queuedAt: null,
       repliedAt: null,
       optedOutAt: null,
+      variant: 'A',
     });
     expect(byContact.get(farah)).toMatchObject({
       message: { ...(await message(farah)), status: 'unknown_outcome' },
@@ -927,12 +929,13 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
     });
     expect(paused).not.toHaveProperty('results');
     // The answer is the campaign as GET /campaigns/{id} reads it, without the results, settings
-    // and version that call adds (ADR-186).
+    // and version that call adds (ADR-186), and its variants (ADR-405).
     const reader = await apiKey(s.c, ['campaigns.read']);
     const {
       results: _results,
       settings: _settings,
       version: _version,
+      variants: _variants,
       ...read
     } = await apiGetCampaign(deps(), reader, flash);
     expect(paused).toEqual(read);
@@ -1090,6 +1093,7 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
       results: _results,
       settings: _settings,
       version: _version,
+      variants: _variants,
       ...completed
     } = await apiGetCampaign(deps(), reader, done);
     expect(completed.status).toBe('completed');
@@ -1212,12 +1216,13 @@ describe('resuming campaigns keys paused (ADR-176)', () => {
     expect(resumed).toMatchObject({ id: flash, status: 'running', pauseReason: null });
     expect(resumed).not.toHaveProperty('results');
     // The answer is the campaign as GET /campaigns/{id} reads it, without the results, settings
-    // and version that call adds (ADR-186).
+    // and version that call adds (ADR-186), and its variants (ADR-405).
     const reader = await apiKey(s.c, ['campaigns.read']);
     const {
       results: _results,
       settings: _settings,
       version: _version,
+      variants: _variants,
       ...read
     } = await apiGetCampaign(deps(), reader, flash);
     expect(resumed).toEqual(read);
@@ -1418,6 +1423,7 @@ describe('campaign drafts through the API (ADR-186)', () => {
     maxMessages: null,
     budget: null,
     stopAfterHours: 24,
+    variantB: null,
   };
 
   it("create drafts with their settings once per Idempotency-Key, checked as members' drafts are, naming the key; members submit and start them", async () => {
@@ -1861,6 +1867,8 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       frequencyCap: { count: 2, days: 7 },
       // The fixture's number was never read from Meta (ADR-400): no figure to compare with.
       messagingLimit: { status: 'unknown', limit: null, checkedAt: null, figure: null },
+      // No variant B (ADR-405).
+      variants: null,
     });
     // The same review members read, in the API's words; reading it changed nothing.
     expect(reviewed).toEqual(

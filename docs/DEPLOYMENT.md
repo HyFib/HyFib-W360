@@ -1913,18 +1913,22 @@ IS NOT NULL`); the columns and checks can stay.
    `SHARE ROW EXCLUSIVE` on `app.api_keys`, which holds key authentication's `last_used_at` update
    (and so API requests) until the migration commits; it reads only the small enrolments table.
 
-   Migration 0317 (ADR-405) adds `app.campaign_variants` (forced row security, `UNIQUE (tenant_id,
-id)`, composite foreign keys to the company's campaigns and templates, grants to the runtime
-   role, deletion step 705) and the column `app.campaign_recipients.variant` (`NOT NULL DEFAULT
-'A'`, a constant default, so nothing is rewritten) with its check added `NOT VALID`, so the
-   recipients table is not read under the migration's lock. The runtime role gets no `UPDATE` on
-   the column. Expand only and backward compatible: web servers and workers of the release before
-   never name the table or the column, and their snapshots write `A` by default. Roll out workers
-   before web as usual: a campaign with variant B is created only by a web server of this release,
-   and an older worker still running would send every recipient of such a campaign variant A's
-   template, so finish the worker rollout before members use variants. Rolling an image back
-   after campaigns with variant B were submitted would do the same for those still sending: pause
-   them first. The table and column can stay.
+   Migration 0317 (ADR-405) first adds the column `app.campaign_recipients.variant` (`NOT NULL
+DEFAULT 'A'`, a constant default, so nothing is rewritten) with its check added `NOT VALID`, so
+   the recipients table is not read under the migration's lock, then creates
+   `app.campaign_variants` (forced row security, `UNIQUE (tenant_id, id)`, composite foreign keys to
+   the company's campaigns and templates, grants to the runtime role, deletion step 705). The
+   recipients are altered before the new table's foreign key locks the campaigns, the order in which
+   a runner tick takes them. The runtime role gets no `UPDATE` on the column. Expand only and
+   backward compatible: web servers and workers of the release before never name the table or the
+   column, and their snapshots write `A` by default. Roll out workers before web as usual, and let
+   members use variants only after the web rollout completes: an older worker still running would
+   send every recipient of a campaign with variant B variant A's template, and an older web server
+   that submits a draft with variant B gives every recipient variant A. Such a campaign cannot get
+   stuck: a variant with no pending recipients is never checked (so a B that got none is ignored),
+   and it simply sends A to everyone. Rolling an image back after campaigns with variant B were
+   submitted would send A's template to those still sending: pause them first. The table and
+   column can stay.
 
    Migration 0318 (ADR-405) validates the check 0317 added `NOT VALID`, as 0312 validated 0311's.
    Validation reads `app.campaign_recipients` without blocking writes; every row written since 0317
