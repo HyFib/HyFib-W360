@@ -2213,12 +2213,20 @@ describe('A/B template variants (ADR-405)', () => {
     await s.tick(id);
     const after = await variantRows(id);
     expect(byContact(after)).toEqual(first);
-    // The runtime role cannot change a recorded variant.
-    await expect(
-      fx.dbs.app.run(scopeOf(s.c), (tx) =>
+    // The runtime role cannot change a recorded variant: PostgreSQL refuses the column, which the
+    // database layer maps to forbidden ("Operation not permitted.") with the reason as its cause.
+    const refusal = await fx.dbs.app
+      .run(scopeOf(s.c), (tx) =>
         tx.execute(sql`update app.campaign_recipients set variant = 'B' where campaign_id = ${id}`),
-      ),
-    ).rejects.toThrow(/permission denied/);
+      )
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(isAppError(refusal) ? refusal.code : refusal).toBe('forbidden');
+    const reasons: string[] = [];
+    for (let e: unknown = refusal; e instanceof Error; e = e.cause) reasons.push(e.message);
+    expect(reasons.join(' | ')).toMatch(/permission denied/);
     // Each queued message used its recipient's recorded variant's template.
     const messages = await fx.query<{ template_id: string; contact_id: string }>(
       `SELECT m.template_id, cv.contact_id FROM app.messages m

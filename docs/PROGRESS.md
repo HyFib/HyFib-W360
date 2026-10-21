@@ -30,6 +30,10 @@ two messages took two campaigns over hand-split audiences. This closes P3-04's "
   the finished-variant rule above; the top-level template fields described as variant A's; the
   `campaign.submitted` audit records each variant's category and share; 0317 alters the recipients
   before creating the table that locks the campaigns; the e2e checks each variant's exact cell.
+- **CI's first run (PR #105, 2026-10-21):** the test that the runtime role cannot change a
+  recorded variant expected PostgreSQL's message itself, but the database layer maps a refused
+  privilege to `forbidden` ("Operation not permitted.") with the reason as its cause; it now
+  checks both, as the API's guarded-column tests do. The refusal itself was right.
 - **Results:** a Variants card side by side with the results' denominators, descriptive only (no
   winner, no significance); the recipients page and CSV name each recipient's variant.
 - **API and webhooks (additive):** `variantB` on draft create/edit and in settings, `variants` on
