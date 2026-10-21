@@ -413,8 +413,19 @@ const CREDENTIAL_WORDS = [
   'xsrf',
   'signature',
   'bearer',
+  'passcode',
 ];
-const CREDENTIAL_PARTS: ReadonlySet<string> = new Set(['auth', 'jwt', 'pwd', 'otp', 'sig', 'sid']);
+const CREDENTIAL_PARTS: ReadonlySet<string> = new Set([
+  'auth',
+  'authn',
+  'authz',
+  'jwt',
+  'pwd',
+  'otp',
+  'sig',
+  'sid',
+  'hmac',
+]);
 
 /**
  * Why a response header cannot be saved, or null: its name must be a header name, and headers that
@@ -447,10 +458,15 @@ export const SECRET_NAME_MATCH_LENGTH = 6;
  * make X-Request-Id or X-Ref-Count refused.
  */
 export function headerNamesSecret(header: string, secretName: string): boolean {
-  const normalized = header.toLowerCase().replace(/-/g, '_').replace(/^x_/, '');
-  if (normalized === secretName) return true;
-  return (
-    secretName.length >= SECRET_NAME_MATCH_LENGTH && `_${normalized}_`.includes(`_${secretName}_`)
+  const full = header.toLowerCase().replace(/-/g, '_');
+  // The prefix is ignored on either side, so X-Shop-Ref names `x_shop_ref` as well as `shop_ref`.
+  const headers = [full, full.replace(/^x_/, '')];
+  const names = [secretName, secretName.replace(/^x_/, '')];
+  return names.some(
+    (name) =>
+      headers.includes(name) ||
+      (name.length >= SECRET_NAME_MATCH_LENGTH &&
+        headers.some((h) => `_${h}_`.includes(`_${name}_`))),
   );
 }
 

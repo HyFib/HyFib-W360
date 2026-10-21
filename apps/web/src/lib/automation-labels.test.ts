@@ -15,6 +15,15 @@ describe('answers a web request left out for safety (ADR-406)', () => {
     expect(describeDroppedValues({ key: 'secret_header' })).toBe(
       'Not saved: key (the step sends a secret in that header, or it is named like a secret).',
     );
+    // In the step's order, whatever order the database keeps the names in.
+    expect(
+      describeDroppedValues({ zed: 'possible_cut_echo', alpha: 'refused_header', other: 'x' }, [
+        'alpha',
+        'zed',
+      ]),
+    ).toBe(
+      'Not saved: alpha (the header can carry credentials or a session); zed (it ended with the start of a secret the request sent, perhaps a cut echo); other (x).',
+    );
   });
 });
 

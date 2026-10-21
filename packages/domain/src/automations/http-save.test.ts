@@ -10,7 +10,7 @@ import {
   type AutomationGraph,
   type HttpSave,
 } from './graph';
-import { ECHO_MIN_SECRET_LENGTH, holdsSecret } from './echo';
+import { ECHO_LONG_SECRET_LENGTH, echoedSecret, holdsSecret } from './echo';
 import {
   responseHeaderValue,
   savedValuesFrom as savedFrom,
@@ -148,6 +148,10 @@ describe('saved value sources in the graph (ADR-406)', () => {
       'X-Hmac-Sig',
       'X-Auth',
       'X-OAuth-Scopes',
+      'X-Authz-Scope',
+      'X-Authn',
+      'X-Passcode',
+      'X-Hmac',
     ]) {
       const message = `The ${name} header can carry credentials or a session, so HyFib does not save it.`;
       expect(responseHeaderRefusal(name), name).toBe(message);
@@ -217,6 +221,11 @@ describe('saved value sources in the graph (ADR-406)', () => {
     expect(headerNamesSecret('X-Request-Id', 'id')).toBe(false);
     expect(headerNamesSecret('X-Ref-Count', 'ref')).toBe(false);
     expect(headerNamesSecret('X-Order-Ref', 'order')).toBe(false);
+    // A secret named with the x_ prefix still names its header.
+    expect(headerNamesSecret('X-Shop-Ref', 'x_shop_ref')).toBe(true);
+    expect(headerNamesSecret('Shop-Ref', 'x_shop_ref')).toBe(true);
+    expect(headerNamesSecret('X-Shop-Ref-Id', 'x_shop_ref')).toBe(true);
+    expect(headerNamesSecret('X-Request-Id', 'x_id')).toBe(false);
   });
 
   it('a value saved by any source is an answer later steps can use', () => {
@@ -520,7 +529,7 @@ describe('values saved from a response (ADR-406)', () => {
     }
   });
 
-  it('leaves out a value that ends with the start of a secret (a server cutting its echo)', () => {
+  it('leaves out a value ending with the start of a secret after other text as a possible cut echo', () => {
     const secret = 'sk_live_AbC/9+xyZ=';
     const cut = (value: string) =>
       savedFrom(
@@ -528,10 +537,26 @@ describe('values saved from a response (ADR-406)', () => {
         [{ from: 'header', header: 'X-Echo', saveAs: 'h' }],
         { secretValues: [secret] },
       ).dropped;
-    expect(cut('Bearer sk_live_Ab')).toStrictEqual({ h: 'echoed_secret' });
-    expect(cut('Bearer sk_l')).toStrictEqual({ h: 'echoed_secret' });
+    expect(cut('Bearer sk_live_Ab')).toStrictEqual({ h: 'possible_cut_echo' });
+    expect(cut('Bearer sk_l')).toStrictEqual({ h: 'possible_cut_echo' });
     // Fewer than four characters of a secret's start are not enough to count.
     expect(cut('Bearer sk_')).toStrictEqual({});
+  });
+
+  it('saves a value that is only the start of a secret, unless it was clipped', () => {
+    const secret = 'live_test_value_one';
+    const body = Buffer.from(JSON.stringify({ mode: 'live', note: 'x'.repeat(2000) }));
+    expect(
+      savedFrom(response({ body }), [{ path: 'mode', saveAs: 'mode' }], { secretValues: [secret] }),
+    ).toStrictEqual({ values: { mode: 'live' }, dropped: {} });
+    // Clipped right after the start of the secret (the whole value goes on differently): the
+    // saved part ends with the secret's start, so it may be a cut echo.
+    const raw = `${'x'.repeat(AUTOMATION_LIMITS.answerLength - 7)}live_teZZZ`;
+    expect(echoedSecret(raw, raw.slice(0, AUTOMATION_LIMITS.answerLength), [secret])).toBe(
+      'possible_cut_echo',
+    );
+    expect(echoedSecret(raw, raw, [secret])).toBeNull();
+    expect(echoedSecret('live', 'live', [secret])).toBeNull();
   });
 
   it('recognises a secret echoed in ordinary encodings', () => {
@@ -578,7 +603,7 @@ describe('values saved from a response (ADR-406)', () => {
     for (const cut of [
       'Bearer sk_live_AbC\\/9\\u00',
       'Bearer sk_live_AbC%2F9%2',
-      'sk_live_AbC&#x2',
+      'Bearer sk_live_AbC&#x2',
     ]) {
       expect(holdsSecret(cut, cut, [secret]), cut).toBe(true);
     }
@@ -589,14 +614,58 @@ describe('values saved from a response (ADR-406)', () => {
     expect(holdsSecret(url, url, [plusy])).toBe(true);
   });
 
-  it('does not look for secrets shorter than eight characters', () => {
-    expect(ECHO_MIN_SECRET_LENGTH).toBe(8);
+  it('finds a short secret (a PIN) only as a whole token, in every decoded form', () => {
+    expect(ECHO_LONG_SECRET_LENGTH).toBe(8);
+    const pin = '482913';
+    const echo = (value: string) =>
+      savedFrom(
+        response({ headers: { 'x-echo': value } }),
+        [{ from: 'header', header: 'X-Echo', saveAs: 'h' }],
+        { secretValues: [pin] },
+      ).dropped;
+    for (const value of [
+      '482913',
+      'pin=482913',
+      '{"pin":"482913"}',
+      'X-Pin: 482913.',
+      'a%20482913',
+    ]) {
+      expect(echo(value), value).toStrictEqual({ h: 'echoed_secret' });
+    }
+    for (const value of ['4829130', 'order 1482913', 'ab482913', '48291']) {
+      expect(echo(value), value).toStrictEqual({});
+    }
+    // The status is digits only: it is left out only when it is a short secret exactly.
     expect(
       savedFrom(response({ status: 201 }), [{ from: 'status', saveAs: 'code' }], {
-        secretValues: ['201', '2012345'],
+        secretValues: ['20', '2012345', '01'],
       }),
     ).toStrictEqual({ values: { code: '201' }, dropped: {} });
-    expect(holdsSecret('x 20123456 y', 'x 20123456 y', ['20123456'])).toBe(true);
+    expect(
+      savedFrom(response({ status: 201 }), [{ from: 'status', saveAs: 'code' }], {
+        secretValues: ['201'],
+      }),
+    ).toStrictEqual({ values: {}, dropped: { code: 'echoed_secret' } });
+    // A long secret is found anywhere.
+    expect(holdsSecret('x20123456y', 'x20123456y', ['20123456'])).toBe(true);
+  });
+
+  it('finds base64 of a secret inside JSON escapes or percent-encoding', () => {
+    // Secrets whose base64 holds / (written \/ by a JSON escaper) and + (%2B in a URL).
+    const slashy = 'k3y???~~valu';
+    const plusy = 's3cr3t?>~~value';
+    const slashed = Buffer.from(slashy).toString('base64');
+    const plussed = Buffer.from(plusy).toString('base64');
+    expect(slashed).toContain('/');
+    expect(plussed).toContain('+');
+    const cases: [string, string][] = [
+      [`{"t":"${slashed.replace(/\//g, '\\/')}x"}`, slashy],
+      [`t=${encodeURIComponent(plussed)}x`, plusy],
+      [`t=${encodeURIComponent(slashed)}x`, slashy],
+    ];
+    for (const [value, secret] of cases) {
+      expect(echoedSecret(value, value, [secret]), value).toBe('echoed_secret');
+    }
   });
 
   it('saves values that merely resemble encodings of nothing secret', () => {

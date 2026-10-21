@@ -910,14 +910,18 @@ secrets and domains (`http.*`). Values are never shown, so a leak points at the 
 `text/*`, JSON or XML response in UTF-8 (no charset, utf-8 or us-ascii) and not when the body is
 empty; a header the response lacks saves nothing. Answers left out for safety are listed on the
 run page's web request table as "Not saved: <answer> (<reason>)" (the call's `dropped_values`:
-`refused_header`, `secret_header` or `echoed_secret`; names only, never values). `refused_header`
+`refused_header`, `secret_header`, `echoed_secret` or `possible_cut_echo`; names only, never
+values). `refused_header`
 and `secret_header` mean the step saves a header that can carry credentials, that it sends a
 secret in, or that is named like a company secret (one added after publishing included): change
 the step or rename the secret. `echoed_secret` means the company's server sent back a secret the
 request carried (as written, JSON-escaped, URL-encoded, as character references or in base64):
 treat that secret as exposed to whoever can read that server's responses and logs, replace it at
 its source and in Settings → Web requests, and ask the company to stop echoing request headers.
-An echo the server transforms otherwise is not recognised. Values are never logged; check the
+`possible_cut_echo` means the value ended with four or more characters of a secret's start after
+other text, as a server cutting its echo short would send: it may be ordinary data, so ask the
+company whether their server echoes request headers before replacing the secret. An echo the
+server transforms otherwise is not recognised. Values are never logged; check the
 response with the company's own tools.
 
 **Worker restarts and deploys.** Runs are rows, so a restart delays steps but never loses or repeats

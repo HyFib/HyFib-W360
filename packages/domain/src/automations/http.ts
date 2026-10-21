@@ -25,7 +25,7 @@ import {
   type Tx,
 } from '@w360/db';
 import type { JobSigner } from '../jobs/envelope';
-import { holdsSecret } from './echo';
+import { echoedSecret } from './echo';
 import type { JobQueue } from '../jobs/queue';
 import {
   AUTOMATION_LIMITS,
@@ -340,9 +340,15 @@ export interface SaveGuard {
 /**
  * Why a value was left out for safety (ADR-406), recorded by answer name on the call (never the
  * value): a header refused as a credential or session, a header the step sends a secret in or
- * named like a company secret, or a value holding a secret the request carried.
+ * named like a company secret, a value holding a secret the request carried, or a value ending
+ * with the start of one, which may be an echo cut inside it.
  */
-export const HTTP_DROP_REASONS = ['refused_header', 'secret_header', 'echoed_secret'] as const;
+export const HTTP_DROP_REASONS = [
+  'refused_header',
+  'secret_header',
+  'echoed_secret',
+  'possible_cut_echo',
+] as const;
 export type HttpDropReason = (typeof HTTP_DROP_REASONS)[number];
 
 /** Outside text with each NUL character as U+FFFD, which PostgreSQL can store (ADR-130). */
@@ -405,9 +411,10 @@ export interface SavedValues {
  * Values to save from a successful response, by answer name (ADR-406). Each comes from a JSON path
  * in the body (the default), a header, the body as text (textual content types only) or the status
  * code, clipped as answers are (to 1,000 UTF-16 code units, never splitting an emoji). A missing
- * or non-scalar value and a path into a body that is not JSON save nothing. A refused header and a
- * value holding a secret the request carried (checked on the whole value before clipping, in the
- * encodings `holdsSecret` reads) are left out and named in `dropped`.
+ * or non-scalar value and a path into a body that is not JSON save nothing. A refused header, a
+ * value holding a secret the request carried and one that may be an echo cut inside a secret
+ * (checked on the whole value before clipping, in the encodings `echoedSecret` reads) are left out
+ * and named in `dropped`.
  */
 export function savedValuesFrom(
   response: SavableResponse,
@@ -432,8 +439,9 @@ export function savedValuesFrom(
     }
     const value = clipText(raw, AUTOMATION_LIMITS.answerLength);
     // A server that echoes the request would otherwise hand a secret to whoever reads the answers.
-    if (holdsSecret(raw, value, secretValues)) {
-      out.dropped[item.saveAs] = 'echoed_secret';
+    const echo = echoedSecret(raw, value, secretValues);
+    if (echo !== null) {
+      out.dropped[item.saveAs] = echo;
       continue;
     }
     out.values[item.saveAs] = value;

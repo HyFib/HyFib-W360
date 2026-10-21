@@ -329,7 +329,7 @@ export interface RunDetail extends RunSummary {
     durationMs: number | null;
     /**
      * Answers the call left out for safety, by name, with the reason (ADR-406): `refused_header`,
-     * `secret_header` or `echoed_secret`. Names only, never values.
+     * `secret_header`, `echoed_secret` or `possible_cut_echo`. Names only, never values.
      */
     droppedValues: Record<string, string>;
     createdAt: string;

@@ -17647,8 +17647,9 @@ Decision:
   ADR-130 requires), trimmed of outer white space and clipped as answers are. An image, a PDF, an
   octet stream, another charset, no content type or an empty body saves nothing.
 - **Headers that are not saved:** a name containing `cookie`, `authoriz`, `authent`, `oauth`,
-  `token`, `secret`, `passw`, `session`, `credential`, `csrf`, `xsrf`, `signature` or `bearer`; a
-  part (between -) that is `auth`, `jwt`, `pwd`, `otp`, `sig` or `sid`; or a part ending in `key`
+  `token`, `secret`, `passw`, `session`, `credential`, `csrf`, `xsrf`, `signature`, `bearer` or
+  `passcode`; a part (between -) that is `auth`, `authn`, `authz`, `jwt`, `pwd`, `otp`, `sig`, `sid`
+  or `hmac`; or a part ending in `key`
   (Set-Cookie, Authorization, WWW-Authenticate, X-Api-Key, X-Accesskey, X-JWT, X-Hmac-Sig). Short
   words count only as whole parts, so Author, X-Design or X-Hotpath are allowed; a part ending in
   `key` also refuses X-Idempotency-Key and X-Monkey, which errs on the safe side. These are
@@ -17656,8 +17657,9 @@ Decision:
   HyFib does not save it."). Two refusals need the company's settings and run with the checks that
   block publishing: a header the step itself sends a secret in (a server may echo it back) and a
   header named like a company secret. A header names a secret when, lowercased with - read as _
-  and an X- prefix ignored, it is the secret's name (X-Ref for `ref`), or holds a secret name of at
-  least six characters as whole parts (X-Crm-Ref-Id for `crm_ref`); a short secret name such as
+  and an `x_` prefix ignored on either side (also compared with it), it is the secret's name (X-Ref
+  for `ref`, X-Shop-Ref for `x_shop_ref`), or holds a secret name of at least six characters as
+  whole parts (X-Crm-Ref-Id for `crm_ref`); a short secret name such as
   `id` or `ref` therefore never refuses X-Request-Id or X-Ref-Count. Location is allowed, since a
   created resource's address is a common value to save, although a server may put a signed
   address in it; that address is then an answer like any other (T355).
@@ -17668,19 +17670,30 @@ Decision:
   reads the value as written and in the encodings ordinary echoes use: JSON string escapes
   (`\/`, `\"`, `\u002F`), URL and form encoding (`%2F`, `+`), XML and HTML character references
   (`&#x2F;`, `&#47;`, `&sol;`), and the secret in base64 or base64url at any of the three
-  alignments. A value whose last four or more characters (an escape cut short ignored) are the
-  start of a secret, before or after clipping, is also left out, so a server that cuts its echo
-  inside a secret reveals at most its first three characters. Secrets shorter than eight
-  characters are not looked for (any value holding "201" would match one). A secret the server
-  transforms in any other way (hashed, split, encrypted, encoded twice, or in another encoding) is
-  not recognised: allowing a domain still means trusting its server (ADR-043).
+  alignments, in each of those forms (base64 written with `\/` or `%2B`). A secret of eight
+  characters or more counts anywhere in the value; a shorter one (a PIN) only as a whole token, with
+  no letter or digit right before or after it, so `482913` is found in `pin=482913` but not in
+  `1482913`, and a status of 201 is left out only when a secret is exactly `201`. A value whose
+  last four or more characters (an escape cut short ignored) are the start of a long secret, after
+  other text, before or after clipping, is left out as a possible cut echo, so a server that cuts
+  its echo inside a secret reveals at most its first three characters; a value that is only the
+  start of a secret ("live" against `live_9f8a…`) is saved. A secret the server transforms in any
+  other way (hashed, split, encrypted, encoded twice, base64 wrapped in lines, a number parsed and
+  written again without its leading zeros, or another encoding) is not recognised: allowing a
+  domain still means trusting its server (ADR-043).
+- **Short secrets are still accepted:** Settings → Web requests keeps accepting secrets of any
+  length, since some company APIs use short PINs and refusing them would only push them into a
+  header as plain text. Their echoes are found as whole tokens (above). Settings does not warn
+  about existing short secrets: values are write-only and encrypted, so the page cannot know a
+  length without decrypting.
 - **The answers left out are recorded:** each refused header (`refused_header`), a header the step
-  sends a secret in or named like a company secret (`secret_header`) and each echoed secret
-  (`echoed_secret`) is recorded by answer name with its reason, never the value, in the call's
+  sends a secret in or named like a company secret (`secret_header`), each echoed secret
+  (`echoed_secret`) and each possible cut echo (`possible_cut_echo`) is recorded by answer name with
+  its reason, never the value, in the call's
   `dropped_values` (migration 0319, written with the outcome and fixed with it by the call's
   guard). The run page's web request table shows them ("Not saved: ref (it held a secret the
-  request sent, which the server echoed)"), and the runbook tells operators to replace a secret
-  that was echoed. The names are configuration, not customer content: exported with the call and
+  request sent, which the server echoed)", in the step's order), and the runbook tells operators to
+  replace a secret that was echoed and to check the company's server for a possible cut echo. The names are configuration, not customer content: exported with the call and
   deleted with its run.
 - **Editor:** each saved value has "Value N from" (JSON path, Header, Body text, Status code) and
   the input its source needs: the path, the header's name, or a line saying what is saved. The
@@ -17712,3 +17725,12 @@ the check on body text (now read), that values left out for safety left no trace
 X-Request-Id (now whole names or six characters), deny-list gaps (`jwt`, `bearer`, `pwd`, `otp`,
 `sig`, parts ending in `key`; Author no longer refused), an untested worker-time refusal of a
 secret added after publishing (now an integration test) and no deployment note. All were fixed.
+A second review found no High. It found one Medium: secrets shorter than eight characters, which
+Settings still accepts, were no longer looked for at all, so a PIN echoed whole was saved (now
+found as a whole token). It also found that the end-overlap rule dropped ordinary values such as
+"live" and called them echoes (now only after other text, recorded as `possible_cut_echo` with its
+own runbook advice), that a secret named `x_…` no longer matched its header (the prefix is now
+ignored on both sides), that base64 inside JSON escapes or percent-encoding was missed (now
+checked in every decoded form), and nits (a numeric secret parsed again is a transform not
+recognised, answers left out in the step's order, `authn`, `authz`, `passcode` and `hmac`
+refused). All were fixed.

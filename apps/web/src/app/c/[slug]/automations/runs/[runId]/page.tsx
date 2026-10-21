@@ -60,6 +60,11 @@ export default async function AutomationRunPage({
     const node = run.graph?.nodes.find((n) => n.id === id);
     return node?.label ? `${node.label} (${id})` : id;
   };
+  /** The answer names a web request step saves, in its order (for the answers left out). */
+  const saveOrder = (id: string) => {
+    const node = run.graph?.nodes.find((n) => n.id === id);
+    return node?.type === 'http_request' ? node.save.map((item) => item.saveAs) : [];
+  };
   const describe = (detail: string | null) =>
     detail
       ? detail
@@ -183,7 +188,7 @@ export default async function AutomationRunPage({
                         tone: 'neutral' as const,
                       };
                       const code = c.statusCode !== null ? String(c.statusCode) : c.errorCode;
-                      const dropped = describeDroppedValues(c.droppedValues);
+                      const dropped = describeDroppedValues(c.droppedValues, saveOrder(c.nodeId));
                       return (
                         <TR key={c.id}>
                           <TD className="whitespace-nowrap text-sm text-muted-foreground">

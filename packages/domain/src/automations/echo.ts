@@ -3,16 +3,22 @@
  * company server that echoes the request back would otherwise hand the secret to whoever reads the
  * run's answers. The value is checked before it is clipped, as written and in the forms ordinary
  * echoes use (JSON escapes, URL and form encoding, XML and HTML character references), and for the
- * secret in base64 or base64url at any alignment. A value whose end is the start of a secret (at
- * least `ECHO_MIN_OVERLAP` characters), before or after clipping, also counts: a cut inside a
- * secret must not save most of it. Secrets the server transforms in other ways (hashed, split,
- * re-encoded twice, encrypted) are not recognised.
+ * secret in base64 or base64url at any alignment, in each of those forms. A secret shorter than
+ * `ECHO_LONG_SECRET_LENGTH` (a PIN, say) counts only as a whole token, so the status "201" is not
+ * taken for part of a secret. A value whose end is the start of a long secret (at least
+ * `ECHO_MIN_OVERLAP` characters), before or after clipping, is a possible cut echo when the overlap
+ * follows other text: a cut inside a secret must not save most of it. Secrets the server transforms
+ * in other ways (hashed, split, re-encoded twice, encrypted, a number parsed and written again)
+ * are not recognised.
  */
 
-/** Secrets shorter than this are not looked for: any value holding "201" would match a short one. */
-export const ECHO_MIN_SECRET_LENGTH = 8;
+/** Secrets at least this long are found anywhere; shorter ones only as whole tokens. */
+export const ECHO_LONG_SECRET_LENGTH = 8;
 /** The fewest characters at a value's end that count as the start of a secret. */
 export const ECHO_MIN_OVERLAP = 4;
+
+/** Why a value is left out: it holds a secret, or it may be an echo cut inside one. */
+export type EchoFinding = 'echoed_secret' | 'possible_cut_echo';
 
 const JSON_ESCAPE = /\\(u[0-9a-fA-F]{4}|["\\/bfnrt])/g;
 const JSON_SIMPLE: Record<string, string> = {
@@ -100,32 +106,67 @@ function base64Forms(secret: string): string[] {
   return forms;
 }
 
-/** Whether the last characters of `text` (at least `ECHO_MIN_OVERLAP`) begin `needle`. */
+/**
+ * Whether the last characters of `text` (at least `ECHO_MIN_OVERLAP`) begin `needle`, after other
+ * text: a value that is only the first word of a secret ("live" against `live_9f8a…`) is ordinary
+ * data, not an echo. (A clipped value is 1,000 characters, so its overlap always follows text.)
+ */
 function endsWithStartOf(text: string, needle: string): boolean {
-  for (let k = Math.min(needle.length - 1, text.length); k >= ECHO_MIN_OVERLAP; k -= 1) {
+  const longest = Math.min(needle.length - 1, text.length - 1);
+  for (let k = longest; k >= ECHO_MIN_OVERLAP; k -= 1) {
     if (needle.startsWith(text.slice(-k))) return true;
   }
   return false;
 }
 
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Whether `text` holds `token` with no letter or digit right before or after it. */
+function holdsToken(text: string, token: string): boolean {
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(token)}(?![\\p{L}\\p{N}])`, 'u').test(text);
+}
+
 /**
- * Whether `raw` (the value before clipping) or `clipped` (what would be saved) holds, or ends with
- * the start of, one of `secrets`.
+ * Whether `raw` (the value before clipping) or `clipped` (what would be saved) holds one of
+ * `secrets` (`echoed_secret`) or ends with the start of a long one (`possible_cut_echo`); null when
+ * neither.
  */
-export function holdsSecret(raw: string, clipped: string, secrets: Iterable<string>): boolean {
-  const checked = [...new Set(secrets)].filter((s) => s.length >= ECHO_MIN_SECRET_LENGTH);
-  if (checked.length === 0) return false;
+export function echoedSecret(
+  raw: string,
+  clipped: string,
+  secrets: Iterable<string>,
+): EchoFinding | null {
+  const checked = [...new Set(secrets)].filter((s) => s.length > 0);
+  if (checked.length === 0) return null;
   const whole = decodedForms(raw);
-  const ends = [raw, clipped].flatMap((v) =>
-    decodedForms(v.replace(PARTIAL_ESCAPE_END, '')).concat(v),
-  );
+  const cut = clipped !== raw;
   for (const secret of checked) {
-    if (whole.some((form) => form.includes(secret))) return true;
-    if (ends.some((form) => endsWithStartOf(form, secret))) return true;
-    for (const encoded of base64Forms(secret)) {
-      if (raw.includes(encoded)) return true;
-      if (endsWithStartOf(raw, encoded) || endsWithStartOf(clipped, encoded)) return true;
+    if (secret.length < ECHO_LONG_SECRET_LENGTH) {
+      // A short secret (a PIN) as a whole token only: "201" is not part of "482913", nor "12" of it.
+      if (whole.some((form) => holdsToken(form, secret))) return 'echoed_secret';
+      continue;
+    }
+    if (whole.some((form) => form.includes(secret))) return 'echoed_secret';
+    const encodings = base64Forms(secret);
+    if (encodings.some((encoded) => whole.some((form) => form.includes(encoded)))) {
+      return 'echoed_secret';
     }
   }
-  return false;
+  // The end of the value, before and (when it was cut) after clipping, an escape cut short ignored.
+  const ends = [
+    ...decodedForms(raw.replace(PARTIAL_ESCAPE_END, '')).concat(raw),
+    ...(cut ? decodedForms(clipped.replace(PARTIAL_ESCAPE_END, '')).concat(clipped) : []),
+  ];
+  for (const secret of checked) {
+    if (secret.length < ECHO_LONG_SECRET_LENGTH) continue;
+    const needles = [secret, ...base64Forms(secret)];
+    if (needles.some((needle) => ends.some((form) => endsWithStartOf(form, needle)))) {
+      return 'possible_cut_echo';
+    }
+  }
+  return null;
 }
+
+/** Whether a value holds a secret or may be an echo cut inside one (`echoedSecret` not null). */
+export const holdsSecret = (raw: string, clipped: string, secrets: Iterable<string>): boolean =>
+  echoedSecret(raw, clipped, secrets) !== null;

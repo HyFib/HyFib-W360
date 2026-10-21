@@ -25,12 +25,14 @@ saved nothing. This closes P4-02's "response headers or non-JSON bodies as value
   name, or a secret name of six or more characters as whole parts), is refused by the publish
   checks. The worker repeats them with the company's current secret names.
 - **Echoed secrets** (`automations/echo.ts`): the worker leaves out a value holding a secret value
-  (eight characters or more) the request carried, checked on the whole value before clipping, as
-  written and JSON-unescaped, URL- and form-decoded, with character references read, and for the
-  secret in base64 or base64url at every alignment; a value ending with four or more characters of
-  a secret's start is left out too. Secrets transformed otherwise are not recognised (T355).
+  the request carried (eight characters or more anywhere; a shorter one, such as a PIN, as a whole
+  token), checked on the whole value before clipping, as written and JSON-unescaped, URL- and
+  form-decoded, with character references read, and for the secret in base64 or base64url at every
+  alignment in each of those forms; a value ending, after other text, with four or more characters
+  of a long secret's start is left out as a possible cut echo. Secrets transformed otherwise are
+  not recognised (T355). Settings still accepts short secrets (documented in ADR-406).
 - **Answers left out are recorded:** by name and reason (`refused_header`, `secret_header`,
-  `echoed_secret`; never the value) in `automation_http_calls.dropped_values` (migration 0319,
+  `echoed_secret`, `possible_cut_echo`; never the value) in `automation_http_calls.dropped_values` (migration 0319,
   with the call's guard extended), returned in the run view's `httpCalls` and shown on the run
   page ("Not saved: …"); exported with the call.
 - **Editor:** "Value N from" (JSON path, Header, Body text, Status code) with the input the source
@@ -49,6 +51,18 @@ recorded and shown). Also: short secret names refused X-Request-Id, deny-list ga
 this entry claimed a test of the worker's secret-name check that did not exist (now written), and
 DEPLOYMENT had no note.
 
+### Second review fixes (third commit)
+
+A second review found no High and one Medium, fixed: secrets shorter than eight characters, which
+Settings still accepts, were no longer looked for, so an echoed PIN was saved (now found as a
+whole token in every decoded form; the status is left out only when a secret is exactly it). Also
+fixed: the end-overlap rule dropped ordinary values such as "live" as echoes (now only after other
+text, recorded as `possible_cut_echo` with its own runbook advice); a secret named `x_…` no longer
+matched its header (prefix ignored on both sides); base64 inside JSON escapes or percent-encoding
+was missed (now checked in every decoded form); answers left out are shown in the step's order;
+`authn`, `authz`, `passcode` and `hmac` are refused; T355 names a numeric secret parsed again as an
+unrecognised transform. 0319 was changed in place (unapplied): only its comment.
+
 ### Tests
 
 - Unit (`automations/http-save.test.ts`, `outside-json.test.ts`, `apps/web` labels): each source,
@@ -56,8 +70,9 @@ DEPLOYMENT had no note.
   those allowed, the publish checks (a secret's request header, a secret's name, short secret
   names), content types and charsets, UTF-8 decoding, byte order marks, NUL, clipping, repeated
   headers, a non-JSON body with other sources, runtime refusals and the reasons recorded, echoed
-  secrets across the 1,000-character cut for the header, text and JSON sources, a cut echo, each
-  encoding, short secrets, values that only look encoded, the run page's wording of answers left
+  secrets across the 1,000-character cut for the header, text and JSON sources, a possible cut
+  echo and a value that is only a secret's start, each encoding, base64 inside escapes and
+  percent-encoding, short secrets as whole tokens and the status, values that only look encoded, the run page's wording of answers left
   out, the editor's source changes and the simulator's labels, and the interpreter carrying
   sources and saving the worker's values.
 - Integration (`automation-http.test.ts`, CI only): a header, a repeated header, a text body and
@@ -70,8 +85,10 @@ DEPLOYMENT had no note.
   refused Set-Cookie with its message, the simulator's labels and the live answer using them.
 - Manual mutation testing: 23/23 deliberate regressions caught by the unit tests in the first
   commit (a 24th, a redundant fixed list of credential headers, survived and the list was
-  removed); for the review's fixes 25/25 (24/25 first: base64url was not distinguished from base64
-  until the test used a secret whose encoding holds +). The worker's loading of secret names and
+  removed); for the first review's fixes 25/25 (24/25 first: base64url was not distinguished from
+  base64 until the test used a secret whose encoding holds +); for the second review's fixes 14/14
+  (13/14 first: the order of answers left out survived until the test's order differed from the
+  object's). The worker's loading of secret names and
   the column, its check and guard are covered by the integration tests only.
 
 ### Test commands and results (local, 2026-10-21)
@@ -79,7 +96,7 @@ DEPLOYMENT had no note.
 | Command                                            | Result                                                     |
 | -------------------------------------------------- | ---------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                      |
-| `pnpm test` (unit)                                 | 1,985 of 1,985 passed (180 files)                          |
+| `pnpm test` (unit)                                 | 1,987 of 1,987 passed (180 files)                          |
 | `pnpm build`                                       | passed                                                     |
 | migration 0319 parse check (pglast)                | parsed, PL/pgSQL included                                  |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: no local PostgreSQL or browser; CI runs them |

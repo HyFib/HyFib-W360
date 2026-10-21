@@ -4,10 +4,12 @@
 -- An HTTP step saves values from a successful response: a JSON path, a header, the body as text or
 -- the status. The worker leaves a value out when its header is refused (a credential or session
 -- header, a header the step sends a secret in, or one named like a company secret, which may have
--- been added after publishing) or when it holds a secret the request carried (a server echoing the
--- request). `dropped_values` records each such answer's name with its reason code
--- (`refused_header`, `secret_header`, `echoed_secret`), never the value, so the run page can say
--- why an answer is empty and operators know a secret was echoed. Operational metadata, no
+-- been added after publishing), when it holds a secret the request carried (a server echoing the
+-- request) or when it ends with the start of one (possibly an echo cut inside it).
+-- `dropped_values` records each such answer's name with its reason code (`refused_header`,
+-- `secret_header`, `echoed_secret`, `possible_cut_echo`), never the value, so the run page can say
+-- why an answer is empty and operators know a secret was echoed. The codes are checked in code,
+-- not here, so a later reason needs no migration. Operational metadata, no
 -- customer content: exported with the call, deleted with its run, kept as the call's outcome is.
 --
 -- Expand only: a column with a constant default is added without rewriting the table, and the
