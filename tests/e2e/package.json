@@ -7,7 +7,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {
-    "@playwright/test": "1.63.0",
+    "@playwright/test": "1.64.1",
     "@types/node": "24.19.0",
     "@types/pg": "8.23.1",
     "@w360/core": "workspace:*",
