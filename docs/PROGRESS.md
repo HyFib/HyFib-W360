@@ -1,5 +1,25 @@
 # Progress
 
+## 2026-10-28 — Dependency security updates (PR #107)
+
+Status: **Done; lint, format, type check, unit tests and build run locally; integration and e2e
+tests run in CI only.** CI's dependency audit (`pnpm audit --audit-level=high`) began failing on
+advisories published after the last green run: Next.js 16.0.0 to 16.4.0 (GHSA-2464-fhr4-w9xw and
+GHSA-673q-mjm6-r5xr, critical; GHSA-p3m5-59mp-jv5r, high), better-auth before 1.7.7
+(GHSA-965c-763c-88jm, critical; GHSA-r4xp-prcw-77qf, high; GHSA-44jh-23m7-hpcf, low), zod before
+4.6.6 (GHSA-mrhx-c7xc-m3w5, high), nodemailer before 10.1.4 (five moderate) and @vitest/mocker
+before 5.0.3 (two moderate).
+
+- **Upgrades:** next 16.3.8 to 16.4.3, better-auth 1.7.6 to 1.7.14, zod 4.6.5 to 4.6.7 in every
+  package, nodemailer 10.0.10 to 10.2.1, vitest and @vitest/coverage-v8 5.0.2 to 5.0.5;
+  `pnpm dedupe` removed the last zod 4.6.5 (through eslint-plugin-react-hooks). `pnpm audit` now
+  reports no known vulnerabilities. The Next ESLint packages stay at 16.3.6 (no advisory; their
+  patch in `patches/` is pinned to that version).
+- **Behaviour change:** zod 4.6.6 and later reject an array over its length limit before they
+  check its items, so an automation step with too many buttons no longer also reports an
+  over-long title in the same pass (checked directly against zod 4.6.7). The interpreter test now
+  checks the title limit on a step within the button limit.
+
 ## 2026-10-21 — A hosted MCP server over the public API (W-141, ADR-416)
 
 Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI

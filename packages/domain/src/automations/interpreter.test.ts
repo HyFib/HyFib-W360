@@ -331,10 +331,42 @@ describe('automation graph checks', () => {
         expect.arrayContaining([
           'The question is limited to 1024 characters.',
           'WhatsApp allows at most 3 buttons.',
-          'WhatsApp limits button titles to 20 characters.',
         ]),
       );
       expect(tooMany.issues.every((i) => i.nodeId === 'q')).toBe(true);
+    }
+
+    // zod rejects an array over its length limit before it checks the items, so the title limit
+    // needs a step whose button count is within WhatsApp's.
+    const longTitle = parseGraph({
+      version: 1,
+      start: 'q',
+      nodes: [
+        {
+          id: 'q',
+          type: 'ask_buttons',
+          header: null,
+          body: 'Pick one',
+          footer: null,
+          buttons: [
+            { title: 'One', next: null },
+            { title: 'A title longer than twenty', next: null },
+          ],
+          saveAs: null,
+          retryText: null,
+          retries: 0,
+          noMatchNext: null,
+          timeoutMinutes: 10,
+          timeoutNext: null,
+        },
+      ],
+    });
+    expect(longTitle.ok).toBe(false);
+    if (!longTitle.ok) {
+      expect(longTitle.issues.map((i) => i.message)).toEqual([
+        'WhatsApp limits button titles to 20 characters.',
+      ]);
+      expect(longTitle.issues.every((i) => i.nodeId === 'q')).toBe(true);
     }
   });
 });
