@@ -101,6 +101,9 @@ An independent review checked the specification claims and found no High issue.
   revision lists them, and MCP-008 is corrected; the mutation accounting says the integration
   tests did not run here; the settings card says when the plan leaves the API out and marks tools
   whose scopes it leaves out; a token-shaped literal in a unit test is now generated at run time.
+- **CI's first end-to-end run (PR #107):** the e2e's body that is not JSON was a string sent
+  with a JSON content type, which Playwright encodes as a JSON string (valid JSON), so the
+  endpoint rightly answered -32600. The test now sends the bytes themselves.
 
 ### Test commands and results (local, 2026-10-21)
 
@@ -449,6 +452,11 @@ coupon copy-code button, and Meta's sample app shows one only inside a limited-t
   expected PostgreSQL's message, but the database layer maps a refused privilege to `forbidden`
   ("Operation not permitted.") with the reason as its cause; it now checks both, as the campaign
   variant test does. The refusal itself was right.
+- **CI's first end-to-end run (PR #107):** on desktop Chromium a photo reply chosen right after
+  the caption was cleared was still refused. The card told the composer it was free in a passive
+  effect, whose update renders later and can yield, so the next change event still saw it in use.
+  The card now reports it in a layout effect, which renders in the same task, and the composer
+  keeps its ref of the box and the card the same way.
 
 ### Test commands and results (local, 2026-10-21)
 

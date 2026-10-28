@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useId, useState } from 'react';
+import { useId, useLayoutEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Field, Input, Textarea } from '@w360/ui';
 import { ClientButton, ClientForm } from '@/components/client-form';
@@ -82,7 +82,9 @@ export function FileSender({
   const [file, setFile] = useState<File | null>(null);
   const [caption, setCaption] = useState(inserted?.caption ?? '');
   const inUse = file !== null || inserted !== null || caption.trim() !== '';
-  useEffect(() => {
+  // A layout effect, so the composer learns it in the same task: a passive effect's update renders
+  // later, and a saved reply chosen in between would still find the card in use.
+  useLayoutEffect(() => {
     onContentChange?.(inUse);
   }, [inUse, onContentChange]);
   const [key, setKey] = useState(clientKey);

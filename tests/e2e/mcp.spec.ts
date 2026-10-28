@@ -152,9 +152,10 @@ test('an assistant uses the MCP endpoint with a read-only key, counted as API re
   });
 
   // 6. A body that is not JSON: counted (the pipeline reads it after counting, as for REST) and
-  // answered with JSON-RPC's parse error.
+  // answered with JSON-RPC's parse error. Sent as bytes: Playwright encodes a string that is not
+  // JSON as a JSON string when the content type is JSON, which would be valid JSON.
   const broken = await request.post('/api/mcp', {
-    data: '{"jsonrpc":"2.0",',
+    data: Buffer.from('{"jsonrpc":"2.0",', 'utf8'),
     headers: { ...auth, 'Content-Type': 'application/json' },
   });
   expect(broken.status()).toBe(400);

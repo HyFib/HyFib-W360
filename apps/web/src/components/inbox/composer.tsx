@@ -1,6 +1,6 @@
 'use client';
 import { useRouter } from 'next/navigation';
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
+import { useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { clipText } from '@w360/core/text';
 import { Button, Select, Textarea } from '@w360/ui';
 import {
@@ -113,7 +113,7 @@ export function Composer({
   // What the reply box and the file card hold now: both stay editable while a saved reply's file
   // is checked, so its result must not apply the text or the card as they were when it started.
   const latest = useRef({ text, fileCardInUse });
-  useEffect(() => {
+  useLayoutEffect(() => {
     latest.current = { text, fileCardInUse };
   });
   // Without a file card (the window is closed), a reply's file could not be sent.
