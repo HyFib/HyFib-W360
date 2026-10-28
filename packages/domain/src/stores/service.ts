@@ -46,6 +46,7 @@ import {
   normalizeShopDomain,
   normalizeStoreUrl,
   hasCustomerAccess,
+  hasShipmentAccess,
   shopifyAuthorizeUrl,
   shopifyScopesFor,
   storeWebhookSecretAad,
@@ -193,6 +194,79 @@ export function createStoreService(deps: StoreServiceDeps) {
     // Store orders carry customers' names, numbers and emails.
     assertCan(ctx, 'contacts.read');
   };
+
+  /** The handshake for more access on a connected Shopify store (customers or shipments). */
+  async function startMoreAccess(
+    ctx: TenantContext,
+    storeId: string,
+    kind: 'customers' | 'shipments',
+    meta: RequestMeta,
+  ) {
+    assertCan(ctx, 'commerce.manage');
+    const config = deps.shopify;
+    if (!config) throw new AppError('unsupported', 'Shopify is not set up for HyFib yet.');
+    const { id } = parseInput(z.object({ id: z.uuid() }), { id: storeId });
+    const { token, hash } = newConnectToken();
+    const now = deps.clock.now();
+    const store = await db.run(ctx.scope, async (tx) => {
+      const row = await lockStore(tx, ctx, id);
+      if (row.platform !== 'shopify' || !row.shopDomain) {
+        throw new AppError(
+          'conflict',
+          kind === 'customers'
+            ? 'Only Shopify stores have customer access.'
+            : 'Only Shopify stores send shipment updates.',
+        );
+      }
+      if (row.state !== 'connected') {
+        throw new AppError('conflict', 'Only a connected store can be given more access.');
+      }
+      if (kind === 'customers' && hasCustomerAccess(row.grantedScopes)) {
+        throw new AppError('conflict', 'HyFib can already read this store’s customers.');
+      }
+      if (kind === 'shipments' && hasShipmentAccess(row.grantedScopes)) {
+        throw new AppError('conflict', 'HyFib already receives this store’s shipment updates.');
+      }
+      const customerAccessRequestedAt =
+        kind === 'customers'
+          ? (row.customerAccessRequestedAt ?? now)
+          : row.customerAccessRequestedAt;
+      await tx
+        .update(commerceStores)
+        .set({
+          connectTokenHash: hash,
+          connectMembershipId: ctx.membership.id,
+          connectExpiresAt: new Date(now.getTime() + STORE_LIMITS.connectMinutes * MINUTE),
+          customerAccessRequestedAt,
+          accessError: null,
+          version: row.version + 1,
+        })
+        .where(storeWhere(ctx, row.id));
+      await recordAudit(
+        tx,
+        ctx,
+        {
+          action:
+            kind === 'customers'
+              ? 'commerce.store_customer_access_requested'
+              : 'commerce.store_shipment_access_requested',
+          subjectType: 'commerce_store',
+          subjectId: row.id,
+          metadata: { shop: row.shopDomain },
+        },
+        meta,
+      );
+      return { shopDomain: row.shopDomain, customerAccessRequestedAt };
+    });
+    return {
+      url: shopifyAuthorizeUrl(shopOrigin(config, store.shopDomain), {
+        clientId: config.clientId,
+        redirectUri: `${deps.appBaseUrl}/api/stores/shopify/callback`,
+        state: token,
+        scopes: shopifyScopesFor({ customerAccessRequestedAt: store.customerAccessRequestedAt }),
+      }),
+    };
+  }
 
   return {
     /** Whether HyFib's Shopify app is configured (WooCommerce needs nothing from HyFib). */
@@ -445,55 +519,17 @@ export function createStoreService(deps: StoreServiceDeps) {
      * its current token until the worker exchanges the approval's code (see `exchangeAccessCode`).
      */
     async startCustomerAccess(ctx: TenantContext, storeId: string, meta: RequestMeta = {}) {
-      assertCan(ctx, 'commerce.manage');
-      const config = deps.shopify;
-      if (!config) throw new AppError('unsupported', 'Shopify is not set up for HyFib yet.');
-      const { id } = parseInput(z.object({ id: z.uuid() }), { id: storeId });
-      const { token, hash } = newConnectToken();
-      const now = deps.clock.now();
-      const shopDomain = await db.run(ctx.scope, async (tx) => {
-        const store = await lockStore(tx, ctx, id);
-        if (store.platform !== 'shopify' || !store.shopDomain) {
-          throw new AppError('conflict', 'Only Shopify stores have customer access.');
-        }
-        if (store.state !== 'connected') {
-          throw new AppError('conflict', 'Only a connected store can be given more access.');
-        }
-        if (hasCustomerAccess(store.grantedScopes)) {
-          throw new AppError('conflict', 'HyFib can already read this store’s customers.');
-        }
-        await tx
-          .update(commerceStores)
-          .set({
-            connectTokenHash: hash,
-            connectMembershipId: ctx.membership.id,
-            connectExpiresAt: new Date(now.getTime() + STORE_LIMITS.connectMinutes * MINUTE),
-            customerAccessRequestedAt: store.customerAccessRequestedAt ?? now,
-            accessError: null,
-            version: store.version + 1,
-          })
-          .where(storeWhere(ctx, store.id));
-        await recordAudit(
-          tx,
-          ctx,
-          {
-            action: 'commerce.store_customer_access_requested',
-            subjectType: 'commerce_store',
-            subjectId: store.id,
-            metadata: { shop: store.shopDomain },
-          },
-          meta,
-        );
-        return store.shopDomain;
-      });
-      return {
-        url: shopifyAuthorizeUrl(shopOrigin(config, shopDomain), {
-          clientId: config.clientId,
-          redirectUri: `${deps.appBaseUrl}/api/stores/shopify/callback`,
-          state: token,
-          scopes: shopifyScopesFor({ customerAccessRequestedAt: now }),
-        }),
-      };
+      return startMoreAccess(ctx, storeId, 'customers', meta);
+    },
+
+    /**
+     * Asks Shopify for shipment updates on a store connected before they existed (ADR-413): the
+     * same handshake, for the scopes every authorization now asks for (with `read_fulfillments`,
+     * SH-044). Once the worker has exchanged the approval, its webhook check subscribes to the
+     * shipment topics; until then shipments are read with their orders.
+     */
+    async startShipmentAccess(ctx: TenantContext, storeId: string, meta: RequestMeta = {}) {
+      return startMoreAccess(ctx, storeId, 'shipments', meta);
     },
 
     /**
@@ -593,7 +629,11 @@ export function createStoreService(deps: StoreServiceDeps) {
             tx,
             ctx,
             {
-              action: 'commerce.store_customer_access_approved',
+              // A pending request for customer access, else shipment updates (ADR-413).
+              action:
+                store.customerAccessRequestedAt !== null && !hasCustomerAccess(store.grantedScopes)
+                  ? 'commerce.store_customer_access_approved'
+                  : 'commerce.store_shipment_access_approved',
               subjectType: 'commerce_store',
               subjectId: store.id,
               metadata: { shop: store.shopDomain },

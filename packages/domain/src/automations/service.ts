@@ -5,12 +5,15 @@ import {
   and,
   apiKeys,
   asc,
+  automationRunCampaigns,
   automationRunSteps,
   automationHttpCalls,
   automationEnrollments,
   automationRuns,
   automationVersions,
   automations,
+  campaignVariants,
+  campaigns,
   channelAccounts,
   commerceCatalogs,
   commerceProducts,
@@ -56,6 +59,8 @@ import { SENDABLE_STATUSES } from '../flows/service';
 import { RUN_CSV_COLUMNS, runCsvLine, type RunCsvRow } from './runs-csv';
 import {
   apiInputValues,
+  CAMPAIGN_PICKER_LIMIT,
+  campaignTriggerIssues,
   canonicalJson,
   checkGraph,
   describeTrigger,
@@ -70,11 +75,13 @@ import {
   triggerIssues,
   type AutomationGraph,
   type AutomationTrigger,
+  type CampaignReference,
   type GraphIssue,
   type GraphReferences,
   type TemplateReference,
 } from './graph';
 import { appendRunStep, endRun, endRunForHuman, lockActiveRun, signalAutomationRun } from './runs';
+import { runCampaignOf } from './run-campaigns';
 import { assertLiveAutomationAvailable, assertModule } from '../plans/entitlements';
 
 /**
@@ -203,6 +210,12 @@ export interface AutomationDetail {
      * member who cannot see the catalogs (`commerce.read`).
      */
     products: AutomationProductOption[] | null;
+    /**
+     * Campaigns for a trigger started by replies to a campaign (ADR-414): the most recent
+     * `CAMPAIGN_PICKER_LIMIT` and the one the draft chose, with their quick-reply buttons. Null for
+     * a member who cannot see campaigns (`campaigns.read`).
+     */
+    campaigns: AutomationCampaignOption[] | null;
     fields: { key: string; label: string; type: string }[];
     /** Domains HTTP steps may call, and the secrets they may use (never their values). */
     allowedDomains: string[];
@@ -255,6 +268,15 @@ export interface AutomationPipelineOption {
   stages: { id: string; name: string }[];
 }
 
+/** What a campaign's buttons are read from: its templates' quick replies. */
+type CampaignTemplate = Pick<AutomationTemplateOption, 'id' | 'quickReplies'>;
+
+/** A campaign a trigger started by replies to a campaign may choose (ADR-414). */
+export interface AutomationCampaignOption extends CampaignReference {
+  status: string;
+  createdAt: string;
+}
+
 export interface AutomationTemplateOption extends TemplateReference {
   id: string;
   language: string;
@@ -300,6 +322,21 @@ export interface RunDetail extends RunSummary {
   enrolledByKeyName: string | null;
   /** The order the run reads (members with `commerce.read`; null when none or gone). */
   order: { id: string; name: string; storeName: string } | null;
+  /**
+   * The campaign a run started by a reply to a campaign answers (ADR-414): named only to members
+   * with `campaigns.read` (`hidden` otherwise), its button only to those who can see the
+   * conversation, as its answers; null for other runs.
+   */
+  campaign:
+    | { hidden: true }
+    | {
+        hidden: false;
+        id: string;
+        name: string;
+        variant: string | null;
+        buttonText: string | null;
+      }
+    | null;
   graph: AutomationGraph | null;
   /** Answers the run captured; only for members who can see the conversation. */
   variables: Record<string, string> | null;
@@ -532,6 +569,100 @@ export function createAutomationService(deps: AutomationServiceDeps) {
     return [...listed, ...named];
   }
 
+  /**
+   * Campaigns for a trigger started by replies to a campaign (ADR-414), with the quick-reply button
+   * texts of their templates (every variant's): the most recent `CAMPAIGN_PICKER_LIMIT` for the
+   * builder's picker, and the chosen one. The caller decides who sees them (`campaigns.read`).
+   */
+  async function campaignOptions(
+    tx: Tx,
+    tenantId: string,
+    chosen: string | null,
+    picker: boolean,
+    templates: readonly CampaignTemplate[],
+  ): Promise<AutomationCampaignOption[]> {
+    const select = () =>
+      tx
+        .select({
+          id: campaigns.id,
+          name: campaigns.name,
+          status: campaigns.status,
+          channelAccountId: campaigns.channelAccountId,
+          templateId: campaigns.templateId,
+          createdAt: campaigns.createdAt,
+        })
+        .from(campaigns);
+    const listed = picker
+      ? await select()
+          .where(eq(campaigns.tenantId, tenantId))
+          .orderBy(desc(campaigns.createdAt), desc(campaigns.id))
+          .limit(CAMPAIGN_PICKER_LIMIT)
+      : [];
+    const named =
+      chosen && !listed.some((c) => c.id === chosen)
+        ? await select().where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, chosen)))
+        : [];
+    const rows = [...listed, ...named];
+    if (rows.length === 0) return [];
+    const variants = await tx
+      .select({ campaignId: campaignVariants.campaignId, templateId: campaignVariants.templateId })
+      .from(campaignVariants)
+      .where(
+        and(
+          eq(campaignVariants.tenantId, tenantId),
+          inArray(
+            campaignVariants.campaignId,
+            rows.map((r) => r.id),
+          ),
+        ),
+      );
+    const buttonsOf = (templateId: string | null) =>
+      templates.find((t) => t.id === templateId)?.quickReplies.map((q) => q.title) ?? [];
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      status: r.status,
+      channelAccountId: r.channelAccountId,
+      createdAt: r.createdAt.toISOString(),
+      buttons: [
+        ...new Set([
+          ...buttonsOf(r.templateId),
+          ...variants.filter((v) => v.campaignId === r.id).flatMap((v) => buttonsOf(v.templateId)),
+        ]),
+      ],
+    }));
+  }
+
+  /** The trigger's campaign checks (ADR-414), with the chosen campaign read in the company. */
+  async function campaignIssues(
+    tx: Tx,
+    tenantId: string,
+    trigger: AutomationTrigger,
+    channelAccountId: string | null,
+    templates: readonly CampaignTemplate[],
+  ): Promise<GraphIssue[]> {
+    if (trigger.type !== 'campaign_reply' || trigger.campaignId === null) return [];
+    const options = await campaignOptions(tx, tenantId, trigger.campaignId, false, templates);
+    return campaignTriggerIssues(trigger, channelAccountId, new Map(options.map((o) => [o.id, o])));
+  }
+
+  /**
+   * Saving, publishing or testing an automation started by replies to a campaign needs
+   * `campaigns.read` besides the automations permission (ADR-414): the trigger names a campaign,
+   * and its runs name it.
+   */
+  function assertMayFollowCampaigns(
+    ctx: TenantContext,
+    trigger: AutomationTrigger,
+    action: 'save' | 'publish' | 'test',
+  ) {
+    if (trigger.type !== 'campaign_reply' || can(ctx, 'campaigns.read')) return;
+    const doing = action === 'save' ? 'Saving' : action === 'publish' ? 'Publishing' : 'Testing';
+    throw forbidden(
+      `${doing} an automation started by replies to a campaign needs the permission to see campaigns.`,
+    );
+  }
+
   async function references(
     tx: Tx,
     tenantId: string,
@@ -663,6 +794,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
       templates: new Map(refs.templates.map((t) => [t.id, t])),
       storeEvent: context.trigger?.type === 'store_event',
       apiInputs: context.trigger?.type === 'api' ? new Set(context.trigger.inputs) : undefined,
+      campaignReply: context.trigger?.type === 'campaign_reply',
       channelWhatsappAccountId: context.channelWhatsappAccountId,
     };
   }
@@ -782,17 +914,25 @@ export function createAutomationService(deps: AutomationServiceDeps) {
     if (row.draftChannelAccountId && !channel) {
       throw new AppError('precondition_failed', 'Choose a WhatsApp number again.');
     }
+    const refs = await references(tx, row.tenantId, {
+      ids: productsOf(graph.graph),
+      picker: false,
+    });
     const errors = [
       ...triggerIssues(trigger.trigger, row.draftChannelAccountId),
+      ...(await campaignIssues(
+        tx,
+        row.tenantId,
+        trigger.trigger,
+        row.draftChannelAccountId,
+        refs.templates,
+      )),
       ...checkGraph(
         graph.graph,
-        graphRefs(
-          await references(tx, row.tenantId, { ids: productsOf(graph.graph), picker: false }),
-          {
-            trigger: trigger.trigger,
-            channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
-          },
-        ),
+        graphRefs(refs, {
+          trigger: trigger.trigger,
+          channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
+        }),
       ),
     ].filter((i) => i.level === 'error');
     if (errors.length > 0) {
@@ -1003,8 +1143,28 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           });
           const { teamRows, fieldRows } = refs;
           const issues: GraphIssue[] = [];
+          // Campaigns for the trigger's picker (ADR-414), only for members who can see campaigns.
+          const seesCampaigns = can(ctx, 'campaigns.read');
+          const chosenCampaign =
+            trigger.ok && trigger.trigger.type === 'campaign_reply'
+              ? trigger.trigger.campaignId
+              : null;
+          // Without the permission nothing about a campaign is read or named, not even in the
+          // checks (the server checks the campaign again when the draft is published).
+          const campaignRefs = seesCampaigns
+            ? await campaignOptions(tx, ctx.tenant.id, chosenCampaign, true, refs.templates)
+            : null;
           if (!trigger.ok) issues.push({ level: 'error', nodeId: null, message: trigger.message });
-          else issues.push(...triggerIssues(trigger.trigger, a.draftChannelAccountId));
+          else {
+            issues.push(...triggerIssues(trigger.trigger, a.draftChannelAccountId));
+            issues.push(
+              ...campaignTriggerIssues(
+                trigger.trigger,
+                a.draftChannelAccountId,
+                campaignRefs ? new Map(campaignRefs.map((o) => [o.id, o])) : undefined,
+              ),
+            );
+          }
           if (graph.ok) {
             issues.push(
               ...checkGraph(
@@ -1098,6 +1258,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               dealFields: refs.dealFields,
               flows: refs.flows,
               products: seesCatalogs ? refs.products : null,
+              campaigns: campaignRefs,
               fields: fieldRows,
               allowedDomains: refs.domains,
               secrets: refs.secrets,
@@ -1198,6 +1359,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           },
         );
       }
+      assertMayFollowCampaigns(ctx, trigger.trigger, 'save');
       return db.run(ctx.scope, async (tx) => {
         const row = await lockAutomation(tx, ctx, data.id, data.expectedVersion);
         if (row.status === 'archived')
@@ -1226,6 +1388,19 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           if (!channel)
             throw new AppError('validation_failed', 'Choose a WhatsApp number of this company.');
         }
+        if (trigger.trigger.type === 'campaign_reply' && trigger.trigger.campaignId) {
+          const [campaign] = await tx
+            .select({ id: campaigns.id })
+            .from(campaigns)
+            .where(
+              and(
+                eq(campaigns.tenantId, ctx.tenant.id),
+                eq(campaigns.id, trigger.trigger.campaignId),
+              ),
+            );
+          if (!campaign)
+            throw new AppError('validation_failed', 'Choose a campaign of this company.');
+        }
         const now = clock.now();
         await tx
           .update(automations)
@@ -1247,22 +1422,27 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           meta,
         );
         const channel = await channelAccountOf(tx, ctx.tenant.id, data.channelAccountId);
+        const refs = await references(tx, ctx.tenant.id, {
+          ids: productsOf(graph.graph),
+          picker: false,
+        });
         return {
           version: row.version + 1,
           issues: [
             ...triggerIssues(trigger.trigger, data.channelAccountId),
+            ...(await campaignIssues(
+              tx,
+              ctx.tenant.id,
+              trigger.trigger,
+              data.channelAccountId,
+              refs.templates,
+            )),
             ...checkGraph(
               graph.graph,
-              graphRefs(
-                await references(tx, ctx.tenant.id, {
-                  ids: productsOf(graph.graph),
-                  picker: false,
-                }),
-                {
-                  trigger: trigger.trigger,
-                  channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
-                },
-              ),
+              graphRefs(refs, {
+                trigger: trigger.trigger,
+                channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
+              }),
             ),
           ],
         };
@@ -1278,6 +1458,9 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           throw new AppError('precondition_failed', 'Restore the automation before publishing it.');
         // The first publication makes the automation live.
         if (row.status === 'draft') await assertLiveAutomationAvailable(tx, ctx.tenant.id, row.id);
+        // Before the draft's checks, whose messages can name the campaign.
+        const draftTrigger = parseTrigger(row.draftTrigger);
+        if (draftTrigger.ok) assertMayFollowCampaigns(ctx, draftTrigger.trigger, 'publish');
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'publish');
         assertMayChangeCrm(ctx, graph, 'publish');
@@ -1483,6 +1666,9 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         const row = await lockAutomation(tx, ctx, data.id, data.expectedVersion);
         if (row.status === 'archived')
           throw new AppError('precondition_failed', 'Restore the automation before testing it.');
+        // Before the draft's checks, whose messages can name the campaign.
+        const draftTrigger = parseTrigger(row.draftTrigger);
+        if (draftTrigger.ok) assertMayFollowCampaigns(ctx, draftTrigger.trigger, 'test');
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'test');
         assertMayChangeCrm(ctx, graph, 'test');
@@ -1603,6 +1789,19 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           nextStepAt: now,
           startedAt: now,
         });
+        // A test of an automation started by replies to a chosen campaign acts as a reply to it
+        // (ADR-414): {{campaign.name}} reads the campaign, {{campaign.button}} the trigger's button,
+        // and {{campaign.variant}} stays empty, as no campaign message was answered.
+        if (trigger.type === 'campaign_reply' && trigger.campaignId) {
+          await tx.insert(automationRunCampaigns).values({
+            id: uuidv7(),
+            tenantId: ctx.tenant.id,
+            runId,
+            campaignId: trigger.campaignId,
+            variant: null,
+            buttonText: trigger.button,
+          });
+        }
         await appendRunStep(tx, ctx.tenant.id, runId, {
           nodeId: null,
           nodeType: null,
@@ -1945,6 +2144,20 @@ export function createAutomationService(deps: AutomationServiceDeps) {
                     ),
                   )
               : [];
+          // The campaign it answers (ADR-414): named to members who can read campaigns, its
+          // button to those who can see the conversation.
+          const runCampaign = await runCampaignOf(tx, ctx.tenant.id, r.run.id);
+          const campaign: RunDetail['campaign'] = !runCampaign
+            ? null
+            : can(ctx, 'campaigns.read')
+              ? {
+                  hidden: false,
+                  id: runCampaign.campaignId,
+                  name: runCampaign.name,
+                  variant: runCampaign.variant,
+                  buttonText: visible ? runCampaign.buttonText : null,
+                }
+              : { hidden: true };
           return {
             id: r.run.id,
             automationId: r.run.automationId,
@@ -1972,6 +2185,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             enrolledByName: nameOf(r.enrolledBy),
             enrolledByKeyName: enrolledByKey?.name ?? null,
             order: order ?? null,
+            campaign,
             graph: graph.ok ? graph.graph : null,
             variables: visible ? r.run.variables : null,
             log: steps.map((s) => ({

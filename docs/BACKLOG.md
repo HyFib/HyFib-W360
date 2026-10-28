@@ -133,7 +133,8 @@ verification, app review, Embedded Signup configuration).
   company's marketing opt-out keyword as a button; no migration). **Remaining:** creating media
   headers (Resumable Upload + media storage) and sending them outside the API (which sends them with
   a link since ADR-201), named parameters, authentication/OTP, carousel, LTO, copy-code and catalog
-  templates, changing a template's category in an edit, starters in other languages, and a sandbox
+  templates (copy-code waits for a source, M-202: the OpenAPI description has no coupon button;
+  Meta's sample app shows one only inside a limited-time-offer template), changing a template's category in an edit, starters in other languages, and a sandbox
   run with a real WABA. **[Editing a template Meta has built; its database and browser tests run
   only in CI]** (ADR-404: `POST /{template-id}` from the Templates page and the API, written ahead,
   paced, re-read from Meta, lost answers settled by the sync; name, language and category stay;
@@ -240,9 +241,16 @@ verification, app review, Embedded Signup configuration).
   team uses the company's closed days or a list of its own, possibly empty, in Settings → Teams and
   the teams API, so it can work on public holidays or close on its own days; used while the
   company's business hours are on, wherever the team's calendar is; the time zone stays the
-  company's). **Remaining:** private team queues (would change visibility,
+  company's). **[Saved replies that carry a file built; their database and browser tests run only
+  in CI]** (ADR-411, W-087, migration 0321: a saved reply may carry one photo, video, recording or
+  document of the inbox's types, kept once per company in the database and shared by replies with
+  the same file, 100 MB a company; supervisors add, replace and remove it in Settings; inserting
+  the reply checks the file and attaches it to Send a file with the text as its caption, for the
+  member to review and send through the inbox's file path; the API describes it on each reply).
+  **Remaining:** private team queues (would change visibility,
   ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
-  (phone-number masking: P3-01, ADR-226).
+  (phone-number masking: P3-01, ADR-226), saved replies' files in automations and keys adding them,
+  stored templates or bots as reply material (W-087), and object storage for files (none exists).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 
@@ -289,8 +297,16 @@ verification, app review, Embedded Signup configuration).
   reason of a refusal, the run and when it was handled, 50 per keyset page, filtered by outcome,
   for members with `automations.read` and `contacts.read`, numbers masked as elsewhere and erased
   contacts named as erased; `GET /automations/{id}/enrollments/{enrollmentId}/contacts` gives them
-  by id with `automations.start` and `contacts.read`). **Remaining:** starting runs from
-  campaigns, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox
+  by id with `automations.start` and `contacts.read`). **[Runs started by replies to a campaign
+  built; their database and browser tests run only in CI]** (ADR-414, migrations 0324 and 0327: a
+  `campaign_reply` trigger starts when a customer quotes a campaign message or taps one of its
+  template's quick-reply buttons within 72 hours of its queueing, for any campaign or a chosen one
+  and optionally one button's text, ranked above every keyword; the run records the campaign, the
+  variant sent and the button, `{{campaign.name}}`, `{{campaign.variant}}` and
+  `{{campaign.button}}` read them, and the run's page and run webhooks name the campaign;
+  saving, publishing and testing need `campaigns.read`). **Remaining:** starting runs when a
+  campaign message is sent rather than answered, a trigger for replies to template messages that
+  are not a campaign's (a key's send, an order message), a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox
   run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
@@ -613,10 +629,28 @@ verification, app review, Embedded Signup configuration).
   automation whose template the customer taps); 76 deliberate regressions caught. **Remaining:**
   checks with a development store, approved templates and a WhatsApp test number (release
   checklist).
-- **P4-06f Store follow-ups not built yet**: messages per shipment or on tracking changes (a rule
-  fires once per order and event); cash on delivery confirmations and cart reminders starting
-  automations (their answers and checks depend on their own templates); order data other than the
-  fields listed (for example addresses or discount codes).
+- **P4-06f Store follow-ups** — **[messages per shipment and on tracking changes built, locally
+  verified against the Shopify and Graph stand-ins; no live store or WhatsApp traffic yet]**
+  (ADR-413, migration 0323): "Shipment sent" once for each shipment of a Shopify order (each
+  fulfillment HyFib sees for the first time) and "Tracking updated" once for each tracking number or
+  link a shipment changes to that HyFib had not seen for it (the carrier's name alone is no change;
+  at most ten per shipment; a waiting message replaced by a newer tracking is skipped), with that
+  shipment's carrier, tracking number and tracking link in the existing variable mapping (fallbacks,
+  or skipped as missing); one message per shipment and key in the database, also for a webhook
+  delivered twice or read twice at once; ADR-048's checks, delay and sending hours; an automation
+  instead of a template; every authorization asks for `read_fulfillments`, the shipment webhooks
+  are subscribed once a store has it, and older stores are brought up to date by the six-hourly
+  check after a manager allows shipment updates (until then shipments are read with orders,
+  including every three hours while in transit); tracking cleared with the customer's details.
+  T: `stores.test.ts` (9 shipment tests), unit tests `stores/shipment-messages.test.ts`, e2e
+  `stores.spec.ts` (a shipment message set up and sent); 34 deliberate regressions, 22 caught by
+  unit tests (migrations 0323 and 0328). **Remaining:** checks with a development store (a fulfillment delivery's body,
+  approving the new scope on an installed store, research §5); WooCommerce shipments (core has none
+  merchants can turn on, WC-024); messages per delivery event of a shipment; outgoing webhook events
+  for shipment messages; a shipment's own tracking in automation placeholders. **Not built yet:**
+  cash on delivery confirmations and cart reminders starting automations (their answers and checks
+  depend on their own templates); order data other than the fields listed (for example addresses
+  or discount codes).
 
 ## Phase 5 — billing, wallet, platform, public API
 
@@ -1153,7 +1187,9 @@ verification, app review, Embedded Signup configuration).
   `deals.write` and `orders.read` and `DELETE /deals/{id}/items/{itemId}` with `deals.write`, as
   members change them on the deal page; recorded under P4-04).
   Remaining: call-to-action messages through the API, taking
-  reactions back,
+  reactions back (both researched for ADR-412: Meta's OpenAPI description, M-203, gives neither a
+  call-to-action URL interactive type nor a removal form, so neither is built until a readable
+  source does),
   changing a field's type,
   resuming what members or HyFib paused, limits per endpoint, availability per single endpoint
   (plans choose per scope since ADR-092), a bound on a pipeline's archived stages (kept without one
@@ -1706,14 +1742,26 @@ verification, app review, Embedded Signup configuration).
   locally verified]** (ADR-090: platform owners schedule a company's deletion on its platform page
   with the address typed and a reason the owners and administrators are emailed and read in the
   company; the same 14 days and job; whoever scheduled a deletion cancels it, so owners cannot
-  cancel HyFib's and staff cannot cancel an owner's). Remaining: stored exports, other formats, a
-  deletion job run on staging, legal review of the kept records.
+  cancel HyFib's and staff cannot cancel an owner's). **[Stored exports built; database and
+  browser tests run only in CI]** (ADR-415, migration 0325: an owner asks, a worker job writes the
+  same export into the company's rows in sealed 1 MiB parts, at most 512 MiB and one ready file a
+  company, kept 7 days; emailed a link to the page; downloaded by owners through the app with the
+  step-up, audited; one export of a company at a time, stored and streamed together). Remaining:
+  other formats, object storage, a deletion job run on staging, legal review of the kept records.
 
 ## Phase 6 — AI, calling, channels, connectors, enterprise
 
 AI copilot (budgets, retrieval with pgvector only when shipped, prompt-injection tests); Instagram and
 Messenger; SMS provider; calling (eligibility-gated); HubSpot, Salesforce, Zoho connectors; MCP
-server; SSO (SAML/OIDC via maintained implementation); agency/partner features.
+server **[hosted endpoint built, implemented]** (ADR-416, W-141: `POST /api/mcp`, the stateless
+JSON subset of Streamable HTTP for revision 2026-07-28 and, without sessions, 2025-11-25 and
+2025-06-18; nine tools over the public API's services, each needing its REST call's scopes and
+counted, limited and logged as that call through the REST pipeline: contacts, conversations and
+their messages, templates, campaigns, a text reply inside the 24-hour window and an approved
+template, both once per `idempotencyKey`; customer text marked untrusted; Settings shows the
+endpoint, scopes and a client configuration. Remaining: OAuth for assistants' connectors, SSE,
+resources and prompts, more tools, a self-hostable package (W-142), a run with a real assistant);
+SSO (SAML/OIDC via maintained implementation); agency/partner features.
 
 ## Phase 7 — hardening and rollout
 

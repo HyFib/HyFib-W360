@@ -240,8 +240,35 @@ export const commerceStoreCheckouts = appSchema.table('commerce_store_checkouts'
 });
 
 /**
+ * A Shopify order's shipments (fulfillments) as HyFib last read them with the order (migration
+ * 0323, ADR-413): what shipment messages are about. `trackingKeys` are digests of the distinct
+ * tracking numbers and links seen for the shipment (at most ten); the tracking and its digests go
+ * with the customer's details when the order is redacted.
+ */
+export const commerceStoreShipments = appSchema.table('commerce_store_shipments', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  storeId: uuid('store_id').notNull(),
+  orderId: uuid('order_id').notNull(),
+  externalId: text('external_id').notNull(),
+  status: text('status'),
+  displayStatus: text('display_status'),
+  failed: boolean('failed').notNull().default(false),
+  remoteCreatedAt: tz('remote_created_at').notNull(),
+  remoteUpdatedAt: tz('remote_updated_at').notNull(),
+  trackingCompany: text('tracking_company'),
+  trackingNumber: text('tracking_number'),
+  trackingUrl: text('tracking_url'),
+  trackingKeys: text('tracking_keys').array().notNull().default([]),
+  syncedAt: tz('synced_at').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+/**
  * Order messages (migration 0020): the template a store sends when one of its orders reaches an
- * event, and the messages themselves (at most one per order and event).
+ * event, and the messages themselves (at most one per order and event; per shipment, and per
+ * shipment and tracking, for the shipment events of migration 0323).
  */
 export const STORE_MESSAGE_EVENTS = [
   'order_placed',
@@ -249,6 +276,8 @@ export const STORE_MESSAGE_EVENTS = [
   'order_shipped',
   'order_delivered',
   'order_cancelled',
+  'shipment_created',
+  'tracking_updated',
   'cart_reminder',
   'cart_second_reminder',
 ] as const;
@@ -288,9 +317,16 @@ export const commerceStoreMessages = appSchema.table('commerce_store_messages', 
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),
   storeId: uuid('store_id').notNull(),
-  /** The subject: an order, or a checkout for the two cart reminders (0021). */
+  /**
+   * The subject: an order, a checkout for the two cart reminders (0021), or a shipment for the two
+   * shipment events (0323), whose `dedupeKey` says which of its messages it is.
+   */
   orderId: uuid('order_id'),
   checkoutId: uuid('checkout_id'),
+  shipmentId: uuid('shipment_id'),
+  dedupeKey: text('dedupe_key'),
+  /** The tracking a sent "Shipment sent" message carried (its place among the remembered ones). */
+  trackingRevision: smallint('tracking_revision'),
   event: text('event', { enum: STORE_MESSAGE_EVENTS }).notNull(),
   state: text('state', { enum: STORE_MESSAGE_STATES }).notNull().default('pending'),
   skipReason: text('skip_reason'),

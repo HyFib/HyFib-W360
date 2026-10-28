@@ -517,6 +517,25 @@ export const QUEUES = {
     deleteAfterHours: 24 * 7,
     maxWaitMinutes: 60,
   },
+  /**
+   * Writes a stored company export (ADR-415): the export's lines from one read-only snapshot,
+   * compressed and sealed a part at a time into the company's rows. A run holds its export with a
+   * lease it renews; a retry or the minute sweep's signal takes over a run whose lease ran out, and
+   * an export whose company's export lock is taken waits for the next signal. Long jobs, one or two
+   * at a time.
+   */
+  companyExport: {
+    name: 'company.export',
+    policy: 'exclusive',
+    retryLimit: 3,
+    retryDelaySeconds: 60,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 900,
+    expireInSeconds: 3600,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 24 * 7,
+    maxWaitMinutes: 60,
+  },
   // Jobs that failed all their retries. The worker records each one in ops.dead_letters (ADR-054);
   // a recording that fails is retried, and the job stays in pg-boss for its retention either way.
   deadLetter: {

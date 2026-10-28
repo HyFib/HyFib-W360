@@ -98,6 +98,8 @@ export const AUTOMATION_TRIGGER_TYPES = [
   'store_event',
   /** Started through the public API by a key (migration 0052). */
   'api',
+  /** Started by a customer's reply to a campaign message (migration 0324, ADR-414). */
+  'campaign_reply',
 ] as const;
 export type AutomationRunTrigger = (typeof AUTOMATION_TRIGGER_TYPES)[number];
 
@@ -116,11 +118,19 @@ export const automationRuns = appSchema.table('automation_runs', {
   triggerMessageId: uuid('trigger_message_id'),
   /**
    * The store order a run started by order messages (or a test run with a chosen order) reads
-   * while it runs, and the event that started it (migration 0022). Cleared when the order is deleted.
+   * while it runs, and the event that started it (migration 0022; the shipment events, 0323).
+   * Cleared when the order is deleted.
    */
   storeOrderId: uuid('store_order_id'),
   storeEvent: text('store_event', {
-    enum: ['order_placed', 'order_shipped', 'order_delivered', 'order_cancelled'],
+    enum: [
+      'order_placed',
+      'order_shipped',
+      'order_delivered',
+      'order_cancelled',
+      'shipment_created',
+      'tracking_updated',
+    ],
   }),
   /** The API key a run started through the API came from (migration 0052, ADR-077). */
   apiKeyId: uuid('api_key_id'),
@@ -157,6 +167,22 @@ export const automationRuns = appSchema.table('automation_runs', {
   endDetail: text('end_detail'),
   endedByMembershipId: uuid('ended_by_membership_id'),
   updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+/**
+ * The campaign a run answers (migration 0324, ADR-414): written once with a live run started by a
+ * reply to a campaign message (the variant the customer was sent and the quick-reply button's text,
+ * null for a quoting reply), or with a test run of an automation that names a campaign (no variant,
+ * the trigger's button). Never changed; deleted with its run.
+ */
+export const automationRunCampaigns = appSchema.table('automation_run_campaigns', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  runId: uuid('run_id').notNull(),
+  campaignId: uuid('campaign_id').notNull(),
+  variant: text('variant'),
+  buttonText: text('button_text'),
+  createdAt: tz('created_at').notNull().defaultNow(),
 });
 
 export const AUTOMATION_STEP_OUTCOMES = [

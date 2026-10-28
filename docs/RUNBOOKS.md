@@ -962,6 +962,33 @@ company whether their server echoes request headers before replacing the secret.
 server transforms otherwise is not recognised. Values are never logged; check the
 response with the company's own tools.
 
+**A reply to a campaign did not start its automation (ADR-414).** Check in order: the automation
+is active and its live version's trigger is "A customer replies to a campaign message" (a draft
+change is not live until published); the conversation was unassigned and no other run was
+handling it (the inbox shows it); the reply came within 72 hours of the recipient being queued
+(the campaign's recipients page shows when it was sent; a later reply starts what any other message
+would); the customer quoted the campaign message or tapped one of its template's quick-reply
+buttons (a message typed without quoting names no campaign message, and a reply to a member's,
+a bot's or an order message's template is not a campaign's); the automation's number is the
+campaign's or every number; a chosen button's text matches the tapped one apart from case and
+spacing (the editor warns when none of the campaign's templates has it); the business-hours filter
+and the cooldown; and whether another automation won: every campaign reply outranks every keyword,
+the chosen campaign and button first, then the chosen campaign, then any campaign with the
+button, then any campaign, ties by name. A reply that arrived before the send worker recorded
+WhatsApp's acceptance of the campaign message (a tap within the same second or so) finds no
+message with that WAMID yet and starts what any other message would. The run's page names the
+campaign, the variant and the button to members who may see them.
+
+**Migration 0324 or 0327 failed.** Each runs in its own transaction, so a failure applies nothing
+of that file. 0324 needs a brief exclusive lock on `app.automation_runs` (replacing a check,
+`NOT VALID`) and share row locks on `app.automation_runs` and `app.campaigns` for the new table's
+foreign keys; 0327 needs a brief exclusive lock on `app.webhook_endpoints` only (they are apart so
+no transaction holds both and deadlocks with a run event's delivery, which reads the endpoints
+first). A lock timeout means a long transaction held one of them: run the migrations again in a
+quieter moment; 0324 applied and 0327 not yet is a safe state (an endpoint just cannot choose
+`campaign_reply` yet). A failure on `webhook_endpoints_run_triggers` means a stored list breaks
+the new check, which allows every list the old one did; report it as a bug.
+
 **Worker restarts and deploys.** Runs are rows, so a restart delays steps but never loses or repeats
 one: queued `automation.run` jobs continue, and runs whose signal was lost are picked up by the sweep
 within about 90 seconds. A test run stops when the member who started it leaves the company ("test
@@ -1302,6 +1329,56 @@ not.
 means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). It also redefines the
 `contacts.source` check to allow `store`. The `commerce.store-message` queue is created by
 `pnpm db:migrate`.
+
+**A shipment message was not sent, or came twice (ADR-413).** "Shipment sent" goes once for each
+shipment of a Shopify order HyFib sees for the first time, and "Tracking updated" once for each
+tracking number or link a shipment changes to that HyFib had not seen for it. The report and the
+order page list them with the order; besides the order message reasons above:
+
+- "The shipment was cancelled, or failed" — Shopify reports it `CANCELLED`, `ERROR` or `FAILURE`
+  (or displayed cancelled or failed) by the time it was due; a shipment first seen so gets nothing.
+- "The shipment's tracking changed again" — while this one waited for its delay or the sending
+  hours, the shipment's tracking became a newer one, or went back to one it had before; only the
+  shipment's current tracking is sent, once.
+- "The shipment's first message already carried this tracking" — the tracking arrived while
+  "Shipment sent" waited, and that message went with it. A tracking update due while "Shipment
+  sent" still waits is moved five minutes past it.
+- "A template variable had no value" — Shopify gave the shipment no tracking number (or link) and
+  the variable has no fallback: give the variable a fallback, or use "Tracking updated" for the
+  number that comes later.
+- Nothing recorded for a new carrier name, the same number written differently (case, spaces), a
+  number the shipment had before, or more than ten trackings of one shipment: none of these is a
+  change. A customer who got "Order shipped" and "Shipment sent" for the first parcel has both
+  rules on; switch one off.
+
+**Shipment messages come hours late.** The store page's Order messages section says whether
+Shopify sends shipment updates. When it says "not allowed" (stores connected before ADR-413 lack
+`read_fulfillments`), shipments are read only with their orders: an order's own webhook, the
+hourly read, and the three-hourly re-read of orders in transit (14 days after shipping) while a
+delivered or shipment rule is on. A manager clicks "Allow shipment updates in Shopify" and
+approves; the worker exchanges the approval and subscribes `fulfillments/create` and
+`fulfillments/update` in the same run. The store page's "Webhooks" line shows a refusal ("Shopify
+did not create the FULFILLMENTS_CREATE subscription … HyFib reads shipments with their orders
+instead", or "Shopify denied access …" for the same topic): the grant was withdrawn or the app
+lacks the scope in the Partner Dashboard (docs/DEPLOYMENT.md, Shopify app step 2); the store keeps
+syncing. The web log's `shopify webhook` lines for `fulfillments/*` show `fetch_signalled`,
+`duplicate`, or `ignored_no_order` (answered 200 so Shopify keeps the subscription: the body had no
+usable `order_id`, research SH-048, unconfirmed against a real store; the order is still read by
+the hourly read and the transit check). Many `ignored_no_order` lines mean Shopify's body differs
+from the REST resource: report it, as the shipment webhooks then only add load.
+
+**Migration 0323 or 0328 failed.** 0323 runs in one transaction, so a failure applies nothing. It
+creates `app.commerce_store_shipments` (with `ops.apply_tenant_rls`, grants for `w360_app`, column
+grants and policies for `w360_definer`, and a company deletion step), a trigger on
+`app.commerce_store_orders` and three columns on `app.commerce_store_messages`, and replaces checks
+(those on the large tables `NOT VALID`); a failure on the
+definer's grants usually means the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`). A
+lock timeout means a long transaction held `app.commerce_store_messages`,
+`app.commerce_store_message_rules`, `app.commerce_store_orders` or `app.automation_runs`: run it
+again in a quieter moment. 0328 builds the unique index concurrently, outside a transaction; a
+failure (a duplicate, a cancelled build) can leave an `INVALID` index:
+`DROP INDEX CONCURRENTLY app.commerce_store_messages_shipment_uq;` then run the migrations again.
+The release must not serve until 0328 has applied (shipment messages are recorded through it).
 
 ## 10K. Cart reminders (Shopify checkouts)
 
@@ -1905,6 +1982,31 @@ the bootstrap roles are missing (`infra/db/bootstrap-roles.sql`) or a lookup fun
 by hand.
 
 ## 10N. Public API
+
+**An AI assistant cannot use the MCP endpoint** (ADR-416). The endpoint is `<app>/api/mcp` with
+an API key as `Authorization: Bearer <key>`; it answers JSON-RPC, and its refusals carry the REST
+API's message in `error.message` and the REST code and request id in `error.data`. 401, 429 and
+403 `ip_not_allowed` or `not_in_plan` mean what they mean for REST (below). 403 "Requests from this
+origin are not accepted" means a browser page sent it (an `Origin` other than the app's): MCP
+clients send no `Origin`. 405 means a GET or DELETE: the endpoint offers no SSE stream or sessions,
+so the client must POST. 400 with -32020 is a missing or mismatched `MCP-Protocol-Version`,
+`Mcp-Method` or `Mcp-Name` header; 400 with -32022 lists the versions served (2026-07-28,
+2025-11-25, 2025-06-18), and a client of an older revision cannot connect. A client that offers only
+OAuth sign-in cannot use the endpoint: it needs a client that sends a header. A tool answering
+`isError: true` with 403 "does not have the … scope" needs a key with that scope (Settings → API
+keys shows each tool's). The request log has one `api request` line per POST, path `/api/mcp`, with
+`mcp.tool`, `mcp.mirrors` (the REST call it counts as) and `mcp.mirroredStatus`. The HTTP status
+of a tool call is 200 even when it fails, so `mcp.mirroredStatus` 500 is the field to alert on: it
+marks an unexpected failure, whose `mcp tool call failed` line carries the error and the request
+id. A body that is not JSON gets 400 with -32700; text with the NUL character in a tool's arguments
+is a tool error naming the argument. Every POST, including `initialize`
+and `tools/list`, counts as one API request against the key's and the plan's limits.
+
+**An assistant sent a message nobody wanted.** Revoke or rotate the key (below); messages it sent
+carry its id like any API send. Give assistants keys with read scopes only unless sending is
+wanted, and use a client that asks before each tool call. A repeated send with the same
+`idempotencyKey` and arguments within 24 hours was not sent twice (the tool answer says
+`"replayed": true`).
 
 **A company's API key leaked.** In Settings → API keys (owners and administrators), revoke it: the
 next request with it gets 401. If the integration must keep working, rotate instead with no overlap
@@ -2630,6 +2732,24 @@ but {{name}}, {{agent}} and {{company}}), or a change that gives none of the thr
 company is suspended or its plan has ended; reads still work. The audit log has each change with the
 key, naming the shortcut, and Settings → Saved replies shows a reply a key changed last as changed
 through the API.
+
+**A saved reply's file is refused, cannot be inserted or is not sent (ADR-411).** Saving a file in
+Settings → Saved replies answers 422 for a file of another type, an empty one or one over 16 MB
+(the types members send from the inbox), and for a photo, video or document when the reply's text
+is longer than 1,024 characters (the text becomes its caption; a recording takes none): shorten
+the text first. 409 means the company's files would pass 100 MB in all: remove a file from another
+reply (a file several replies share counts once). 403 means the member does not supervise the
+inbox. In a conversation, "The file of “…” was removed after the page loaded" means a supervisor
+removed or replaced it meanwhile: reload. "… can no longer be read" means its stored bytes no
+longer match their length and SHA-256 or its type is no longer one members send; nothing was
+attached: have a supervisor attach the file again, and look at the database's health (the rows
+are checked on insert, so this should not happen). "This saved reply's file was changed or removed
+after you inserted it, so nothing was sent" (409) on Send file means the reply's file changed
+between inserting and sending: insert the reply again. Other refusals on Send file are those of
+any file (ADR-218): the window, the number, Meta's upload. A file a supervisor stored is never
+uploaded to Meta until a member sends it, and each send uploads it again (Meta keeps an upload 30
+days, for one number). The audit log has `saved_reply.file_attached` and `saved_reply.file_removed`
+with the kind and size, never the name or the content. Database size: see DEPLOYMENT (0321).
 
 **A business hours request answers 403, 404, 409, 422 or 423, or `open` is not what a team expects
 (ADR-290).** 403 `forbidden` names the scope the key lacks: `business_hours.read` or
@@ -4861,6 +4981,48 @@ after the download started is logged by the web as `company export stopped` (wit
 Large companies stream for as long as the read takes; `idle_in_transaction_session_timeout` (60 s)
 ends an export whose reader stops reading for a minute.
 
+**Stored exports (ADR-415).** An owner asks in Settings → Company data; the `company.export` job
+prepares the file (`stored export ready` in the worker log, with its bytes, parts and attempt) and
+owners and administrators get "Company data export ready". The page lists the last 10 with their
+status. A stored export waiting or being written makes the streamed export answer 409 ("being
+prepared"), and a streamed export running makes asking answer 409; that is by design (one export
+of a company at a time).
+
+- _Stuck "Waiting to start"._ The job found the export lock taken (`stored export` with outcome
+  `locked`) or was lost; the minute billing sweep signals every waiting export again
+  (`stored exports swept`). After 24 hours waiting it fails as `timed_out`. If nothing moves, check
+  the `company.export` queue (section 3).
+- _Stuck "Being prepared"._ A run renews its 5-minute lease with every part and at least every
+  minute. A crashed run's lease runs out and the sweep's signal starts a new run (attempt + 1) that
+  starts the file again; the fourth start fails it as `interrupted`.
+- _Failed._ The page and the owners' email say why: `too_large` (past 512 MiB compressed: the
+  company uses the streamed export), `requester_not_allowed` (the owner who asked is no longer one),
+  `interrupted`, `timed_out`, or `error` (the worker logged `stored export failed` with the error;
+  `failure_code` holds a database error's SQLSTATE). The owner can ask again at once.
+- _A download stops._ The web logs `stored export download stopped` (company and export ids). A
+  part missing (the export expired or a newer one replaced it meanwhile) or failing its check stops
+  the download; the page's SHA-256 tells a complete file. A part that does not open with any
+  configured key means a key was removed while parts still used it: section 13 removes a key only
+  when the console counts nothing sealed with it, parts included.
+- _Space._ `SELECT pg_size_pretty(pg_total_relation_size('app.company_export_parts'))`. Each company
+  holds normally one ready file of at most 512 MiB compressed (about 700 MB sealed), up to two while
+  a new one is written and three for the 30 minutes after a replacement; expired ones are deleted
+  every minute.
+- _Vacuum held back._ A run's snapshot holds back vacuum across the database while it runs (at most
+  30 minutes, then it fails as `timed_out`). To see runs:
+  `SELECT pid, xact_start, state FROM pg_stat_activity WHERE application_name = 'w360-worker-exports' AND backend_xmin IS NOT NULL ORDER BY xact_start;`.
+  To stop one, `SELECT pg_cancel_backend(<pid>)` (or `pg_terminate_backend`): the run fails on its
+  next read with a cancelled statement, a transient error, so the export stays `running` until its
+  lease runs out and the next run takes over; to stop it for good, also have the owner wait (the
+  fourth start fails it as `interrupted`) or ask HyFib engineering to fail it.
+- _Transient errors._ A broken connection, a deadlock, a cancelled statement or the pool timing out
+  does not fail an export: the worker logs the job's failure, and the next run takes over once the
+  lease runs out (up to 5 minutes and a minute's sweep).
+- _Limits._ A company may ask 3 times and download 20 times a day; past that the page shows the
+  refusal (429, `rate_limited`) and nothing is written or emailed. The buckets are
+  `company-export:request:<company id>` and `company-export:download:<company id>` in
+  `ops.rate_limit_buckets`.
+
 **A deletion is scheduled.** The company is `pending_deletion` until `due_at` (14 days) and works as
 suspended. Any owner cancels in Settings → Company data until the run starts; after that the page
 says it can no longer be cancelled. The register is `ops.tenant_deletions` (the company's platform
@@ -4903,6 +5065,10 @@ grants and security events stay. Meta events for its numbers are quarantined as 
 
 **Migration 0028 failed.** It runs in one transaction and needs the bootstrap roles; fix the cause
 and run the migrations again.
+
+**Migration 0325 failed.** It creates two new tables and two functions and replaces
+`ops.sealed_value_keys` in one transaction (dropped as `w360_definer`, as in 0288); a failure rolls
+it all back. Fix the cause (usually the bootstrap roles) and run the migrations again.
 
 **Migration 0067 failed.** It adds columns to `ops.tenant_deletions` (existing rows become owners'
 deletions; nothing is rewritten), replaces `app.cancel_tenant_deletion` (dropped as `w360_definer`

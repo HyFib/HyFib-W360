@@ -552,7 +552,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   days has its own key too, and the inbox section lists such teams (`teamClosedDays`).
 - **Saved replies** (`inbox/saved-replies.ts`): shared answers with `{{name}}`, `{{agent}}` and
   `{{company}}` placeholders, filled server-side for the conversation; the composer inserts the text
-  and the member sends it as an ordinary reply.
+  and the member sends it as an ordinary reply. Since ADR-411 a reply may carry one file
+  (`inbox/saved-reply-files.ts`, migration 0321): its bytes in `app.saved_reply_files`, once per
+  company (same bytes, type and name), named by `app.saved_reply_attachments` (one per reply), every
+  write under the company's `saved-replies:<id>` advisory lock, which also deletes files no reply
+  names. `ReplyTools` (conversation page) joins the composer and the "Send a file" card: inserting
+  such a reply calls `savedReplyFileForInsert` (the file there and whole, checked in SQL), then hands
+  the card the file with the text as its caption (a recording's text stays in the composer); the card
+  posts `savedReplyId` and `savedReplyFileId` in place of a file, and `queueSavedReplyFileReply`
+  reads the bytes and sends them through `queueFileReply`'s own path (ADR-218).
 - **Mentions** (`app.note_mentions`): a note can name members who can see the conversation at that
   moment; Inbox → Mentions lists a member's mentions in conversations they can still see, with an
   unread count cleared when they open the conversation.
@@ -724,7 +732,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 ## 6E. Automations **[built — bot messages verified against a local Graph stand-in only]**
 
 - **Model** (`packages/domain/src/automations/graph.ts`, browser-safe): a trigger (a message is or
-  contains a keyword; a customer starts a conversation; any customer message; optionally only while
+  contains a keyword; a customer starts a conversation; any customer message; a customer's reply to
+  a campaign message, of any campaign or a chosen one, optionally only a tap on one quick-reply
+  button (ADR-414); optionally only while
   the business is open or closed; a cooldown per conversation; started by a store's order messages,
   §6M; or started by a member's enrolment or through the API with the inputs it declares, §6N) and a
   graph of typed steps: send a message, ask with reply buttons (Meta's limits: 1–3 buttons, titles ≤
@@ -757,10 +767,24 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Dispatch** (`automations/dispatch.ts`, inside the ingestion transaction): an opt-out keyword
   stops the active run; a run waiting for a reply receives the message (`input_message_id`, a job
   keyed by the message); otherwise, in an unassigned conversation of an active company with no
-  active run, the best match starts (exact keyword, contained keyword, keyword with small typos when
+  active run, the best match starts (a reply to a campaign message: the chosen campaign and
+  button, the chosen campaign, any campaign with the button, any campaign (ADR-414); then exact
+  keyword, contained keyword, keyword with small typos when
   the trigger allows them (ADR-240: optimal string alignment per word in `inbox/keywords.ts`), new
   conversation, any message; then name order), subject to business-hours filters, cooldowns and 10
   runs per conversation per hour.
+- **Campaign replies** (ADR-414, migrations 0324 and 0327): when an active automation starts from replies to
+  a campaign and the message has a `context.id`, `findCampaignReply` finds the outbound message
+  of the same number with that WAMID (`messages_external_uq`) and its campaign recipient row
+  (`campaign_recipients_message_uq`), of the same contact, queued at most 72 hours before the
+  reply (`CAMPAIGN_REPLY_HOURS`, the attribution window); a quick-reply tap (`button` message)
+  brings its text. The run records the campaign, the variant and the button in
+  `app.automation_run_campaigns` (insert-only, deleted with the run); `{{campaign.name}}` (read
+  when the step runs), `{{campaign.variant}}` and `{{campaign.button}}` read it, as do the run's
+  page (the campaign to members with `campaigns.read`, the button to those who see the
+  conversation) and run webhooks (`run.campaign`: id, name, variant). Saving, publishing and testing
+  such an automation need `campaigns.read`; a test run of one that names a campaign acts as a
+  reply to it with the trigger's button and no variant.
 - **Runner** (`automations/runner.ts`, queue `automation.run`, ADR-035): one transaction per step,
   conversation lock then run lock; checks the hand-off lock, resolve and the 7-day age; loads the
   pinned version's graph (cached: versions never change) and the contact facts; applies effects —
@@ -2199,7 +2223,19 @@ true`); the same key with another request (method, path and body hashed) answers
   reached, changed in a dialog); creation with the scopes the member may grant, allowed addresses
   and a monthly limit; the new token shown once with a copy button (kept only in the page's
   memory); rotation with an overlap; revocation.
-- **Not built yet:** media and call-to-action messages, taking reactions back, assigning many
+- **MCP server** (ADR-416, no migration): `app/api/mcp/route.ts` checks `Origin`
+  (`mcpOriginAllowed`), then hands POSTs to `handleApiRequest` with `errorBody: mcpTransportError`
+  (its refusals as JSON-RPC errors) and a handler that answers the one JSON-RPC message with
+  `handleMcpMessage` (`api/mcp-protocol.ts`, pure: 2026-07-28 served statelessly with per-request
+  `_meta` and mirrored headers, 2025-11-25 and 2025-06-18 through `initialize` without sessions)
+  and `runMcpTool` (`api/mcp-tools.ts`) bound to the verified key's context and `runtime.outbound`.
+  Each tool (`MCP_TOOLS`, `api/mcp-model.ts`) mirrors one REST call and calls its service; input
+  schemas are the REST zod schemas as JSON Schema; sends hash canonical arguments under the tool's
+  name in the REST idempotency store. The handler returns a `json` result whose `log` fields join
+  the REST log line. GET, DELETE and OPTIONS answer 405. Settings → API keys lists the endpoint, the
+  tools and their scopes, and a client configuration.
+- **Not built yet:** media and call-to-action messages, taking reactions back (neither is in Meta's
+  OpenAPI description, ADR-412), assigning many
   conversations or starting many runs in one call, bulk sends, media downloads, statuses changed
   since a time, defining contact fields, changing numbers or many contacts in one call, limits and
   availability per endpoint and OAuth apps (BACKLOG P5-08). Packs of extra API requests are plan add-ons (ADR-110, section 7). Outgoing
@@ -3442,7 +3478,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   and cancel a staff deletion.
 - **Step-up:** exporting and asking for the deletion need a sign-in within the last 15 minutes
   (ADR-056).
-- **Not built yet:** stored exports and other formats.
+- **Stored exports (ADR-415):** an owner with a recent sign-in asks; the `company.export` worker
+  job writes the streamed export's lines from one read-only snapshot, gzip-compressed, into
+  `app.company_export_parts` in 1 MiB parts each sealed with the keyring (at most 512 MiB, one ready
+  file per company, kept 7 days, deleted by the minute billing sweep); owners and administrators
+  are emailed a link to the page; owners download it through the app, each part opened and checked
+  as it is read. One export of a company is read at a time (the export lock), and one stored export
+  waits or is written at a time (a unique index); a crashed run's lease runs out and the next run
+  takes over, fenced by its attempt number.
+- **Not built yet:** other formats and object storage.
 
 ## 7. Commercial model and billing **[built: plans and entitlements, paying for plans by Razorpay subscription, wallet, top-ups, auto-recharge, statements and receipts, usage and rates, staff refunds of unused credit, daily settlement reconciliation — verified against a local Razorpay stand-in only; tax invoices planned]**
 

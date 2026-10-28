@@ -7,6 +7,7 @@ import {
   contacts,
   conversations,
   eq,
+  isForeignKeyViolation,
   isUniqueViolation,
   memberships,
   savedReplies,
@@ -18,7 +19,23 @@ import {
 import { assertCan, can, type TenantContext } from '../authz/context';
 import { recordAudit, type RequestMeta } from '../audit';
 import { canSeeConversation } from '../messaging/outbound';
+import { checkReplyFile, type ReplyFile } from '../messaging/file-replies';
 import { parseInput } from '../validation';
+import {
+  checkSavedReplyText,
+  deleteUnusedSavedReplyFiles,
+  listSavedReplyAttachments,
+  lockSavedReplies,
+  readableSavedReplyFile,
+  savedReplyFileContent,
+  savedReplyFileKind,
+  savedReplyTextLimit,
+  takesCaption,
+  writeAttachSavedReplyFile,
+  writeRemoveSavedReplyFile,
+  type SavedReplyAttachmentView,
+  type SavedReplyFilePart,
+} from './saved-reply-files';
 
 /**
  * Saved replies: shared answers members insert into the composer. `inbox.supervise` manages them;
@@ -67,6 +84,8 @@ export interface SavedReplyView {
   updatedByName: string | null;
   /** Last changed by an API key (ADR-291), which has no name to show. */
   updatedThroughApi: boolean;
+  /** The file it carries (ADR-411), or null. */
+  attachment: SavedReplyAttachmentView | null;
 }
 
 export type SavedReplyInput = z.output<typeof savedReplySchema>;
@@ -89,6 +108,17 @@ const authorOf = (by: SavedReplyAuthor) => ({
   apiKeyId: 'apiKeyId' in by ? by.apiKeyId : null,
 });
 
+/**
+ * A reply deleted while its file was being attached, as not found; any other error as it is. A
+ * server of the release before ADR-411 deletes replies without the saved-replies lock, so the new
+ * attachment's foreign key to the reply can find it gone.
+ */
+export function savedReplyGoneError(error: unknown): unknown {
+  return isForeignKeyViolation(error, 'saved_reply_attachments_reply_fk')
+    ? notFound('Saved reply')
+    : error;
+}
+
 /** A shortcut another saved reply has, as a conflict; any other error as it is. */
 export function savedReplyShortcutError(error: unknown): unknown {
   return isUniqueViolation(error, 'saved_replies_shortcut_uq')
@@ -107,9 +137,7 @@ export async function writeCreateSavedReply(
   data: SavedReplyInput,
   by: SavedReplyAuthor,
 ): Promise<string> {
-  await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`saved-replies:${tenantId}`}, 0))`,
-  );
+  await lockSavedReplies(tx, tenantId);
   const [count] = await tx
     .select({ n: sql<number>`count(*)::int` })
     .from(savedReplies)
@@ -138,8 +166,8 @@ export async function writeCreateSavedReply(
 
 /**
  * Changes a saved reply (Settings, and keys since ADR-291), naming who changed it last; false when
- * the company has no such reply. The caller audits it and maps a shortcut in use with
- * `savedReplyShortcutError`.
+ * the company has no such reply. With a photo, video or document (ADR-411) the text is its caption
+ * and must fit one. The caller audits it and maps a shortcut in use with `savedReplyShortcutError`.
  */
 export async function writeUpdateSavedReply(
   tx: Tx,
@@ -148,6 +176,17 @@ export async function writeUpdateSavedReply(
   data: SavedReplyInput,
   by: SavedReplyAuthor,
 ): Promise<boolean> {
+  await lockSavedReplies(tx, tenantId);
+  const kind = await savedReplyFileKind(tx, tenantId, id);
+  if (data.body.length > savedReplyTextLimit(kind)) {
+    // Only a change of the text is refused: a text stored past the limit (by a server of the
+    // release before ADR-411) does not block changing the title or shortcut.
+    const [current] = await tx
+      .select({ body: savedReplies.body })
+      .from(savedReplies)
+      .where(and(eq(savedReplies.tenantId, tenantId), eq(savedReplies.id, id)));
+    if (current?.body !== data.body) checkSavedReplyText(data.body, kind);
+  }
   const author = authorOf(by);
   const [updated] = await tx
     .update(savedReplies)
@@ -163,17 +202,25 @@ export async function writeUpdateSavedReply(
   return updated !== undefined;
 }
 
-/** Deletes a saved reply (Settings, and keys since ADR-291); null when the company has no such reply. */
+/**
+ * Deletes a saved reply (Settings, and keys since ADR-291); null when the company has no such reply.
+ * Its file (ADR-411) goes with it unless another reply carries the same file.
+ */
 export async function writeDeleteSavedReply(
   tx: Tx,
   tenantId: string,
   id: string,
 ): Promise<{ shortcut: string } | null> {
+  await lockSavedReplies(tx, tenantId);
+  const attached = (await listSavedReplyAttachments(tx, tenantId, [id])).get(id) ?? null;
   const [deleted] = await tx
     .delete(savedReplies)
     .where(and(eq(savedReplies.tenantId, tenantId), eq(savedReplies.id, id)))
     .returning({ shortcut: savedReplies.shortcut });
-  return deleted ?? null;
+  if (!deleted) return null;
+  // The reply's attachment row went with it (ON DELETE CASCADE).
+  await deleteUnusedSavedReplyFiles(tx, tenantId, [attached?.fileId ?? null]);
+  return deleted;
 }
 
 /** Fills placeholders; values that are unknown (for example a contact without a name) are empty. */
@@ -225,10 +272,14 @@ export function createSavedRepliesService(deps: { db: Database; clock: Clock }) 
             .limit(500),
         { accessMode: 'read only' },
       );
+      const files = await db.run(ctx.scope, (tx) => listSavedReplyAttachments(tx, ctx.tenant.id), {
+        accessMode: 'read only',
+      });
       return rows.map(({ updatedByMembershipId, ...r }) => ({
         ...r,
         updatedAt: r.updatedAt.toISOString(),
         updatedThroughApi: updatedByMembershipId === null,
+        attachment: files.get(r.id) ?? null,
       }));
     },
 
@@ -282,6 +333,7 @@ export function createSavedRepliesService(deps: { db: Database; clock: Clock }) 
             agent: ctx.user.name || null,
             company: ctx.tenant.name,
           };
+          const files = await listSavedReplyAttachments(tx, ctx.tenant.id);
           return rows.map((r) => {
             const rendered = renderSavedReply(r.body, values);
             return {
@@ -290,6 +342,7 @@ export function createSavedRepliesService(deps: { db: Database; clock: Clock }) 
               title: r.title,
               text: rendered.text,
               missing: rendered.missing,
+              attachment: files.get(r.id) ?? null,
             };
           });
         },
@@ -357,6 +410,154 @@ export function createSavedRepliesService(deps: { db: Database; clock: Clock }) 
       } catch (error) {
         throw savedReplyShortcutError(error);
       }
+    },
+
+    /**
+     * Gives a saved reply a file, in place of any it had (ADR-411): stored once per company, the
+     * replaced file deleted unless another reply carries it. Audited with its kind and size, never
+     * its name or content.
+     */
+    async attachSavedReplyFile(
+      ctx: TenantContext,
+      id: string,
+      file: ReplyFile,
+      meta: RequestMeta = {},
+    ): Promise<SavedReplyAttachmentView> {
+      assertCan(ctx, 'inbox.supervise');
+      if (!z.uuid().safeParse(id).success) throw notFound('Saved reply');
+      checkReplyFile(file);
+      try {
+        return await db.run(ctx.scope, async (tx) => {
+          const result = await writeAttachSavedReplyFile(
+            tx,
+            ctx.tenant.id,
+            id,
+            file,
+            ctx.membership.id,
+          );
+          if (!result.unchanged) {
+            await recordAudit(
+              tx,
+              ctx,
+              {
+                action: 'saved_reply.file_attached',
+                subjectType: 'saved_reply',
+                subjectId: id,
+                metadata: {
+                  shortcut: result.shortcut,
+                  kind: result.attachment.kind,
+                  sizeBytes: result.attachment.sizeBytes,
+                  shared: result.shared,
+                  replaced: result.replacedFileId !== null,
+                },
+              },
+              meta,
+            );
+          }
+          return result.attachment;
+        });
+      } catch (error) {
+        throw savedReplyGoneError(error);
+      }
+    },
+
+    /** Takes a saved reply's file away (ADR-411); 404 when the reply has none. */
+    async removeSavedReplyFile(ctx: TenantContext, id: string, meta: RequestMeta = {}) {
+      assertCan(ctx, 'inbox.supervise');
+      if (!z.uuid().safeParse(id).success) throw notFound('Saved reply');
+      await db.run(ctx.scope, async (tx) => {
+        const removed = await writeRemoveSavedReplyFile(tx, ctx.tenant.id, id);
+        if (!removed) throw notFound('Saved reply file');
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'saved_reply.file_removed',
+            subjectType: 'saved_reply',
+            subjectId: id,
+            metadata: {
+              shortcut: removed.shortcut,
+              kind: removed.kind,
+              fileDeleted: removed.fileDeleted,
+            },
+          },
+          meta,
+        );
+      });
+    },
+
+    /**
+     * What the reply box attaches when a member inserts a saved reply with a file (ADR-411), in a
+     * conversation the member can see: the file's details once it is known to be there and to read
+     * back whole. A file that is gone or unreadable is refused here, before anything is attached,
+     * rather than when the member sends. Members who reply use it; managing replies is not needed.
+     */
+    async savedReplyFileForInsert(
+      ctx: TenantContext,
+      conversationId: string,
+      savedReplyId: string,
+    ): Promise<SavedReplyAttachmentView & { caption: boolean }> {
+      assertCan(ctx, 'inbox.reply');
+      if (!z.uuid().safeParse(conversationId).success) throw notFound('Conversation');
+      if (!z.uuid().safeParse(savedReplyId).success) throw notFound('Saved reply');
+      return db.run(
+        ctx.scope,
+        async (tx) => {
+          const [conv] = await tx
+            .select({ assignedMembershipId: conversations.assignedMembershipId })
+            .from(conversations)
+            .where(
+              and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)),
+            );
+          if (!conv || !canSeeConversation(ctx, conv.assignedMembershipId))
+            throw notFound('Conversation');
+          const [reply] = await tx
+            .select({ title: savedReplies.title })
+            .from(savedReplies)
+            .where(
+              and(eq(savedReplies.tenantId, ctx.tenant.id), eq(savedReplies.id, savedReplyId)),
+            );
+          if (!reply) {
+            throw new AppError(
+              'conflict',
+              'This saved reply was deleted after the page loaded. Reload the page to see the saved replies as they are now.',
+            );
+          }
+          const file = await readableSavedReplyFile(tx, ctx.tenant.id, savedReplyId);
+          if (!file) {
+            throw new AppError(
+              'conflict',
+              `The file of “${reply.title}” was removed after the page loaded, so nothing was inserted. Reload the page to see the saved reply as it is now.`,
+            );
+          }
+          if (!file.readable) {
+            throw new AppError(
+              'precondition_failed',
+              `The file of “${reply.title}” can no longer be read, so nothing was inserted. A supervisor can attach it again in Settings → Saved replies.`,
+            );
+          }
+          const { readable: _readable, ...view } = file;
+          return { ...view, caption: takesCaption(view.kind) };
+        },
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * A saved reply's file for members to look at (Settings and the reply box): anyone who uses or
+     * manages saved replies; with `choose`, only the part a Range request asks for is read. Null
+     * when it is gone.
+     */
+    async openSavedReplyFile(
+      ctx: TenantContext,
+      fileId: string,
+      choose?: (sizeBytes: number) => SavedReplyFilePart,
+    ) {
+      if (!can(ctx, 'inbox.supervise')) assertCan(ctx, 'inbox.reply');
+      if (!z.uuid().safeParse(fileId).success) return null;
+      return db.run(ctx.scope, (tx) => savedReplyFileContent(tx, ctx.tenant.id, fileId, choose), {
+        accessMode: 'read only',
+      });
     },
 
     async deleteSavedReply(ctx: TenantContext, id: string, meta: RequestMeta = {}) {

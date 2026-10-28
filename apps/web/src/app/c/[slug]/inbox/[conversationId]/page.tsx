@@ -9,8 +9,7 @@ import { TakeOverButton } from '@/components/automations/automation-actions';
 import { ProductSender } from '@/components/commerce/product-sender';
 import { ContactCrmPanel } from '@/components/crm/contact-crm-panel';
 import { FlowSender } from '@/components/flows/flow-sender';
-import { Composer } from '@/components/inbox/composer';
-import { FileSender } from '@/components/inbox/file-sender';
+import { ReplyTools } from '@/components/inbox/reply-tools';
 import { ConversationControls, TeamControl } from '@/components/inbox/conversation-controls';
 import { ConversationTags } from '@/components/inbox/conversation-tags';
 import { InboxShell, inboxQueryString } from '@/components/inbox/inbox-shell';
@@ -320,7 +319,7 @@ export default async function ConversationPage({
               ))}
             </ol>
           )}
-          <Composer
+          <ReplyTools
             key={conv.id}
             slug={ctx.tenant.slug}
             conversationId={conv.id}
@@ -330,20 +329,6 @@ export default async function ConversationPage({
             {...(latestMessageId ? { latestMessageId } : {})}
             typingIndicator={receipts?.enabled ?? false}
           />
-          {disabledReason === null ? (
-            <Card>
-              <CardHeader>
-                <CardTitle>Send a file</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <FileSender
-                  slug={ctx.tenant.slug}
-                  conversationId={conv.id}
-                  {...(latestMessageId ? { latestMessageId } : {})}
-                />
-              </CardContent>
-            </Card>
-          ) : null}
           {disabledReason === null && forms.length > 0 ? (
             <Card>
               <CardHeader>

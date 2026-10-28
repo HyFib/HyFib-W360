@@ -19,7 +19,9 @@ const field = (form: FormData, name: string) => {
 
 /**
  * A file a member sends in a conversation (ADR-218), posted by the conversation page as multipart
- * form data: uploaded to WhatsApp, then queued as a reply. Under /api so that Next's proxy does not
+ * form data: uploaded to WhatsApp, then queued as a reply. In place of a file, the form may name a
+ * saved reply's file the member inserted (`savedReplyId` and `savedReplyFileId`, ADR-411), which is
+ * sent the same way from the company's saved replies' files. Under /api so that Next's proxy does not
  * buffer (and cut) a body over its 10 MB; only HyFib's own pages may post it (trusted origin), with
  * the member's session.
  */
@@ -51,8 +53,21 @@ export async function POST(
     return answer(400, { ok: false, message: 'The file could not be read. Choose it again.' });
   }
   const file = form.get('file');
-  if (!(file instanceof File)) return answer(422, { ok: false, message: 'Choose a file to send.' });
+  const savedReplyFileId = field(form, 'savedReplyFileId');
+  if (!(file instanceof File) && !savedReplyFileId)
+    return answer(422, { ok: false, message: 'Choose a file to send.' });
   try {
+    if (!(file instanceof File)) {
+      const sent = await fileReplies.queueSavedReplyFileReply(ctx, {
+        conversationId,
+        clientKey: field(form, 'clientKey'),
+        caption: field(form, 'caption'),
+        afterMessageId: field(form, 'afterMessageId'),
+        savedReplyId: field(form, 'savedReplyId'),
+        savedReplyFileId,
+      });
+      return answer(200, { ok: true, messageId: sent.messageId });
+    }
     const sent = await fileReplies.queueFileReply(
       ctx,
       {

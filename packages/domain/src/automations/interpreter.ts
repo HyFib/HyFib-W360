@@ -23,6 +23,7 @@ import {
   type HttpSave,
   type HttpMethod,
   type NodeOf,
+  type CampaignPlaceholderValues,
   type OrderPlaceholderValues,
   type ProductStepKind,
 } from './graph';
@@ -95,6 +96,11 @@ export interface RunFacts {
    * null for other runs, or when the order was deleted or redacted.
    */
   order?: OrderPlaceholderValues | null;
+  /**
+   * The campaign a run started by a reply to a campaign answers (ADR-414), read when the step runs
+   * ({{campaign.<field>}}); null for other runs.
+   */
+  campaign?: CampaignPlaceholderValues | null;
   /**
    * For each pipeline a condition's deal field rules name (ADR-393), the run's contact's only open
    * deal there, or the note saying why there is none to read; a pipeline left out reads as having
@@ -548,6 +554,7 @@ export function advance(input: AdvanceInput): StepResult {
     companyName: facts.companyName,
     variables,
     order: facts.order ?? null,
+    campaign: facts.campaign ?? null,
   });
 
   const fail = (

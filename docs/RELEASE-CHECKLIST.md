@@ -109,6 +109,11 @@ made. This checklist records the evidence required per gate; unchecked items blo
       checkout and imported with its time (SH-041), a reminder received and the recovery address
       opening the checkout, a completed checkout counted as recovered, and `customers/redact`
       clearing a checkout
+- [ ] Shipment messages with a development store (ADR-413): `read_fulfillments` approved on an
+      installed store (the installation kept, the shipment topics subscribed in the same run), a
+      `fulfillments/create` delivery's body carrying `order_id` (research SH-048), how Shopify
+      refuses a shipment topic for a token without the scope (research §5), and a shipment shipped
+      without tracking whose number is added later reaching the customer once
 - [ ] Store events in automations with a development store, an approved sandbox number and a test
       recipient: an order starting an automation whose "Ask with a template" step sends an approved
       utility template with order fields outside the service window, its quick replies tapped on

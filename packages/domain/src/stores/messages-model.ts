@@ -6,14 +6,16 @@ import { TEMPLATE_LIMITS, linkValueProblem, type LinkButton } from '../templates
 
 /**
  * Order messages (P4-06c): the WhatsApp template a store sends when one of its orders is placed,
- * paid for on delivery, shipped, delivered or cancelled, and cart reminders (P4-06d) about checkouts
+ * paid for on delivery, shipped, delivered or cancelled, shipment messages (ADR-413) when a Shopify
+ * order's shipment is sent or its tracking changes, and cart reminders (P4-06d) about checkouts
  * customers left in a Shopify store. Pure rules shared by the store worker, the message worker and
- * the web pages (research docs/research/store-connectors.md §3 and §4, ADR-048, ADR-049).
+ * the web pages (research docs/research/store-connectors.md §3 to §5, ADR-048, ADR-049, ADR-413).
  *
- * Order events are found by comparing an order's copy before and after a read from the store. Each
- * order or checkout gets at most one message per event, a rule never messages about anything that
- * happened before it was switched on, and an event HyFib first sees long after it happened is
- * recorded, not sent.
+ * Order events are found by comparing an order's copy before and after a read from the store, and
+ * shipment events by comparing each shipment's copy. Each order or checkout gets at most one message
+ * per event, each shipment one when it is sent and one per tracking it changes to, a rule never
+ * messages about anything that happened before it was switched on, and an event HyFib first sees
+ * long after it happened is recorded, not sent.
  */
 
 export const STORE_MESSAGE_EVENTS = [
@@ -22,10 +24,18 @@ export const STORE_MESSAGE_EVENTS = [
   'order_shipped',
   'order_delivered',
   'order_cancelled',
+  'shipment_created',
+  'tracking_updated',
   'cart_reminder',
   'cart_second_reminder',
 ] as const;
 export type StoreMessageEvent = (typeof STORE_MESSAGE_EVENTS)[number];
+
+/** The two shipment events (ADR-413): about one shipment of an order rather than the order. */
+export const SHIPMENT_EVENTS = ['shipment_created', 'tracking_updated'] as const;
+export type ShipmentEvent = (typeof SHIPMENT_EVENTS)[number];
+export const isShipmentEvent = (event: StoreMessageEvent): event is ShipmentEvent =>
+  event === 'shipment_created' || event === 'tracking_updated';
 
 /** The two cart reminders: about a checkout rather than an order, marketing templates only. */
 export const CART_EVENTS = ['cart_reminder', 'cart_second_reminder'] as const;
@@ -33,7 +43,10 @@ export type CartEvent = (typeof CART_EVENTS)[number];
 export const isCartEvent = (event: StoreMessageEvent): event is CartEvent =>
   event === 'cart_reminder' || event === 'cart_second_reminder';
 
-/** The events about an order: every event but the two cart reminders. */
+/**
+ * The events about an order itself: every event but the two cart reminders and the two shipment
+ * events (outgoing webhooks report these five, ADR-352).
+ */
 export const ORDER_MESSAGE_EVENTS = [
   'order_placed',
   'cod_confirmation',
@@ -44,15 +57,17 @@ export const ORDER_MESSAGE_EVENTS = [
 export type OrderMessageEvent = (typeof ORDER_MESSAGE_EVENTS)[number];
 
 /**
- * The events whose rule can start an automation instead of sending a template (ADR-050): the cash
- * on delivery confirmation records its answer from its own template, and the cart reminders' checks
- * depend on the first reminder having been sent.
+ * The events whose rule can start an automation instead of sending a template (ADR-050, and the
+ * shipment events, ADR-413): the cash on delivery confirmation records its answer from its own
+ * template, and the cart reminders' checks depend on the first reminder having been sent.
  */
 export const AUTOMATION_EVENTS = [
   'order_placed',
   'order_shipped',
   'order_delivered',
   'order_cancelled',
+  'shipment_created',
+  'tracking_updated',
 ] as const;
 export type AutomationEvent = (typeof AUTOMATION_EVENTS)[number];
 export const canStartAutomation = (event: StoreMessageEvent): event is AutomationEvent =>
@@ -81,6 +96,8 @@ export const STORE_MESSAGE_LIMITS = {
   transitRereadHours: 3,
   transitDays: 14,
   transitPerRun: 100,
+  /** Distinct trackings remembered per shipment; a change to one more sends nothing (ADR-413). */
+  trackingKeysPerShipment: 10,
   /** Messages the minute sweep hands to the worker at a time. */
   sweepBatch: 100,
 } as const;
@@ -117,6 +134,18 @@ export const STORE_MESSAGE_EVENT_INFO: Record<
     label: 'Order cancelled',
     description: 'When an order is cancelled in the store.',
     platforms: ['shopify', 'woocommerce'],
+  },
+  shipment_created: {
+    label: 'Shipment sent',
+    description:
+      'Shopify: once for each shipment of an order, when HyFib first sees it, with that shipment’s carrier, tracking number and tracking link where Shopify gives them. Switch on this or “Order shipped”, not both, or the first shipment gets two messages.',
+    platforms: ['shopify'],
+  },
+  tracking_updated: {
+    label: 'Tracking updated',
+    description:
+      'Shopify: when a shipment’s tracking number or tracking link changes to one HyFib has not seen for that shipment, once per shipment and tracking (not when the shipment is first sent, and not for a new carrier name alone). HyFib checks shipments in transit every few hours.',
+    platforms: ['shopify'],
   },
   cart_reminder: {
     label: 'Cart reminder',
@@ -158,6 +187,10 @@ export const STORE_MESSAGE_SKIP_REASONS = {
   no_opt_in: 'Nobody has confirmed that this store’s customers agreed to WhatsApp messages.',
   order_deleted: 'The order was deleted from the store.',
   order_cancelled: 'The order was cancelled before the message was sent.',
+  shipment_cancelled: 'The shipment was cancelled, or failed, before the message was sent.',
+  tracking_replaced:
+    'The shipment’s tracking changed again before this message was sent; only the newest is sent.',
+  tracking_already_sent: 'The shipment’s first message already carried this tracking.',
   customer_erased: 'The customer’s details were erased.',
   no_phone: 'The order has no phone number HyFib can message (or the store withheld it).',
   contact_erased: 'The contact was erased.',
@@ -209,6 +242,8 @@ export interface SavedOrderChange {
   orderId: string;
   previous: OrderMilestones | null;
   current: OrderMilestones;
+  /** The order's shipments the read saved (Shopify; ADR-413). */
+  shipments: readonly SavedShipmentChange[];
 }
 
 export interface EnabledRule {
@@ -255,6 +290,10 @@ function occurrence(
       // order new to the copy and already cancelled counts only when the store says when.
       if (previous) return previous.cancelled ? null : (current.cancelledAt ?? now);
       return current.cancelledAt;
+    case 'shipment_created':
+    case 'tracking_updated':
+      // About shipments (detectShipmentEvents), not the order itself.
+      return null;
     case 'cart_reminder':
     case 'cart_second_reminder':
       // About checkouts (checkoutReminders), never about orders.
@@ -289,6 +328,147 @@ export function detectOrderEvents(input: {
     events.push({ event: rule.event, occurredAt, skip });
   }
   return events;
+}
+
+/** The parts of a shipment's copy that shipment messages are about (ADR-413). */
+export interface ShipmentState {
+  createdAt: Date;
+  /** The shipment's last change at the store (SH-045): when a tracking change happened. */
+  updatedAt: Date;
+  /** Cancelled or failed (SH-030): no shipment. */
+  failed: boolean;
+}
+
+/** A shipment a read saved, with what changed in its copy. */
+export interface SavedShipmentChange {
+  shipmentId: string;
+  orderId: string;
+  /** HyFib saw the shipment for the first time. */
+  isNew: boolean;
+  /** Set when this read found a tracking not seen for the shipment before: its number (1, 2, …). */
+  trackingRevision: number | null;
+  current: ShipmentState;
+  test: boolean;
+  orderCancelled: boolean;
+}
+
+export interface DetectedShipmentEvent {
+  event: ShipmentEvent;
+  occurredAt: Date;
+  /** Which message of the shipment it is: `created`, or `tracking:<revision>`. */
+  dedupeKey: string;
+  skip: Extract<StoreMessageSkipReason, 'test_order' | 'too_late'> | null;
+}
+
+/** The dedupe keys of shipment messages (migration 0323 checks the same shape). */
+export const SHIPMENT_DEDUPE_KEY_RE = /^(created|tracking:[1-9][0-9]?)$/;
+
+/**
+ * The tracking keys a shipment remembers after a read, and whether the read found a new one. A
+ * shipment seen for the first time remembers its tracking without that counting as a change; after
+ * that, a tracking not remembered yet is a change, numbered by its place in the list. At most
+ * STORE_MESSAGE_LIMITS.trackingKeysPerShipment are remembered; one more changes nothing.
+ */
+export function nextTrackingKeys(
+  previous: readonly string[] | null,
+  key: string | null,
+): { keys: string[]; revision: number | null } {
+  if (previous === null) return { keys: key ? [key] : [], revision: null };
+  if (
+    !key ||
+    previous.includes(key) ||
+    previous.length >= STORE_MESSAGE_LIMITS.trackingKeysPerShipment
+  ) {
+    return { keys: [...previous], revision: null };
+  }
+  const keys = [...previous, key];
+  return { keys, revision: keys.length };
+}
+
+/**
+ * The shipment messages a read of one shipment calls for, under the store's enabled rules: a
+ * shipment seen for the first time that was not cancelled or failed is sent (`shipment_created`,
+ * dated when it was created); a tracking not seen for the shipment before is updated
+ * (`tracking_updated`, dated by the shipment's last change). Nothing for a cancelled order, nothing
+ * from before a rule was switched on; test orders (unless the store allows them) and events seen
+ * over 48 hours late are recorded as skipped.
+ */
+export function detectShipmentEvents(input: {
+  change: SavedShipmentChange;
+  rules: readonly EnabledRule[];
+  includeTestOrders: boolean;
+  now: Date;
+}): DetectedShipmentEvent[] {
+  const { change, rules, now } = input;
+  if (change.current.failed || change.orderCancelled) return [];
+  const found: DetectedShipmentEvent[] = [];
+  for (const rule of rules) {
+    let occurredAt: Date;
+    let dedupeKey: string;
+    if (rule.event === 'shipment_created' && change.isNew) {
+      occurredAt = change.current.createdAt;
+      dedupeKey = 'created';
+    } else if (
+      rule.event === 'tracking_updated' &&
+      !change.isNew &&
+      change.trackingRevision !== null
+    ) {
+      occurredAt = change.current.updatedAt;
+      dedupeKey = `tracking:${change.trackingRevision}`;
+    } else {
+      continue;
+    }
+    if (occurredAt < rule.enabledAt) continue;
+    let skip: DetectedShipmentEvent['skip'] = null;
+    if (change.test && !input.includeTestOrders) skip = 'test_order';
+    else if (now.getTime() - occurredAt.getTime() > STORE_MESSAGE_LIMITS.latenessHours * 3_600_000)
+      skip = 'too_late';
+    found.push({ event: rule.event, occurredAt, dedupeKey, skip });
+  }
+  return found;
+}
+
+/**
+ * Which of a shipment's remembered trackings it has now (1, 2, …; 0 for none or one not
+ * remembered), from the digest of its current tracking.
+ */
+export function currentTrackingRevision(
+  keys: readonly string[],
+  currentKey: string | null,
+): number {
+  return currentKey ? keys.indexOf(currentKey) + 1 : 0;
+}
+
+/** What a due "Tracking updated" message does (ADR-413). */
+export type TrackingUpdateDecision =
+  'send' | 'wait_for_created' | 'tracking_replaced' | 'tracking_already_sent';
+
+/**
+ * A "Tracking updated" message for tracking `revision`, at its send time. It goes only while that
+ * is still the shipment's tracking (a newer one, or a return to an earlier one, replaced it). It
+ * waits while the shipment's "Shipment sent" message is still waiting, since that message carries
+ * the tracking current when it goes; and once that message went carrying this tracking or a later
+ * one, this one is not sent again. So a quick correction, whichever message it lands on, gives the
+ * customer the newest values once. Only a queued template carries the shipment's tracking: an
+ * automation the rule started instead may send anything or nothing (its `{{order.tracking_*}}` read
+ * the order's copy when a step runs), so it never stops an update.
+ */
+export function trackingUpdateDecision(input: {
+  revision: number;
+  currentRevision: number;
+  created: { state: string; trackingRevision: number | null } | null;
+}): TrackingUpdateDecision {
+  if (input.revision !== input.currentRevision) return 'tracking_replaced';
+  const created = input.created;
+  if (created?.state === 'pending') return 'wait_for_created';
+  if (
+    created?.state === 'queued' &&
+    created.trackingRevision !== null &&
+    input.revision <= created.trackingRevision
+  ) {
+    return 'tracking_already_sent';
+  }
+  return 'send';
 }
 
 /** The parts of a checkout's copy that cart reminders are about. */
@@ -443,7 +623,10 @@ export function readStoreVariables(raw: unknown): StoreVariables {
   return parsed.success ? parsed.data : EMPTY_STORE_VARIABLES;
 }
 
-/** The variable sources a rule for `event` may use: its subject's fields, or fixed text. */
+/**
+ * The variable sources a rule for `event` may use: its subject's fields, or fixed text. Shipment
+ * messages use the order's fields, with the shipment's own tracking (see processStoreMessage).
+ */
 export function variablesFit(event: StoreMessageEvent, variables: StoreVariables): boolean {
   const kind = isCartEvent(event) ? 'checkout' : 'order';
   return [...variables.header, ...variables.body, ...variables.buttons].every(

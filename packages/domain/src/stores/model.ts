@@ -238,16 +238,35 @@ export const shopifyConsentSupported = (apiVersion: string | null | undefined) =
     ? apiVersion >= SHOPIFY_CONSENT_API_VERSION
     : false;
 
+/**
+ * Shipment webhooks (ADR-413): `fulfillments/create` and `fulfillments/update` need
+ * `read_fulfillments` or `read_marketplace_orders` (SH-044), which the connector's own scopes do not
+ * include. Every authorization asks for it, but a store works without it: shipments are read with
+ * the order (`read_orders`, SH-045), and only the two webhooks wait for it.
+ */
+export const SHOPIFY_FULFILLMENT_SCOPE = 'read_fulfillments';
+const SHIPMENT_WEBHOOK_SCOPES: readonly string[] = [
+  SHOPIFY_FULFILLMENT_SCOPE,
+  'read_marketplace_orders',
+];
+
 /** The scopes an authorization of this store asks for. */
 export function shopifyScopesFor(store: { customerAccessRequestedAt: Date | null }): string[] {
   return store.customerAccessRequestedAt
-    ? [...SHOPIFY_SCOPES, SHOPIFY_CUSTOMER_SCOPE]
-    : [...SHOPIFY_SCOPES];
+    ? [...SHOPIFY_SCOPES, SHOPIFY_FULFILLMENT_SCOPE, SHOPIFY_CUSTOMER_SCOPE]
+    : [...SHOPIFY_SCOPES, SHOPIFY_FULFILLMENT_SCOPE];
 }
+
+const grantedList = (grantedScopes: string | null) =>
+  (grantedScopes ?? '').split(',').map((scope) => scope.trim());
 
 /** Whether the store's current token was granted customer access. */
 export const hasCustomerAccess = (grantedScopes: string | null) =>
-  (grantedScopes ?? '').split(',').some((scope) => scope.trim() === SHOPIFY_CUSTOMER_SCOPE);
+  grantedList(grantedScopes).includes(SHOPIFY_CUSTOMER_SCOPE);
+
+/** Whether the store's current token may subscribe to the shipment webhooks (SH-044). */
+export const hasShipmentAccess = (grantedScopes: string | null) =>
+  grantedList(grantedScopes).some((scope) => SHIPMENT_WEBHOOK_SCOPES.includes(scope));
 
 /** The authorize URL for an offline token (SH-003): `grant_options[]` empty, as Shopify's library. */
 export function shopifyAuthorizeUrl(
@@ -318,6 +337,25 @@ export interface StoreOrderRecord {
   trackingNumber: string | null;
   trackingUrl: string | null;
   items: StoreOrderItemRecord[];
+  /** The order's shipments, each as Shopify gives it (Shopify only, SH-045; WooCommerce: none). */
+  shipments: StoreShipmentRecord[];
+}
+
+/**
+ * One Shopify fulfillment (SH-045), with the first of its tracking entries: the carrier, the number
+ * and the link, each only as Shopify returns it (HyFib never builds a tracking link itself, SH-047).
+ */
+export interface StoreShipmentRecord {
+  externalId: string;
+  /** The status Shopify gives (SH-045), as a status word; cancelled or failed ones are no shipment. */
+  status: string | null;
+  displayStatus: string | null;
+  failed: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  trackingCompany: string | null;
+  trackingNumber: string | null;
+  trackingUrl: string | null;
 }
 
 /** Shopify's WhatsApp marketing consent for a checkout's number (SH-041), as read. */
@@ -457,6 +495,18 @@ export function paymentNameList(values: unknown[]): string[] {
     if (names.length === STORE_LIMITS.paymentNames) break;
   }
   return names;
+}
+
+/**
+ * What identifies a shipment's tracking for "changed" (ADR-413): its tracking number (upper case,
+ * spaces collapsed) and its tracking link, as a digest; null when it has neither. The carrier's name
+ * is not part of it, so a new carrier name alone is no change.
+ */
+export function shipmentTrackingKey(number: string | null, url: string | null): string | null {
+  const n = number?.replace(/\s+/g, ' ').trim().toUpperCase() || null;
+  const u = url?.trim() || null;
+  if (!n && !u) return null;
+  return sha256Hex(`${n ?? ''}\n${u ?? ''}`);
 }
 
 /** An https URL as stored (other schemes are dropped). */

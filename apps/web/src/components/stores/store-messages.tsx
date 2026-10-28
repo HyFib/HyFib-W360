@@ -13,6 +13,7 @@ import {
   ORDER_VALUE_LABELS,
   delayRange,
   isCartEvent,
+  isShipmentEvent,
   type CheckoutValueField,
   type OrderValueField,
   type StoreVariableSource,
@@ -23,7 +24,7 @@ import {
   saveStoreMessageRuleAction,
   saveStoreMessageSettingsAction,
 } from '@/app/actions/store-messages';
-import { startCustomerAccessAction } from '@/app/actions/stores';
+import { startCustomerAccessAction, startShipmentAccessAction } from '@/app/actions/stores';
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 
@@ -261,7 +262,9 @@ export function StoreMessageRuleForm({
       <p className="text-sm text-muted-foreground">
         {cart
           ? 'Not available for this store: WooCommerce has no carts HyFib can read.'
-          : 'Not available for this store: WooCommerce has no delivered status.'}
+          : isShipmentEvent(rule.event)
+            ? 'Not available for this store: WooCommerce orders have no shipments HyFib can read.'
+            : 'Not available for this store: WooCommerce has no delivered status.'}
       </p>
     );
   }
@@ -400,6 +403,11 @@ export function StoreMessageRuleForm({
             No automation starts from order messages yet. Create one under Automations with “An
             order event in a store” as its start, publish it, then choose it here.
           </Alert>
+        ) : isShipmentEvent(rule.event) ? (
+          <p className="text-xs text-muted-foreground">
+            In the automation, the order’s tracking fields are the order’s latest tracking, which
+            may belong to another of its shipments than the one that started it.
+          </p>
         ) : null
       ) : template ? (
         <div className="grid gap-3">
@@ -495,6 +503,12 @@ export function StoreMessageRuleForm({
         <Alert tone="warning">
           The saved template is no longer approved or cannot be sent. Choose another.
         </Alert>
+      ) : null}
+      {isShipmentEvent(rule.event) ? (
+        <p className="text-xs text-muted-foreground">
+          The carrier, tracking number and tracking link are this shipment’s own, as Shopify gives
+          them; the other values are the order’s.
+        </p>
       ) : null}
       <Field
         id={`${id}-delay`}
@@ -720,6 +734,66 @@ export function StoreCartSettings({
           </div>
         ) : null}
       </ClientForm>
+      <FormError message={error} />
+    </div>
+  );
+}
+
+/**
+ * Shipment updates (ADR-413, Shopify): whether HyFib may subscribe to Shopify's shipment webhooks
+ * (`read_fulfillments`). Without them, shipments are still read with their orders: when an order
+ * changes, every hour, and every few hours while an order is in transit.
+ */
+export function StoreShipmentAccess({
+  slug,
+  storeId,
+  shipmentAccess,
+  canManage,
+}: {
+  slug: string;
+  storeId: string;
+  shipmentAccess: boolean;
+  canManage: boolean;
+}) {
+  const [allowing, setAllowing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="grid gap-2">
+      <p>
+        <span className="font-medium">Shipment updates from Shopify: </span>
+        {shipmentAccess ? 'allowed' : 'not allowed'}
+      </p>
+      <p className="text-xs text-muted-foreground">
+        {shipmentAccess
+          ? 'Shopify tells HyFib when a shipment is created or updated, and HyFib reads its order again at once.'
+          : 'HyFib reads shipments with their orders: when an order changes, every hour, and every few hours while an order is in transit. Allowing shipment updates makes Shopify tell HyFib about each shipment change at once.'}
+      </p>
+      {!shipmentAccess && canManage ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <ClientButton
+            type="button"
+            variant="outline"
+            disabled={allowing}
+            onClick={() => {
+              setAllowing(true);
+              setError(null);
+              void startShipmentAccessAction(slug, storeId).then((r) => {
+                if (!r.ok) {
+                  setAllowing(false);
+                  setError(r.message);
+                  return;
+                }
+                window.location.assign(r.data.url);
+              });
+            }}
+          >
+            {allowing ? 'Opening Shopify…' : 'Allow shipment updates in Shopify'}
+          </ClientButton>
+          <p className="text-xs text-muted-foreground">
+            The store keeps working with its current access until you approve.
+          </p>
+        </div>
+      ) : null}
       <FormError message={error} />
     </div>
   );

@@ -34,7 +34,7 @@ import {
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
-import { sweepTenantDeletions } from './tenancy';
+import { sweepCompanyExports, sweepTenantDeletions } from './tenancy';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -377,6 +377,21 @@ export function billingSweepHandler(rt: WorkerRuntime) {
     }
     const deletions = await sweepTenantDeletions(rt);
     if (deletions > 0) rt.logger.info({ deletions }, 'company deletions due');
+    // Stored exports (ADR-415): expired ones deleted, waiting or crashed ones signalled again. A
+    // failure does not hold back the rest of this minute's sweep; it is thrown at the end.
+    let exportSweepFailure: { error: unknown } | null = null;
+    try {
+      await sweepCompanyExports(rt);
+    } catch (error) {
+      rt.logger.warn(
+        { err: toError(error) },
+        'stored export sweep failed; the rest of the sweep runs',
+      );
+      exportSweepFailure = { error };
+    }
+    const rethrowExportSweep = () => {
+      if (exportSweepFailure) throw exportSweepFailure.error;
+    };
     // Deletions HyFib staff scheduled or cancelled (ADR-090): the company's owners and
     // administrators are told from here, as the platform role cannot queue email.
     const staffDeletions = await notifyStaffDeletions({
@@ -402,6 +417,7 @@ export function billingSweepHandler(rt: WorkerRuntime) {
     const deps = providerDeps(rt);
     if (!deps) {
       if (released > 0) rt.logger.info({ released }, 'billing sweep');
+      rethrowExportSweep();
       return;
     }
     const subscriptions = await sweepPlanSubscriptions(deps);
@@ -537,5 +553,6 @@ export function billingSweepHandler(rt: WorkerRuntime) {
         'billing sweep',
       );
     }
+    rethrowExportSweep();
   };
 }

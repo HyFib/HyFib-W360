@@ -35,6 +35,17 @@ export async function startCustomerAccessAction(
   });
 }
 
+/** Returns Shopify's approval address for shipment updates (ADR-413); the browser goes there next. */
+export async function startShipmentAccessAction(
+  slug: string,
+  storeId: string,
+): Promise<ActionResult<{ url: string }>> {
+  return runAction(async () => {
+    const { ctx, stores } = await storesFor(slug);
+    return stores.startShipmentAccess(ctx, storeId, await requestMeta());
+  });
+}
+
 /** Returns the WooCommerce store's approval address; the browser goes there next. */
 export async function startWooConnectAction(
   slug: string,

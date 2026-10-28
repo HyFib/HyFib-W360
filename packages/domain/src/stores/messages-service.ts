@@ -11,6 +11,7 @@ import {
   commerceStoreMessageRules,
   commerceStoreMessages,
   commerceStoreOrders,
+  commerceStoreShipments,
   commerceStores,
   desc,
   eq,
@@ -19,6 +20,7 @@ import {
   memberships,
   messageTemplates,
   messages,
+  or,
   sql,
   users,
   type AutomationRunStatus,
@@ -51,7 +53,7 @@ import {
   type StoreRuleAction,
   type StoreVariables,
 } from './messages-model';
-import { hasCustomerAccess, shopifyConsentSupported } from './model';
+import { hasCustomerAccess, hasShipmentAccess, shopifyConsentSupported } from './model';
 
 /**
  * Order messages for the web (P4-06c) and cart reminders (P4-06d): a store's message settings, one
@@ -701,11 +703,22 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
                 eq(automations.id, automationRuns.automationId),
               ),
             )
+            // A shipment message's order is its shipment's (ADR-413).
+            .leftJoin(
+              commerceStoreShipments,
+              and(
+                eq(commerceStoreShipments.tenantId, commerceStoreMessages.tenantId),
+                eq(commerceStoreShipments.id, commerceStoreMessages.shipmentId),
+              ),
+            )
             .leftJoin(
               commerceStoreOrders,
               and(
                 eq(commerceStoreOrders.tenantId, commerceStoreMessages.tenantId),
-                eq(commerceStoreOrders.id, commerceStoreMessages.orderId),
+                eq(
+                  commerceStoreOrders.id,
+                  sql`coalesce(${commerceStoreMessages.orderId}, ${commerceStoreShipments.orderId})`,
+                ),
               ),
             )
             .leftJoin(
@@ -775,6 +788,7 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
               sendWindowEnd:
                 store.sendWindowEnd === null ? '' : formatTimeOfDay(store.sendWindowEnd),
               customerAccess: hasCustomerAccess(grantedScopes),
+              shipmentAccess: hasShipmentAccess(grantedScopes),
               storeConsentBy: consentBy?.name ?? null,
               consentSupported: shopifyConsentSupported(deps.shopifyApiVersion),
             },
@@ -1205,10 +1219,18 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
                 eq(automations.id, automationRuns.automationId),
               ),
             )
+            // The order's shipment messages too (ADR-413).
+            .leftJoin(
+              commerceStoreShipments,
+              and(
+                eq(commerceStoreShipments.tenantId, commerceStoreMessages.tenantId),
+                eq(commerceStoreShipments.id, commerceStoreMessages.shipmentId),
+              ),
+            )
             .where(
               and(
                 eq(commerceStoreMessages.tenantId, ctx.tenant.id),
-                eq(commerceStoreMessages.orderId, id),
+                or(eq(commerceStoreMessages.orderId, id), eq(commerceStoreShipments.orderId, id)),
               ),
             )
             .orderBy(asc(commerceStoreMessages.createdAt));

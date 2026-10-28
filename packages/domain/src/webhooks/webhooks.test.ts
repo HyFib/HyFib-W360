@@ -1135,6 +1135,7 @@ describe('webhook payload schemas', () => {
       trigger: 'api',
       apiKeyId: '0192a1b2-0000-7000-8000-000000000006',
       enrollmentId: null,
+      campaign: null,
       status: 'running',
       endReason: null,
       startedAt: base.createdAt,
@@ -1165,6 +1166,35 @@ describe('webhook payload schemas', () => {
       },
     };
     expect(automationRunEndedPayloadSchema.safeParse(ended).success).toBe(true);
+    // A run started by a reply to a campaign names the campaign and the variant sent (ADR-414);
+    // the field is always given, null for other runs.
+    const replied = {
+      ...started,
+      data: {
+        ...started.data,
+        run: {
+          ...run,
+          trigger: 'campaign_reply',
+          apiKeyId: null,
+          campaign: { id: '0192a1b2-0000-7000-8000-000000000007', name: 'Diwali', variant: 'C' },
+        },
+      },
+    };
+    expect(automationRunStartedPayloadSchema.safeParse(replied).success).toBe(true);
+    for (const campaign of [
+      undefined,
+      { id: 'diwali', name: 'Diwali', variant: 'A' },
+      { id: '0192a1b2-0000-7000-8000-000000000007', name: 'Diwali', variant: 'F' },
+      { id: '0192a1b2-0000-7000-8000-000000000007', name: 'Diwali', variant: null },
+    ]) {
+      expect(
+        automationRunStartedPayloadSchema.safeParse({
+          ...replied,
+          data: { ...replied.data, run: { ...replied.data.run, campaign } },
+        }).success,
+        JSON.stringify(campaign),
+      ).toBe(false);
+    }
     // Every way a run ends is described, a stop through the API included (ADR-079).
     for (const [status, reasons] of Object.entries(AUTOMATION_END_REASONS)) {
       for (const endReason of reasons) {
@@ -7814,13 +7844,14 @@ describe('conversation tag filters (ADR-273)', () => {
 });
 
 describe('run trigger filters (ADR-183)', () => {
-  it('take 1 to 5 of the ways a live run starts, once each in the builder’s order; null takes every run', () => {
+  it('take 1 to 6 of the ways a live run starts, once each in the builder’s order; null takes every run', () => {
     expect(WEBHOOK_RUN_TRIGGERS).toEqual([
       'keyword',
       'conversation_started',
       'any_message',
       'store_event',
       'api',
+      'campaign_reply',
     ]);
     expect(webhookRunTriggersSchema.parse(['api', 'keyword'])).toEqual(['keyword', 'api']);
     expect(webhookRunTriggersSchema.parse([...WEBHOOK_RUN_TRIGGERS].reverse())).toEqual([
@@ -7866,6 +7897,7 @@ describe('run trigger filters (ADR-183)', () => {
       any_message: 'Any message',
       store_event: 'Order messages',
       api: 'API or a member’s enrolment',
+      campaign_reply: 'Reply to a campaign',
     });
   });
 
@@ -9992,10 +10024,14 @@ describe('skip reason filters for skipped order messages (ADR-354)', () => {
     'cart_too_old',
     'not_marketing_template',
   ];
+  // Shipment messages (ADR-413) send no webhook events, so their own reasons are never reported.
+  const shipmentOnly = ['shipment_cancelled', 'tracking_replaced', 'tracking_already_sent'];
 
   it('are the reasons a store’s Messages page explains, but cart reminders’ own', () => {
     expect(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS).toEqual(
-      Object.keys(STORE_MESSAGE_SKIP_REASONS).filter((reason) => !cartOnly.includes(reason)),
+      Object.keys(STORE_MESSAGE_SKIP_REASONS).filter(
+        (reason) => !cartOnly.includes(reason) && !shipmentOnly.includes(reason),
+      ),
     );
     expect(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS).toHaveLength(25);
     for (const reason of cartOnly) {
@@ -10103,6 +10139,10 @@ describe('the events of a store’s cart reminders (ADR-355)', () => {
     'automation_busy',
     'automation_limit',
     'automation_quota',
+    // Shipment messages' own (ADR-413).
+    'shipment_cancelled',
+    'tracking_replaced',
+    'tracking_already_sent',
   ];
 
   /** A transaction that answers its reads, in order, with `answers`; another read fails the test. */
@@ -10776,5 +10816,108 @@ describe('cart reminder filters for cart reminder events (ADR-361)', () => {
     expect(WEBHOOK_CART_REMINDERS_NEED_THE_EVENT).toBe(
       `Choose cart reminders only for an endpoint that receives ${WEBHOOK_EVENT_INFO['store_checkout.reminder_skipped'].label} or ${WEBHOOK_EVENT_INFO['store_checkout.reminder_sent'].label}.`,
     );
+  });
+});
+
+describe('the run events of a reply to a campaign (ADR-414)', () => {
+  const id = '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fb001';
+  const tenantId = '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fb002';
+  const [run, automation, conversation, contact, channel, campaign] = [
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fb003',
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fb004',
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fb005',
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fb006',
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fb007',
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fb008',
+  ];
+  const at = new Date('2026-10-21T09:00:00.000Z');
+
+  /** A transaction that answers its reads, in order, with `answers`; another read fails the test. */
+  function answering(answers: unknown[][]) {
+    const queue = [...answers];
+    const chain = {
+      from: () => chain,
+      innerJoin: () => chain,
+      leftJoin: () => chain,
+      where: () => {
+        const rows = queue.shift();
+        if (!rows) throw new Error('an unexpected read');
+        return Promise.resolve(rows);
+      },
+    };
+    return {
+      tx: { select: () => chain } as unknown as Parameters<typeof buildWebhookPayload>[0],
+      unread: () => queue.length,
+    };
+  }
+  const event = {
+    id,
+    tenantId,
+    type: 'automation.run_started',
+    messageId: null,
+    conversationId: conversation,
+    contactId: contact,
+    templateId: null,
+    status: 'running',
+    detail: { runId: run, automationId: automation },
+    contactChanges: null,
+    tagsAdded: null,
+    tagsRemoved: null,
+    occurredAt: at,
+    occurredAtExact: at.toISOString().replace('Z', '000Z'),
+  } as unknown as Parameters<typeof buildWebhookPayload>[1];
+  const runRow = {
+    id: run,
+    automationId: automation,
+    automationName: 'Diwali follow-up',
+    triggerType: 'campaign_reply',
+    apiKeyId: null,
+    enrollmentId: null,
+    startedAt: at,
+    conversationId: conversation,
+    contactId: contact,
+    channelId: channel,
+    channelPhone: '+91 80 4567 8901',
+  };
+  const person = [{ phone: '+919845012345', name: 'Asha', erasedAt: null }];
+
+  it('names the campaign and the variant sent, never the button tapped', async () => {
+    const reads = answering([
+      [runRow],
+      [{ campaignId: campaign, name: 'Diwali offers', variant: 'B', buttonText: 'Yes, call me' }],
+      person,
+    ]);
+    const built = await buildWebhookPayload(reads.tx, event, 'endpoint');
+    expect(built.data).toEqual({
+      run: {
+        id: run,
+        automationId: automation,
+        automationName: 'Diwali follow-up',
+        trigger: 'campaign_reply',
+        apiKeyId: null,
+        enrollmentId: null,
+        campaign: { id: campaign, name: 'Diwali offers', variant: 'B' },
+        status: 'running',
+        endReason: null,
+        startedAt: at.toISOString(),
+        endedAt: null,
+      },
+      conversation: { id: conversation },
+      contact: { id: contact, phone: '+919845012345', name: 'Asha' },
+      channel: { id: channel, phone: '+91 80 4567 8901' },
+    });
+    expect(automationRunStartedPayloadSchema.safeParse(built).success).toBe(true);
+    expect(JSON.stringify(built)).not.toContain('call me');
+    expect(reads.unread()).toBe(0);
+  });
+
+  it('reads no campaign for other runs, and fails a reply’s run whose campaign is not recorded', async () => {
+    const keyword = answering([[{ ...runRow, triggerType: 'keyword' }], person]);
+    const built = await buildWebhookPayload(keyword.tx, event, 'endpoint');
+    expect(built.data).toMatchObject({ run: { trigger: 'keyword', campaign: null } });
+    expect(keyword.unread()).toBe(0);
+    await expect(
+      buildWebhookPayload(answering([[runRow], [], person]).tx, event, 'endpoint'),
+    ).rejects.toThrow('A run started by a reply to a campaign has no campaign recorded');
   });
 });

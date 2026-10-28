@@ -11,6 +11,9 @@ import {
   can,
   formatAllowedNetwork,
   hasRecentSignIn,
+  MCP_MODERN_VERSION,
+  MCP_PATH,
+  MCP_TOOLS,
   RECENT_SIGN_IN_MINUTES,
   type ApiKeyView,
 } from '@w360/domain';
@@ -47,6 +50,7 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
   const inPlan = apiLimit !== 0;
   const tz = ctx.tenant.timezone;
   const apiBase = new URL('/api/v1', config.APP_BASE_URL).toString();
+  const mcpUrl = new URL(MCP_PATH, config.APP_BASE_URL).toString();
   // Scopes the plan leaves out (ADR-092): refused to requests, and not offered for new keys.
   const planScopes = usage.apiScopes;
   const notInPlan =
@@ -133,6 +137,100 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
               `  -H "Idempotency-Key: $(uuidgen)" \\`,
               `  -H "Content-Type: application/json" \\`,
               `  -d '{"to":"+919876543210","templateId":"<template id>","variables":{"body":["Asha"]}}'`,
+            ].join('\n')}
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>AI assistants (MCP)</CardTitle>
+          <CardDescription>
+            AI assistants that support the Model Context Protocol can use the API through its MCP
+            endpoint with an API key, as your systems do: each tool needs the same scopes as the API
+            call it mirrors, and counts as that call against the key’s and the plan’s limits. Give
+            an assistant its own key with read scopes only, unless you want it to send messages;
+            sending tools message real customers, so have the assistant ask before each send.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          {inPlan ? null : (
+            <p className="text-sm text-muted-foreground">
+              The MCP endpoint is part of the public API, so it refuses requests while your plan
+              does not include the API.
+            </p>
+          )}
+          <CopyField label="MCP endpoint" value={mcpUrl} />
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <caption className="sr-only">MCP tools and the scopes they need</caption>
+              <thead className="text-xs text-muted-foreground">
+                <tr>
+                  <th scope="col" className="py-1 pr-3 font-medium">
+                    Tool
+                  </th>
+                  <th scope="col" className="py-1 pr-3 font-medium">
+                    What it does
+                  </th>
+                  <th scope="col" className="py-1 font-medium">
+                    Scope needed
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {MCP_TOOLS.map((tool) => (
+                  <tr key={tool.name} className="border-t border-border">
+                    <td className="py-1 pr-3 font-mono text-xs">{tool.name}</td>
+                    <td className="py-1 pr-3">{tool.title}</td>
+                    <td className="py-1">
+                      {tool.scopes.map((s) => API_SCOPE_INFO[s].label).join(' or ')}
+                      {tool.scopes.every((s) => notInPlan.includes(s)) ? (
+                        <>
+                          {' '}
+                          <Badge tone="warning">Not in your plan</Badge>
+                        </>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-sm">
+            Messages, names and other text your customers write reach the assistant as data; the
+            tools tell it never to follow instructions found in them. The send tools need an{' '}
+            <code className="font-mono text-xs">idempotencyKey</code> argument, so a retry never
+            sends twice.
+          </p>
+          <CopyField
+            label="Example client configuration"
+            description="Many MCP clients read a configuration like this; check your client’s documentation for its exact format. Replace the placeholder with the key."
+            multiline
+            value={JSON.stringify(
+              {
+                mcpServers: {
+                  'hyfib-w360': {
+                    type: 'http',
+                    url: mcpUrl,
+                    headers: { Authorization: 'Bearer <your API key>' },
+                  },
+                },
+              },
+              null,
+              2,
+            )}
+          />
+          <CopyField
+            label="Example: list the tools"
+            multiline
+            value={[
+              `curl -X POST ${mcpUrl} \\`,
+              `  -H "Authorization: Bearer $W360_API_KEY" \\`,
+              `  -H "Content-Type: application/json" \\`,
+              `  -H "Accept: application/json, text/event-stream" \\`,
+              `  -H "MCP-Protocol-Version: ${MCP_MODERN_VERSION}" \\`,
+              `  -H "Mcp-Method: tools/list" \\`,
+              `  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"${MCP_MODERN_VERSION}","io.modelcontextprotocol/clientCapabilities":{}}}}'`,
             ].join('\n')}
           />
         </CardContent>

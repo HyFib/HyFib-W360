@@ -196,6 +196,8 @@ const STORE_EVENT_NAMES: Record<string, string> = {
   order_shipped: 'order shipped',
   order_delivered: 'order delivered',
   order_cancelled: 'order cancelled',
+  shipment_created: 'shipment sent',
+  tracking_updated: 'tracking updated',
   cart_reminder: 'cart reminder',
   cart_second_reminder: 'second cart reminder',
 };

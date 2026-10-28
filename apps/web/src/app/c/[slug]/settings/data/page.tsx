@@ -1,8 +1,21 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { can, DELETION_GRACE_DAYS, hasRecentSignIn, RECENT_SIGN_IN_MINUTES } from '@w360/domain';
+import {
+  can,
+  DELETION_GRACE_DAYS,
+  formatByteSize,
+  hasRecentSignIn,
+  RECENT_SIGN_IN_MINUTES,
+  STORED_EXPORT_FAILURE_LABELS,
+  STORED_EXPORT_RETENTION_DAYS,
+  STORED_EXPORT_STATUS_LABELS,
+} from '@w360/domain';
 import { Alert, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
-import { CancelDeletionButton, RequestDeletionForm } from '@/components/settings/company-data';
+import {
+  CancelDeletionButton,
+  RequestDeletionForm,
+  RequestStoredExportButton,
+} from '@/components/settings/company-data';
 import { SignInAgain } from '@/components/sign-in-again';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
@@ -17,8 +30,11 @@ export default async function CompanyDataPage({ params }: { params: Promise<{ sl
   const canExport = can(ctx, 'tenant.export');
   const canDelete = can(ctx, 'tenant.delete');
   if (!canExport && !canDelete) notFound();
-  const { companyDeletion, clock } = await getRuntime();
+  const { companyDeletion, storedExports, clock } = await getRuntime();
   const deletion = await companyDeletion.status(ctx);
+  // Re-checked here: the layout is not re-run on navigation; listing needs tenant.export too.
+  const stored = canExport ? await storedExports.list(ctx) : [];
+  const storedPending = stored.some((e) => e.status === 'queued' || e.status === 'running');
   // Both need a recent sign-in (ADR-056); cancelling a deletion does not.
   const recent = hasRecentSignIn(ctx, clock.now());
   const tz = ctx.tenant.timezone;
@@ -32,7 +48,8 @@ export default async function CompanyDataPage({ params }: { params: Promise<{ sl
               A full copy as one gzip-compressed JSON Lines file: members, settings, contacts and
               consent history, conversations and messages, templates, campaigns, automations, CRM,
               growth, Flows, commerce, stores, billing and the audit log. Credentials and secrets
-              are never included. Owners and administrators are emailed whenever an export starts.
+              are never included. Owners and administrators are emailed whenever an export starts or
+              a stored export is downloaded.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3 text-sm">
@@ -55,6 +72,78 @@ export default async function CompanyDataPage({ params }: { params: Promise<{ sl
                 reason={`Downloading the export needs a sign-in within the last ${RECENT_SIGN_IN_MINUTES} minutes.`}
               />
             )}
+            <section aria-labelledby="stored-exports" className="grid gap-3 border-t pt-4">
+              <h2 id="stored-exports" className="font-medium">
+                Stored exports
+              </h2>
+              <p className="text-muted-foreground">
+                For a large company, HyFib can prepare the same file in the background and keep it,
+                encrypted, for {STORED_EXPORT_RETENTION_DAYS} days, so it can be downloaded again
+                without waiting. Owners and administrators are emailed when it is asked for, when it
+                is ready and whenever it is downloaded; the email links to this page, never to the
+                file.
+              </p>
+              {recent ? (
+                <RequestStoredExportButton slug={ctx.tenant.slug} pending={storedPending} />
+              ) : null}
+              {storedPending ? (
+                <p className="text-muted-foreground">
+                  A stored export is being prepared. Downloading the export above waits until it is
+                  ready.
+                </p>
+              ) : null}
+              {stored.length > 0 ? (
+                <ul className="grid gap-2">
+                  {stored.map((item) => (
+                    <li
+                      key={item.id}
+                      className="grid gap-1 rounded-md border p-3 break-words"
+                      data-testid="stored-export"
+                    >
+                      <p>
+                        <span className="font-medium">
+                          {item.replaced
+                            ? 'Replaced by a newer export'
+                            : STORED_EXPORT_STATUS_LABELS[item.status]}
+                        </span>
+                        {' · '}asked for {formatDateTime(item.requestedAt, tz)}
+                        {item.requestedByName ? ` by ${item.requestedByName}` : ''}
+                      </p>
+                      {item.status === 'ready' && item.byteSize !== null && item.expiresAt ? (
+                        <>
+                          <p className="text-muted-foreground">
+                            {formatByteSize(item.byteSize)},{' '}
+                            {item.replaced ? 'deleted at' : 'kept until'}{' '}
+                            {formatDateTime(item.expiresAt, tz)}
+                          </p>
+                          {item.sha256 ? (
+                            <p className="text-muted-foreground">
+                              SHA-256 <code className="break-all">{item.sha256}</code>
+                            </p>
+                          ) : null}
+                          {recent && !item.replaced ? (
+                            <div>
+                              <a
+                                href={`/c/${ctx.tenant.slug}/settings/data/exports/${item.id}`}
+                                rel="noopener noreferrer"
+                                className="inline-flex h-10 items-center rounded-md border border-border bg-background px-4 text-sm font-medium hover:bg-muted"
+                              >
+                                Download the stored export
+                              </a>
+                            </div>
+                          ) : null}
+                        </>
+                      ) : null}
+                      {item.status === 'failed' && item.failureReason ? (
+                        <p className="text-muted-foreground">
+                          {STORED_EXPORT_FAILURE_LABELS[item.failureReason]}
+                        </p>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </section>
           </CardContent>
         </Card>
       ) : null}

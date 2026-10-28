@@ -107,11 +107,12 @@ export type WebhookCodAnswer = StoreMessageAnswer;
 /**
  * The order messages a `store_order.message_skipped` or `store_order.message_sent` event is about,
  * which an endpoint can choose (ADR-352, ADR-353): every store message event but the two cart
- * reminders, which send `store_checkout.*` events instead (ADR-355).
+ * reminders, which send `store_checkout.*` events instead (ADR-355), and the two shipment messages
+ * (ADR-413), which send none.
  */
 export type WebhookOrderMessageEvent = Exclude<
   StoreMessageEvent,
-  'cart_reminder' | 'cart_second_reminder'
+  'cart_reminder' | 'cart_second_reminder' | 'shipment_created' | 'tracking_updated'
 >;
 
 /**
@@ -323,7 +324,13 @@ export type WebhookRunStepNodeType =
  * (ADR-183), as the event's `run.trigger` says; members' test runs send no events.
  */
 export type WebhookRunTrigger =
-  'keyword' | 'conversation_started' | 'any_message' | 'store_event' | 'api';
+  | 'keyword'
+  | 'conversation_started'
+  | 'any_message'
+  | 'store_event'
+  | 'api'
+  /** A reply to a campaign message (migration 0327, ADR-414). */
+  | 'campaign_reply';
 
 /**
  * A `consent.changed` change, its purpose and action (ADR-018), which an endpoint can choose

@@ -331,10 +331,42 @@ describe('automation graph checks', () => {
         expect.arrayContaining([
           'The question is limited to 1024 characters.',
           'WhatsApp allows at most 3 buttons.',
-          'WhatsApp limits button titles to 20 characters.',
         ]),
       );
       expect(tooMany.issues.every((i) => i.nodeId === 'q')).toBe(true);
+    }
+
+    // zod rejects an array over its length limit before it checks the items, so the title limit
+    // needs a step whose button count is within WhatsApp's.
+    const longTitle = parseGraph({
+      version: 1,
+      start: 'q',
+      nodes: [
+        {
+          id: 'q',
+          type: 'ask_buttons',
+          header: null,
+          body: 'Pick one',
+          footer: null,
+          buttons: [
+            { title: 'One', next: null },
+            { title: 'A title longer than twenty', next: null },
+          ],
+          saveAs: null,
+          retryText: null,
+          retries: 0,
+          noMatchNext: null,
+          timeoutMinutes: 10,
+          timeoutNext: null,
+        },
+      ],
+    });
+    expect(longTitle.ok).toBe(false);
+    if (!longTitle.ok) {
+      expect(longTitle.issues.map((i) => i.message)).toEqual([
+        'WhatsApp limits button titles to 20 characters.',
+      ]);
+      expect(longTitle.issues.every((i) => i.nodeId === 'q')).toBe(true);
     }
   });
 });
@@ -353,10 +385,10 @@ describe('automation triggers', () => {
       'menu',
     ]);
     if (!keyword.ok) return;
-    expect(matchTrigger(keyword.trigger, { text: 'ORDER status', newCase: false })).toBe(0);
+    expect(matchTrigger(keyword.trigger, { text: 'ORDER status', newCase: false })).toBe(4);
     expect(
       matchTrigger(keyword.trigger, { text: 'what is my order status?', newCase: false }),
-    ).toBe(1);
+    ).toBe(5);
     expect(matchTrigger(keyword.trigger, { text: 'menus', newCase: false })).toBeNull();
     const exact = parseTrigger({
       type: 'keyword',
@@ -367,13 +399,13 @@ describe('automation triggers', () => {
     });
     if (!exact.ok) throw new Error('trigger');
     expect(matchTrigger(exact.trigger, { text: 'show the menu', newCase: false })).toBeNull();
-    expect(matchTrigger(exact.trigger, { text: 'Menu.', newCase: false })).toBe(0);
+    expect(matchTrigger(exact.trigger, { text: 'Menu.', newCase: false })).toBe(4);
     expect(
       matchTrigger(
         { type: 'conversation_started', hours: 'any', cooldownMinutes: 0 },
         { text: 'hi', newCase: true },
       ),
-    ).toBe(3);
+    ).toBe(7);
     expect(
       matchTrigger(
         { type: 'conversation_started', hours: 'any', cooldownMinutes: 0 },
@@ -385,7 +417,7 @@ describe('automation triggers', () => {
         { type: 'any_message', hours: 'any', cooldownMinutes: 0 },
         { text: null, newCase: false },
       ),
-    ).toBe(4);
+    ).toBe(8);
     expect(
       parseTrigger({
         type: 'keyword',
@@ -415,11 +447,11 @@ describe('automation triggers', () => {
     expect(strict.trigger).not.toHaveProperty('typos');
     const at = (trigger: typeof contains.trigger, text: string) =>
       matchTrigger(trigger, { text, newCase: false });
-    expect(at(contains.trigger, 'Refund')).toBe(0);
-    expect(at(contains.trigger, 'I want a refund')).toBe(1);
-    expect(at(contains.trigger, 'I want a refnud')).toBe(2);
+    expect(at(contains.trigger, 'Refund')).toBe(4);
+    expect(at(contains.trigger, 'I want a refund')).toBe(5);
+    expect(at(contains.trigger, 'I want a refnud')).toBe(6);
     expect(at(contains.trigger, 'the meny')).toBeNull();
-    expect(at(exact.trigger, 'refnud!')).toBe(2);
+    expect(at(exact.trigger, 'refnud!')).toBe(6);
     expect(at(exact.trigger, 'I want a refnud')).toBeNull();
     expect(at(exact.trigger, 'I want a refund')).toBeNull();
     expect(at(strict.trigger, 'I want a refnud')).toBeNull();

@@ -12,6 +12,11 @@ export interface ExportTableSpec {
   columns: readonly string[];
   /** Columns left out, with the reason. */
   omitted?: Readonly<Record<string, string>>;
+  /**
+   * Rows read per query when rows are large (bytes are written as base64 text): saved replies'
+   * files are up to 16 MB each (ADR-411). The default is 1,000.
+   */
+  pageSize?: number;
 }
 
 /** Tables left out of the export, with the reason. */
@@ -20,6 +25,10 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
   'app.channel_onboarding_sessions': 'Embedded Signup session bookkeeping.',
   'app.commerce_store_events': 'Deduplication records of store webhooks.',
   'app.commerce_store_fetches': 'Bookkeeping of reads from stores.',
+  'app.company_export_parts':
+    'The stored copies of earlier exports themselves (ADR-415), kept 7 days; an export never holds another.',
+  'app.company_exports':
+    'Bookkeeping of stored exports (ADR-415): who asked and when, and the file’s size and hash; the audit log, which is exported, records each request and download.',
   'app.contact_changes':
     'Positions of the API’s contact change feed (ADR-114): which contact changed in which transaction, and the names of the parts it changed (ADR-329); the contacts themselves are exported.',
   'app.conversation_viewers':
@@ -186,6 +195,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'created_at',
     ],
     omitted: { request_ciphertext: 'The encrypted request, which can hold secrets.' },
+  },
+  {
+    table: 'app.automation_run_campaigns',
+    columns: ['id', 'run_id', 'campaign_id', 'variant', 'button_text', 'created_at'],
   },
   {
     table: 'app.automation_run_steps',
@@ -642,6 +655,9 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'updated_at',
       'checkout_id',
       'automation_run_id',
+      'shipment_id',
+      'dedupe_key',
+      'tracking_revision',
     ],
   },
   {
@@ -720,6 +736,30 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'created_at',
       'updated_at',
     ],
+  },
+  {
+    table: 'app.commerce_store_shipments',
+    columns: [
+      'id',
+      'store_id',
+      'order_id',
+      'external_id',
+      'status',
+      'display_status',
+      'failed',
+      'remote_created_at',
+      'remote_updated_at',
+      'tracking_company',
+      'tracking_number',
+      'tracking_url',
+      'synced_at',
+      'created_at',
+      'updated_at',
+    ],
+    omitted: {
+      tracking_keys:
+        'Digests HyFib keeps to tell a new tracking from one already seen (ADR-413); the tracking itself is exported.',
+    },
   },
   {
     table: 'app.commerce_stores',
@@ -1591,6 +1631,26 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'created_at',
       'updated_at',
     ],
+  },
+  {
+    table: 'app.saved_reply_attachments',
+    columns: ['id', 'saved_reply_id', 'file_id', 'attached_by_membership_id', 'attached_at'],
+  },
+  {
+    // The files themselves (ADR-411): `content` is the file's bytes, written as base64.
+    table: 'app.saved_reply_files',
+    columns: [
+      'id',
+      'kind',
+      'mime_type',
+      'filename',
+      'size_bytes',
+      'sha256',
+      'content',
+      'created_by_membership_id',
+      'created_at',
+    ],
+    pageSize: 2,
   },
   {
     table: 'app.segments',

@@ -1,5 +1,663 @@
 # Progress
 
+## 2026-10-28 — Dependency security updates (PR #107)
+
+Status: **Done; lint, format, type check, unit tests and build run locally; integration and e2e
+tests run in CI only.** CI's dependency audit (`pnpm audit --audit-level=high`) began failing on
+advisories published after the last green run: Next.js 16.0.0 to 16.4.0 (GHSA-2464-fhr4-w9xw and
+GHSA-673q-mjm6-r5xr, critical; GHSA-p3m5-59mp-jv5r, high), better-auth before 1.7.7
+(GHSA-965c-763c-88jm, critical; GHSA-r4xp-prcw-77qf, high; GHSA-44jh-23m7-hpcf, low), zod before
+4.6.6 (GHSA-mrhx-c7xc-m3w5, high), nodemailer before 10.1.4 (five moderate) and @vitest/mocker
+before 5.0.3 (two moderate).
+
+- **Upgrades:** next 16.3.8 to 16.4.3, better-auth 1.7.6 to 1.7.14, zod 4.6.5 to 4.6.7 in every
+  package, nodemailer 10.0.10 to 10.2.1, vitest and @vitest/coverage-v8 5.0.2 to 5.0.5;
+  `pnpm dedupe` removed the last zod 4.6.5 (through eslint-plugin-react-hooks). `pnpm audit` now
+  reports no known vulnerabilities. The Next ESLint packages stay at 16.3.6 (no advisory; their
+  patch in `patches/` is pinned to that version).
+- **Behaviour change:** zod 4.6.6 and later reject an array over its length limit before they
+  check its items, so an automation step with too many buttons no longer also reports an
+  over-long title in the same pass (checked directly against zod 4.6.7). The interpreter test now
+  checks the title limit on a step within the button limit.
+
+## 2026-10-21 — A hosted MCP server over the public API (W-141, ADR-416)
+
+Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI
+only; not tried with a real assistant client.** The matrix row W-141 was planned. Research first:
+docs/research/mcp.md (MCP-001 to MCP-023), from the specification's repository, latest revision
+2026-07-28.
+
+### Completed
+
+- **Endpoint:** `POST /api/mcp` (`app/api/mcp/route.ts`, `server/mcp.ts`), the stateless JSON
+  subset of Streamable HTTP: one JSON-RPC message per POST, one JSON answer (202 and no body for a
+  notification), no SSE, no sessions; GET, DELETE and OPTIONS answer 405. `Origin` checked first on
+  every method (none or the app's own; otherwise 403, uncounted); no CORS headers. Batches and
+  client responses refused.
+- **Protocol** (`api/mcp-protocol.ts`, pure): 2026-07-28 served statelessly (per-request `_meta`,
+  `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` checked against the body, -32020 and -32022,
+  `server/discover`, `resultType`, `ttlMs` and `cacheScope`, 404 and -32601 for other methods);
+  2025-11-25 and 2025-06-18 through `initialize` without a session (`ping`, `tools/list`,
+  `tools/call`, the version from the header).
+- **REST pipeline reused:** the route calls `handleApiRequest`, so key, addresses, rate limits,
+  monthly requests, the plan's scopes, the 64 KB body, the NUL refusal and the request log are the
+  REST ones and every POST counts as one request. Additive options: `errorBody` (refusals as
+  JSON-RPC errors with the REST status, headers and message) and a `json` result whose `log` fields
+  join the REST log line (`mcp.tool`, `mcp.mirrors`, `mcp.mirroredStatus`, `mcp.replayed`).
+- **Tools** (`api/mcp-tools.ts`, `api/mcp-model.ts`): search_contacts, get_contact,
+  list_conversations, list_conversation_messages, list_templates, list_campaigns, get_campaign,
+  send_text_reply, send_template, each calling its REST call's domain service with the same scopes
+  (checked before the arguments, again in the service); input schemas from the REST zod schemas,
+  closed to unknown arguments; results as JSON text; REST refusals as tool errors with the same
+  status, code, message and reason; unexpected errors as -32603 with the generic message. The send
+  tools require `idempotencyKey` (the REST store; hash of canonical arguments under the tool's
+  name, so never replayed across REST and MCP). Customer-written text marked untrusted in the
+  descriptions and the server's instructions.
+- **Settings → API keys:** an "AI assistants (MCP)" card with the endpoint, a table of the tools and
+  the scope each needs, a client configuration with `<your API key>` and a `curl` of `tools/list`;
+  read-only keys recommended.
+- **Docs:** ADR-416, research file docs/research/mcp.md, THREAT-MODEL T365, SECURITY, ARCHITECTURE
+  §6N, DEPLOYMENT (Public API), RUNBOOKS §10N, BACKLOG Phase 6, feature matrix W-141
+  (implemented). No OpenAPI change: no REST-visible behaviour changed.
+
+### Tests
+
+- Unit (`api/mcp-protocol.test.ts`, 32 tests; `api/mcp-tools.test.ts`, 20 tests): batches,
+  non-JSON-RPC bodies, responses, null ids and params refused; notifications 202; legacy
+  `initialize` (both versions, another version answered with 2025-11-25), `ping`, `tools/list`
+  without modern fields, the header required and checked; modern `server/discover`, `tools/list`
+  with caching fields and no cursor, header and `_meta` mismatches, unsupported versions with the
+  supported list, capabilities required, `Mcp-Name` (Base64 sentinel) and `Mcp-Method` (exact: a
+  sentinel or unsafe characters refused), 404 for `ping` and unknown methods; the method logged at
+  most 128 characters; tool results, sends with `replayed`, REST refusals as tool errors, an
+  unexpected error as -32603 without its cause and logged with mirrored status 500, unknown tools
+  and malformed params; arguments failing the schema as -32602 for 2025-06-18 and as tool errors
+  for 2025-11-25 (service refusals tool errors in both); the Origin rule, transport errors, -32700
+  for a body that is not JSON and the request's id once read; tool definitions (order, closed
+  object schemas without `$schema`, the REST schemas' fields, `idempotencyKey` required with the
+  header's pattern, untrusted notes, scopes and hints); scope refusals before any query and before
+  argument checks, the plan's scopes, either sending scope for templates, key rules, unknown
+  arguments and ids, the NUL character refused naming its argument, a suspended company; an
+  unexpected error never carrying a token (generated at run time); canonical hashing, never equal
+  to a REST request's.
+- Integration (CI only, `tests/integration/mcp.test.ts`): each read tool equal to its REST service
+  call (contacts, a contact, conversations, messages with a customer's injection attempt returned
+  as data, templates, campaigns), paging, scopes refused with the REST messages; isolation (another
+  company's contact and conversation not found, a `tenantId` argument refused, the protocol bound
+  to the key); a text reply sent once per key (replayed in any argument order, one send job,
+  recorded as the key's API send), the key reused with other text refused, a REST key never
+  replayed by the tool; the window closed refused with nothing sent; an approved template sent once
+  per key and refused to a reply-only key.
+- E2E (CI only, `tests/e2e/mcp.spec.ts`): the settings card (endpoint, tool table and scopes, the
+  snippet with the placeholder and not the key); `initialize` without a session id, its
+  notification 202 with no body, `tools/list` (2026-07-28), `search_contacts`, `list_templates`
+  refused for a missing scope with the REST message, a body that is not JSON answered 400 with
+  -32700; 401 without a key (JSON-RPC error, `WWW-Authenticate`), 403 for another origin without
+  CORS headers, 405 for GET; the key's requests this period 7 after six MCP messages and one REST
+  request.
+- Hand mutation of 41 rules, bounds and checks (34 first, 7 after the review; a script outside the
+  repository, one at a time against the two unit test files): **39 caught by the unit tests.** The
+  2 others need the database and are covered by named integration tests (not run here): "answer
+  exactly what the REST calls answer, as JSON text a client can parse" (also "page as the REST
+  calls do") would fail for `list_conversation_messages` passing `conversationId` on to the
+  service and for `search_contacts` dropping its filters. Not executable here and so not counted
+  above: four route-level mutations, each with the e2e assertion that covers it (no `errorBody`:
+  the 401 body's `error.code`; no Origin check on POST: the 403; GET not 405: the 405 and `Allow`;
+  the pipeline answering `null` for a notification: the empty 202 body). One has no test: dropping
+  the `mcp` fields from the request log line (the log is not asserted anywhere).
+
+### Review fixes (before merge)
+
+An independent review checked the specification claims and found no High issue.
+
+- **Medium:** `Mcp-Method` was compared after Base64-sentinel decoding, which the specification
+  defines for `Mcp-Name` and `Mcp-Param-*` only; it is now compared exactly and a value with unsafe
+  characters is refused with -32020.
+- **Lows:** a body that is not JSON now gets -32700 (still 400); errors after the body was read
+  carry its id; the whole-body NUL refusal is skipped for MCP (`nulCheck: false`) and the tools'
+  argument schemas refuse the character as a tool error naming the argument; the logged method is
+  cut to 128 characters; unexpected tool failures carry `mcp.mirroredStatus` 500 to alert on
+  (DEPLOYMENT, RUNBOOKS §10N); arguments failing a tool's schema are -32602 for 2025-06-18, as that
+  revision lists them, and MCP-008 is corrected; the mutation accounting says the integration
+  tests did not run here; the settings card says when the plan leaves the API out and marks tools
+  whose scopes it leaves out; a token-shaped literal in a unit test is now generated at run time.
+- **CI's first end-to-end run (PR #107):** the e2e's body that is not JSON was a string sent
+  with a JSON content type, which Playwright encodes as a JSON string (valid JSON), so the
+  endpoint rightly answered -32600. The test now sends the bytes themselves.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                                         | Result                                                                       |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`                                                 | clean                                                                        |
+| `npx prettier --check . --ignore-path .prettierignore --ignore-path .gitignore` | clean                                                                        |
+| `pnpm typecheck`                                                                | clean                                                                        |
+| `pnpm test` (unit, after the review fixes)                                      | 2,192 of 2,192 passed (188 files; 52 new in 2 files)                         |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`                             | clean                                                                        |
+| `pnpm build`                                                                    | passed (`/api/mcp` dynamic)                                                  |
+| hand mutation of 41 rules and checks                                            | 39 caught by unit tests; 2 covered by named integration tests (not run here) |
+| `pnpm test:integration`, `pnpm test:e2e`                                        | not run here: no local PostgreSQL or browser; CI runs them                   |
+
+## 2026-10-21 — Stored company exports, kept encrypted in PostgreSQL for 7 days (P5-11, ADR-415)
+
+Status: **Implemented (migration 0325); unit tests run locally, integration and e2e tests written
+and type-checked, run in CI only; not run against a database here.** P5-11's remaining list began
+with "stored exports". HyFib has no object storage, so the file is kept in PostgreSQL, sealed; the
+streamed export stays as it was (it is now refused while a stored export is being prepared).
+
+### Completed
+
+- **Asking:** owners with a sign-in in the last 15 minutes, "Prepare a stored export" in Settings →
+  Company data; audited (`tenant.export_requested`), emailed to owners and administrators, a signed
+  `company.export` job queued in the same transaction.
+- **The run:** the streamed export's own lines (`writeExportLines`, shared) from one read-only
+  snapshot, gzip-compressed and cut into 1 MiB parts (`CompressedParts`), each sealed with the
+  keyring and inserted in its own transaction while the run's lease and attempt hold; ready with
+  size, SHA-256 and a 7-day expiry; an older ready file of the company no longer offered and
+  expired 30 minutes later; owners and administrators emailed a link to the page.
+- **Bounds:** at most 512 MiB compressed per export and one ready file per company (a larger one
+  fails as `too_large` and points to the streamed export); a new run deletes earlier runs' parts; 7
+  days, then the minute sweep deletes the parts and records the export expired. A company may ask 3
+  times and download 20 times a day (token buckets).
+- **One at a time:** the export lock for the streamed and stored reads, a unique index for waiting or
+  running stored exports; asking refused while a stream runs, the stream refused while a stored
+  export waits.
+- **Crashes and failures:** a 5-minute lease renewed every part and at least every minute, fenced by
+  the attempt number; a crashed run taken over, the fourth start failed as `interrupted`, a day
+  waiting or a run past 30 minutes as `timed_out`, a requester no longer an owner as
+  `requester_not_allowed`; a transient database error left to the lease; failures store a code and a
+  SQLSTATE only, delete the parts, email the owners and show on the page. Runs use a worker pool of
+  their own (4 connections).
+- **Downloading:** `/c/{slug}/settings/data/exports/{id}`, owners with the step-up, the company's own
+  current ready exports only, audited and emailed, streamed part by part through the app with each
+  part's size checked, and the file's size and SHA-256 before its last part.
+- **Keys and deletion:** the parts join the keyring sweep (`company_export_part`), so a key is removed
+  only once no part uses it; company deletion removes both tables (steps 37 and 38); both are left
+  out of the export.
+- **Docs:** ADR-415, DATA-RETENTION, SECURITY, DEPLOYMENT (migration and space), RUNBOOKS §10Q,
+  THREAT-MODEL T364, ARCHITECTURE, BACKLOG P5-11, feature matrix H-015 (status unchanged).
+
+### Tests
+
+| Suite                      | Files                                                                        | Result                         |
+| -------------------------- | ---------------------------------------------------------------------------- | ------------------------------ |
+| Unit (new)                 | `tenancy/export-parts.test.ts`, `tenancy/stored-export.test.ts`              | 6 and 18 tests, passed locally |
+| Unit (changed)             | `platform/queue-waits.test.ts`                                               | passed locally                 |
+| Unit (whole suite)         | 188 files                                                                    | 2,167 tests, passed locally    |
+| Integration (new, CI only) | `stored-exports.test.ts`                                                     | 19 tests, type-checked         |
+| Integration (changed)      | `company-data.test.ts`, `keyring-reseal.test.ts`, `tenant-isolation.test.ts` | type-checked, not run here     |
+| E2E (new step, CI only)    | `company-data.spec.ts`                                                       | type-checked, not run here     |
+
+- Hand mutation of 44 rules and bounds, one at a time (30 first, 14 after the review; the first
+  run's associated-data mutation is replaced by four). **31 caught by the unit tests**: the size bound three ways, the file hash, the last part, part numbering, the
+  7 days, the requester's status and permission, the permission and step-up of asking, listing and
+  downloading, the export id check, the file's SHA-256 and each part's size on reading, the export's
+  own table classified, the job's expiry; after the review, the part's associated data naming the
+  company, the export, the run and the position (four mutations), the whole-file check before the
+  last part, the request and download limits taken (two), the transient classification of a
+  connection error and of a serialization failure (two), the run's 30-minute bound, the replaced
+  file's 30 minutes, and the request limit's size. **13 need the database**, each exercised by
+  a named integration test that did not run here: taking over an expired lease and a new run deleting
+  earlier runs' parts ("takes over a run whose lease ran out…"), the attempts limit ("gives up after
+  3 interrupted runs…"), one ready file and the 30-minute replacement ("keeps one ready file…"), the
+  streamed export refusing while a stored one waits and asking taking the export lock ("counts the
+  streamed export and a stored one together…"), a failure deleting the parts ("fails a file past the
+  largest size…"), expiry deleting the parts ("deletes a ready export’s file once it expires…"), the
+  requester and waiting checks ("does not prepare an export for someone who is no longer an
+  owner…"), the deletion steps (`company-data.test.ts` "removes HyFib from the providers, deletes
+  every company row…"), a download by another company ("lets only an owner of the company…"), a
+  transient error left to the lease ("leaves the export to its lease on a broken connection…"), the
+  run's time bound ("fails a run that takes longer than its bound…") and the limits' buckets per
+  company ("refuses a request past 3 in a day…", "refuses a download past 20 in a day…"). Two guards are not distinguished by
+  any test: the unique index on waiting or running exports (asking takes the export lock first) and
+  the attempt fence on part inserts (reads take only the finishing attempt's parts); both are kept as
+  defence in depth.
+
+### Review fixes (before merge)
+
+- **Medium:** a new run deletes earlier runs' parts when it claims the export; per-company limits on
+  asking (3 a day) and downloading (20 a day); runs on a worker pool of their own, transient database
+  errors left to the lease, a 30-minute run bound, and the vacuum effect documented (DEPLOYMENT,
+  RUNBOOKS §10Q).
+- **Low:** the whole file is checked before its last part; the part's associated data names its
+  export, run and position (the keyring sweep reads them); a replaced file expires 30 minutes later
+  instead of at once, no longer offered; the job's hour stated against the run's bound; no
+  `download` attribute on the link; a failed export sweep no longer skips the rest of the billing
+  sweep; grant checks for `ops.company_exports_due` in the isolation suite; the integration test's
+  comparison with the streamed export states what writes between the two.
+- **CI's first run (PR #107):** the expiry test moved a ready file's `expires_at` before its
+  `finished_at`, which `company_exports_state` refuses; it now moves both, as the later expiry
+  tests do.
+
+## 2026-10-21 — Store follow-ups per shipment (P4-06f, ADR-413)
+
+Status: **Implemented (migrations 0323 and 0328); unit tests run locally, integration and e2e tests in CI
+only; no live Shopify or Meta traffic.** An order message rule fired once per order and event, so
+an order shipped in several parcels got one "shipped" message and a tracking number added later
+got none; BACKLOG P4-06f listed this as not built.
+
+### Completed
+
+- **Research** (`docs/research/store-connectors.md` §5, SH-044 to SH-048, WC-024): the shipment
+  webhook topics and the scope they need (`read_fulfillments` or `read_marketplace_orders`), the
+  `Fulfillment` and `FulfillmentTrackingInfo` fields in the 2026-07 and 2025-10 Admin schemas, the
+  REST Fulfillment resource (`order_id`), and WooCommerce core's lack of shipments (its Order
+  Fulfillments feature is off by default with no setting). Unconfirmed: a delivery's body, which
+  fulfillments past ten an order returns, links Shopify builds itself.
+- **Events** (`messages-model.ts`): `shipment_created` ("Shipment sent", once per shipment, dated by
+  its creation) and `tracking_updated` ("Tracking updated", once per shipment and tracking not seen
+  for it, dated by the shipment's `updatedAt`), Shopify only; a tracking is the first entry's
+  number (case and spaces ignored) and link, the carrier alone no change, at most ten remembered;
+  nothing for cancelled or failed shipments, cancelled orders or the past; test orders and late
+  events recorded as skipped; new skip reasons `shipment_cancelled` and `tracking_replaced`.
+- **Copy and dedupe** (migrations 0323 and 0328, `worker.ts`): `app.commerce_store_shipments` kept
+  with each order read, never backwards, under row locks, deleted with the company; store messages
+  gain `shipment_id`, `dedupe_key` and `tracking_revision`, unique per shipment, event and key
+  through an index 0328 builds concurrently; shipment messages name no order, so the old key and
+  the outgoing webhook triggers are untouched (expand only, checks on large tables widened
+  `NOT VALID`).
+- **Sending** (`order-messages.ts`): ADR-048's checks, delay and sending hours, the shipment's own
+  carrier, number and link in the existing variable mapping (fallback or `missing_variable`); a
+  tracking update goes only while its tracking is current, waits for a waiting "Shipment sent" and
+  is skipped once that message carried it (`trackingUpdateDecision`), so a correction reaches the
+  customer once; an automation instead of a template (ADR-050's generic path).
+- **Subscriptions** (`model.ts`, `shopify.ts`, `webhook.ts`, `service.ts`): every authorization asks
+  for `read_fulfillments` (not required); with it the webhook check subscribes `FULFILLMENTS_CREATE`
+  and `FULFILLMENTS_UPDATE` (`includeFields` `id`, `order_id`, `updated_at`), whose deliveries signal
+  a read of the order; older stores keep working and are brought up to date by "Allow shipment
+  updates in Shopify" (`startShipmentAccess`, `commerce.manage`, audited) and the idempotent
+  six-hourly check; a refused topic is shown, not a failed sync; the transit re-read also runs while
+  a shipment rule is on.
+- **Pages:** a "Shipment messages" section on the store's Order messages page (shipment access, the
+  two rules, a note that tracking values are the shipment's own), the report and the order page
+  listing shipment messages with their order, automation labels.
+- **Privacy:** a trigger clears shipments' tracking and digests whenever their order is redacted
+  (erasure as `w360_definer`, `customers/redact`, reads of erased numbers); the export has the
+  shipments without digests.
+- **Docs:** ADR-413, THREAT-MODEL T362, research §5, BACKLOG P4-06f, SECURITY, DEPLOYMENT (Shopify
+  app scopes, migration 0323, rollout), RUNBOOKS §10J, DATA-RETENTION. No public API or OpenAPI
+  change (no endpoint returns store messages, and the webhook enums keep their five order events).
+  The feature matrix's statuses are unchanged.
+
+### Tests
+
+- Unit (`stores/shipment-messages.test.ts`, 22 tests; `messages-model.test.ts`,
+  `webhooks/webhooks.test.ts` updated): the events' availability, automations and delays; detection
+  of a new shipment and of a new tracking, the rule's start to the second, the 48-hour bound, test
+  orders, cancelled shipments and orders; tracking keys (case, spaces, number against link, empty),
+  first-seen not counted, going back not counted, the bound of ten; dedupe key shapes; parsing
+  fulfillments (ids, statuses, failed, https links only, at most ten, missing times); the scopes,
+  `includeFields` and `order_id` parsing; the approval shortfall messages; the skip reasons never
+  reported by order webhooks; the current tracking revision and every tracking update decision
+  (replaced, a return to an earlier tracking, waiting for "Shipment sent", already sent).
+- Integration (CI only, `stores.test.ts`, 9 new tests): one message per shipment and per new
+  tracking with each shipment's own number, a duplicate and a repeated delivery, a carrier-only and
+  a back-to-earlier change sending nothing, the order page, the report and no outgoing webhook
+  event; two reads of a new shipment and of a tracking at once giving one message each, a stale read
+  changing nothing; the past, a replaced tracking, a cancelled shipment, a shipment first seen
+  failed, a cancelled order, a test order and a late shipment; sending hours, permissions,
+  isolation and WooCommerce refused; new stores subscribed with trimmed payloads, an older store
+  left as it was, brought up to date once after its approval, never subscribed twice, a refused
+  topic shown in each of its three shapes, deliveries without an order answered 200 and for an
+  unknown shop; an automation started per shipment; a tracking arriving while "Shipment sent"
+  waits sent once (the update rescheduled, then skipped as already sent) and an A→B→A change
+  sending nothing more; the transit re-read finding a new tracking without a webhook; erasure and
+  `customers/redact` clearing tracking for good. `company-data.test.ts`'s deletion checks now cover
+  the new table (not re-run here). Existing tests updated for the new scope and the two extra subscriptions.
+- E2E (CI only, `stores.spec.ts`): a new store subscribed to the shipment topics, "Shipment sent"
+  set up in the browser, a `fulfillments/create` delivery sending the template with the shipment's
+  tracking, a repeated delivery sending nothing, the report and the order page.
+- Hand mutation of 34 rules, bounds and checks (26 first, 8 after the review): 23 fail the unit
+  tests, but one of them (the transit rules) only through a constant's assertion, so it is counted
+  with the integration ones: 22 caught by the unit tests (detection, bounds, tracking keys, the
+  current revision and the update decision, parsing, scopes, `order_id`, `includeFields`, the
+  shortfall message). The 12 others need the database or the stand-ins, each exercised by a named
+  integration test that did not run here: the transit rules ("reads orders in transit again and
+  finds a shipment's new tracking when no webhook comes"); shipment topics created without the
+  scope, an answer without a subscription taken for success, `ACCESS_DENIED` failing the check and
+  a delivery without an order refused ("subscribes new stores to the shipment webhooks and brings
+  existing stores up to date once"); a replaced tracking or a cancelled shipment still sent ("sends
+  nothing about the past, cancelled shipments or orders, test orders or late events, and only the
+  newest tracking"); the carried tracking not recorded ("gives the newest tracking once when it
+  changes while a shipment's messages wait"); the order's tracking instead of the shipment's and
+  the fulfillment topics not routed ("sends one message per shipment and per new tracking, each
+  with its own shipment's tracking"); a redacted order's shipment keeping its tracking on a later
+  read ("clears shipments' tracking with the customer's details, for good"); and a stale shipment
+  read applied ("records one message when the same shipment is read twice at once, and never goes
+  backwards").
+
+### Review fixes (before merge)
+
+- **Company deletion (High):** `app.commerce_store_shipments` gets a deletion step (475, after the
+  store messages, before the orders and stores), `SELECT (tenant_id, id)` and `DELETE` for
+  `w360_definer` and the two `tenant_deletion_*` policies; the erasure policy, at first `USING
+(true)`, is limited to the company in context.
+- **Tracking sent twice (Medium):** a tracking that arrived while "Shipment sent" waited went out in
+  both messages. A sent "Shipment sent" now records the tracking it carried (`tracking_revision`),
+  and an update waits for a waiting one and is skipped for a tracking it carried.
+- **Lock (Medium):** the unique key is a concurrent index in 0328 (`-- migrate:no-transaction`), no
+  longer a constraint built under `ACCESS EXCLUSIVE`; DEPLOYMENT states 0323's locks exactly.
+- **Refusal shapes (Medium):** an answer naming no created subscription is a refusal, and
+  `ACCESS_DENIED` for a shipment topic is shown, not a failed check; the stand-in models
+  `userErrors`, a withheld answer and `ACCESS_DENIED`; the shape is a research note and a release
+  checklist item.
+- **Lows:** a body without `order_id` is answered 200 (`ignored_no_order`); a return to an earlier
+  tracking skips a waiting update; shipment rules go on only after both rollouts; the research
+  cites `@shopify/shopify-api` 11.14.1 and 15.0.0, both read; SECURITY says `order_id` is used;
+  the transit rules reclassified above; the rule editor's automation note.
+- **Codex review (PR #107):** a "Shipment sent" rule that starts an automation recorded the
+  tracking current at the start, so a "Tracking updated" message for that tracking was skipped as
+  `tracking_already_sent` though the run may send no tracking at all. Only a queued template now
+  records and stops anything; the unit test checks an automation start with or without a recorded
+  tracking.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                                         | Result                                                          |
+| ------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`                                                 | clean                                                           |
+| `npx prettier --check . --ignore-path .prettierignore --ignore-path .gitignore` | clean                                                           |
+| `pnpm typecheck`                                                                | clean                                                           |
+| `pnpm test` (unit)                                                              | 2,162 of 2,162 passed (187 files)                               |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`                             | clean                                                           |
+| `pnpm build`                                                                    | passed                                                          |
+| hand mutation of 34 rules, bounds and checks                                    | 22 caught by unit tests; 12 exercised only by integration tests |
+| `pnpm test:integration`, `pnpm test:e2e`                                        | not run here: no local PostgreSQL or browser; CI runs them      |
+
+## 2026-10-21 — Saved replies that carry a file (P3-06, W-087, ADR-411)
+
+Status: **Implemented (migration 0321); unit tests run locally, integration and e2e tests in CI
+only; no live Meta traffic.** A saved reply may carry one file, which the reply box attaches for
+review when a member inserts the reply. W-087 stays **planned**: automations do not draw on saved
+replies, and templates and bots are not stored as reply material. Copy-code templates were
+researched first and not built (research M-202, BACKLOG P3-03): Meta's OpenAPI description has no
+coupon copy-code button, and Meta's sample app shows one only inside a limited-time-offer template.
+
+### Completed
+
+- **Storage:** there is no object storage, and Meta keeps an upload 30 days for one number, so a
+  file's bytes are kept in `app.saved_reply_files` (migration 0321), once per company (same bytes,
+  type and name), named by `app.saved_reply_attachments` (one per reply). The types and 16 MB of
+  the inbox's file path (`checkReplyFile`); 100 MB a company in all
+  (`SAVED_REPLY_FILES_MAX_TOTAL_BYTES`). Composite foreign keys, forced row security, no `UPDATE`
+  grant, database checks of the type pair, size, name and SHA-256 against the bytes; deletion
+  steps 125 and 126; the export carries the files as base64, two a page.
+- **Rules:** with a photo, video or document the text is the caption, at most 1,024 characters
+  (refused when attaching and when the text changes, in Settings or through the API); a recording
+  takes none and its text stays a text message. Every write takes the company's saved-replies lock
+  first; a file is deleted as soon as no reply names it (reply deleted, file removed or replaced),
+  and files left by an older server are deleted before the next file is stored.
+- **Settings → Saved replies:** supervisors attach, replace and remove a reply's file in its edit
+  panel (`/api/c/<company>/saved-replies/<id>/file`); the list links each file. Audited with the
+  kind and size, never the name or content.
+- **Conversation page:** `ReplyTools` joins the composer and Send a file. Inserting a reply with a
+  file checks it is there and reads back whole (`savedReplyFileForInsert`), or says why not and
+  inserts nothing; otherwise the card gets the file (photo preview) with the filled text as its
+  caption. The member reviews and sends it; the send names the reply and file inserted and goes
+  only while the reply still carries that file, through `queueFileReply`'s path (window, number,
+  collision warning, Meta upload). Members who reply but do not manage saved replies use them.
+- **Preview route:** `/c/<company>/settings/saved-replies/files/<id>` for members who reply or
+  supervise, under `FILE_POLICY` (`FILE_ROUTE` extended), answering single byte ranges by
+  reading only that part.
+- **API (additive):** each saved reply carries `attachment` (id, type, MIME type, name, size,
+  `caption`) or null; never content or a storage location. `PATCH` keeps the file and refuses a
+  text over 1,024 characters with a captioned file; `DELETE` deletes an unshared file. OpenAPI
+  updated. No webhook covers saved replies.
+- **Not built:** automations using saved replies, templates or bots as reply material, keys adding
+  files, more than one file per reply, object storage, reusing one Meta upload across sends.
+- **Docs:** ADR-411, THREAT-MODEL T360, research M-202 (copy-code, and its wording fixed), BACKLOG
+  P3-03 (copy-code waits for a source) and P3-06, SECURITY, DATA-RETENTION, DEPLOYMENT (0321,
+  database size, rolling deploy), RUNBOOKS, ARCHITECTURE, feature matrix W-087 (still planned,
+  what is missing stated) and W-033.
+
+### Tests
+
+- Unit: `inbox/saved-reply-files.test.ts` (new, 25 tests: caption limits for each kind, the
+  update's and the attach's refusals before writing, a title change allowed over a stored long
+  text, ranged reads (part, past the end, whole), a reply deleted during an attach answered as not
+  found, the file checks before the lock, storing
+  with SHA-256 and cleaned name, sharing, an unchanged re-attach, the 100 MB total at and past the
+  limit with a replaced file freed only when unshared, removal and deletion of a reply's file, the
+  orphan sweep, unreadable files, the permission split for managing, inserting, previewing and
+  sending, the send schema, the API's attachment and description, the export's base64 and paging,
+  migration 0321 against `REPLY_FILE_TYPES` and its `STORAGE EXTERNAL`); `api/saved-replies.test.ts` (lock order, the file's
+  read in every write, `attachment` in answers); `lib/document-routes.test.ts` (the preview route's
+  policy).
+- Integration (CI only): `saved-reply-files.test.ts` (sharing, replacing and deleting with the last
+  reply; caption limits both ways; the company's 100 MB total with filler files that belong to
+  replies: refused past it, allowed exactly at it, a shared file counted once, a replaced file
+  freed only when unshared; ranged reads of the stored bytes and the column's storage; a title
+  change through the API over a stored long text; database checks, composite foreign keys,
+  RLS across companies and no `UPDATE`; the permission split; a send through the Graph stand-in and
+  a refused send after the file changed; the API's details, `PATCH` and `DELETE`; an older server's
+  orphan swept; two concurrent attaches and a delete racing a replace) and `company-data.test.ts`
+  (the export carries the file as base64; the deletion deletes both tables).
+- E2E (CI only): `saved-reply-files.spec.ts`: a supervisor attaches a photo in Settings, the reply
+  is refused while Send a file holds the member's own caption (kept), then inserted in a
+  conversation (preview and caption shown, nothing sent), sent through the Graph
+  stand-in as an image with its caption, and shown in the thread.
+- Hand mutation of 37 rules, bounds and checks (30 first, 7 after the review): 33 caught by the
+  unit tests (26 at first; tests for deleting a reply's file and for the API's create answer were
+  added for two more; after the review, 5 of the 7 new ones, and the two rewritten update
+  mutations still caught). The 4 others are exercised only by named tests that did not run here:
+  the unused-file deletion's `NOT EXISTS` ("stores a file once, shares it between replies and
+  deletes it with the last reply that has it", and the concurrency test), the send's condition on
+  the inserted file ("sends an inserted file through the inbox’s file path, and refuses one changed
+  since"), the range slice's offset in SQL ("reads only the part of a file a Range request asks
+  for, from the database") and the composer keeping an occupied card (e2e "a saved reply with a
+  photo is attached in the conversation, reviewed and sent through WhatsApp"). The preview route's
+  206 and 416 answers have no automated test (the e2e's image loads it whole).
+
+### Review fixes (before merge)
+
+- **Cap test (High):** the filler files of the 100 MB test had no reply, so the sweep of files no
+  reply names deleted them and the test could not pass. They now belong to replies, and the test
+  covers the exact limit, a shared file counted once and a replaced file freed only when unshared.
+- **Memory and ranges (Medium):** the preview answers single byte ranges (206, 416), reading only
+  that part with `substring`; 0321 stores the column uncompressed out of line (`STORAGE EXTERNAL`)
+  so slices read only their chunks; the extra copies on the preview and send paths are gone;
+  DEPLOYMENT states the per-request memory (about 48 MB for a whole 16 MB file).
+- **Lows:** DEPLOYMENT no longer implies a switch for offering files; the caption limit is checked
+  only when the text changes, so a title change works over a long text an older server stored; a
+  reply deleted by an older server during an attach answers not found (`isForeignKeyViolation` on
+  `saved_reply_attachments_reply_fk`) instead of a server error; inserting a reply never replaces a
+  file or caption the member put in Send a file (refused with a message).
+- **Codex review (PR #107):** the reply box and the card stay editable while a reply's file is
+  checked, but the check's answer used them as they were when it started: it overwrote text typed
+  meanwhile and replaced a file or caption given to the card meanwhile. It now reads both as they
+  are when the answer comes (kept in a ref the composer updates after each render), keeps the typed
+  text before the reply's, and refuses the insertion if the card was filled meanwhile. No automated
+  test covers this timing.
+- **CI's first run (PR #107):** the test that the runtime role cannot rename a stored file
+  expected PostgreSQL's message, but the database layer maps a refused privilege to `forbidden`
+  ("Operation not permitted.") with the reason as its cause; it now checks both, as the campaign
+  variant test does. The refusal itself was right.
+- **CI's first end-to-end run (PR #107):** on desktop Chromium a photo reply chosen right after
+  the caption was cleared was still refused. The card told the composer it was free in a passive
+  effect, whose update renders later and can yield, so the next change event still saw it in use.
+  The card now reports it in a layout effect, which renders in the same task, and the composer
+  keeps its ref of the box and the card the same way.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                      | Result                                                                        |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`                              | clean                                                                         |
+| `prettier --check .`                                         | clean                                                                         |
+| `pnpm typecheck` (includes `tests/integration`, `tests/e2e`) | clean                                                                         |
+| `pnpm test` (unit, after the review fixes)                   | 2,165 of 2,165 passed (187 files)                                             |
+| `pnpm build`                                                 | passed                                                                        |
+| hand mutation of 37 rules, bounds and checks                 | 33 caught by unit tests; 4 exercised only by integration or e2e tests (above) |
+| `pnpm test:integration`, `pnpm test:e2e`                     | not run here: no local PostgreSQL or browser; CI runs them                    |
+
+## 2026-10-21 — Automations started by replies to a campaign (P4-01, ADR-414)
+
+Status: **Implemented (migrations 0324 and 0327); unit tests run locally, integration and e2e tests in CI
+only; no live Meta traffic.** P4-01's Remaining listed "starting runs from campaigns". A customer
+who quotes a campaign message or taps one of its template's quick-reply buttons now starts the
+automation built for it.
+
+### Completed
+
+- **Trigger** (`automations/graph.ts`): `campaign_reply`, "A customer replies to a campaign
+  message": any campaign or one chosen campaign, any reply or only a tap on one quick-reply
+  button's text (at most 25 characters, compared apart from case and spacing after NFC,
+  `campaignButtonKey`), with business hours and a cooldown like the other message triggers.
+- **Matching** (`automations/dispatch.ts`, `findCampaignReply`): the inbound message's
+  `context.id` (already stored) names an outbound message of the same number
+  (`messages_external_uq`) with a campaign recipient row (`campaign_recipients_message_uq`) of the
+  same contact, queued at most 72 hours before the reply (`CAMPAIGN_REPLY_HOURS`, equal to the
+  attribution window); looked up only when such an automation is active. A tap's text comes from
+  the `button` message (`button.text`, research M-178).
+- **Ranking:** every campaign reply above every keyword (the chosen campaign and button, the
+  chosen campaign, any campaign with the button, any campaign), then ADR-240's order; ties by name;
+  one run per conversation as before.
+- **What the run keeps** (migration 0324): `app.automation_run_campaigns` (campaign, variant sent,
+  button text; insert-only, forced row security, deleted with its run, deletion step 688); the runs'
+  trigger check takes `campaign_reply` (`NOT VALID`); webhook endpoints' run trigger filters take
+  six triggers in migration 0327, a transaction of its own (a run event's delivery reads the
+  endpoints before the runs, so no transaction locks both). `{{campaign.name}}`, `{{campaign.variant}}` and `{{campaign.button}}` in automations
+  started this way (refused elsewhere), read by the runner, the interpreter and the simulator.
+- **Editor:** the trigger with a campaign picker (200 most recent and the chosen one, for members
+  with `campaigns.read`), the chosen campaign's quick replies (every variant's templates) or a text
+  for any campaign, the campaign fields' help, and live checks shared with the server (another
+  company's campaign, another number, a button no template has).
+- **Permissions:** saving, publishing and testing need `campaigns.read` too, checked before the
+  draft's own checks; another company's campaign is refused as unknown. A member without the
+  permission gets no campaign's name in the editor's checks or in a refusal. The run's page names the campaign (linked) only to members with
+  `campaigns.read` and the button only to members who see the conversation. A test run of a draft
+  naming a campaign acts as a reply to it (the trigger's button, no variant).
+- **Webhooks and OpenAPI (additive):** `run.trigger` `campaign_reply` in the three run events and
+  `run.campaign` (id, name, variant; null otherwise) in `automation.run_started` and
+  `automation.run_ended`, never the button; endpoints may choose `campaign_reply` in `runTriggers`.
+  No API route changes (the API exposes only automations started through it).
+- **Docs:** ADR-414, THREAT-MODEL T363, ARCHITECTURE §6E, SECURITY (Phase 4 rules), DEPLOYMENT
+  (0324 and 0327, order, rollback and pending deliveries), RUNBOOKS §10D, BACKLOG P4-01. No Meta field is new, so no research
+  row; no permission is new, so the matrix of permissions is unchanged; no feature matrix status
+  changes.
+
+### Tests
+
+- Unit (`automations/campaign-trigger.test.ts`, 16 new tests): the schema and its refusals,
+  matching by campaign and button, button keys (case, spacing, emoji, NFC), the full ranking against
+  keywords, new conversations and any message, the rank-to-trigger table, the window equal to
+  attribution's, descriptions, the campaign checks (unknown, another number, a missing button),
+  campaign fields refused outside the trigger and rendered in texts, web requests and a step,
+  `findCampaignReply` reading nothing without a context and trimming and clipping the button,
+  `dispatchInboundToAutomation` against a recording transaction making no campaign lookup without
+  an automation started by campaign replies (or without a context) and one with it;
+  `webhooks/webhooks.test.ts`: the payload schema with and without a campaign, the body naming the
+  campaign and variant but not the button, no read for other runs, a missing row failing; existing
+  tests updated for the ranks (interpreter), the sixth run trigger (webhooks, API) and `campaign`.
+- Integration (CI only, `automation-campaign-replies.test.ts`, 9 tests; `webhook-events.test.ts`,
+  1 new): a tap and a quoting reply starting the run with campaign, variant and button recorded and
+  `{{campaign.*}}` sent (the name read when the step runs); the full ranking with five automations;
+  71 hours accepted and 73 not, a member's message, another contact's WAMID and another number's
+  WAMID falling through to "any message"; the cooldown and the automation's number; two automations
+  of one rank, a duplicate tap and a quoting reply arriving together starting exactly one run while
+  the campaign is still sending; permissions to save, publish and test, another company's campaign,
+  another number's campaign refused at publishing, the editor's campaigns hidden without the
+  permission; the run page's campaign and button by permission and a test run's record; the table's
+  row security, grants, update trigger, keys, cascade and deletion step, and each check refusing
+  its bad row by name on a run with no row yet (a keyword's), the second row by the key's name;
+  a member without `campaigns.read` getting no campaign name from the editor's detail or from the
+  refusals to publish and test a draft whose campaign is on another number; the lookup's plan
+  using `messages_external_uq` without a sequential scan; run events naming the campaign and an
+  endpoint's `campaign_reply` filter. Existing tests updated for the sixth trigger
+  (`webhooks.test.ts`) and `run.campaign` (`webhook-events.test.ts`).
+- E2E (CI only, `automation-campaign-replies.spec.ts`; `webhook-events.spec.ts` unticks the new
+  trigger to keep "API only"): a marketing template with two quick replies sent by a campaign
+  through the Graph stand-in, an automation for its "Interested" button built in the editor (the
+  campaign and button pickers, the fields' help), simulated, published; the customer's tap answered
+  through the stand-in with the campaign's name; the run's page naming campaign, variant and button.
+- Hand mutation of 32 rules, bounds and checks (27 first, 5 after the review), one at a time
+  against the unit tests above: 18 caught. The 14 others need the database, and each is exercised
+  by a named integration test that did not run here (`automation-campaign-replies.test.ts`): the
+  lookup's 72-hour window, its contact and its number ("take a reply as one to the campaign for 72
+  hours …": the 73-hour, other-contact and other-number cases); the run's campaign row not written
+  and the runner not reading it ("start on a quick-reply tap or a quoting reply …": the recorded
+  row and the texts sent); saving, publishing and testing without `campaigns.read`, saving another
+  company's campaign, the editor's checks naming the campaign without the permission and
+  publishing checking the draft before the permission ("need the permission to see campaigns …");
+  the run page's campaign and button shown regardless of permission and a test run's row not
+  written ("name the campaign on a run’s page …"); 0324's variant check and button length check
+  dropped ("keep what a run answers in a table …", each refusal asserted by the check's name).
+
+### Review fixes (before merge)
+
+- **The checks' test was vacuous (Medium):** the bad rows were inserted for a run that already had
+  its row, so the one-row key refused them all; they now go to a keyword's run with no row, each
+  refused by its check's name, the bounds accepted, and a second row refused by the key's name.
+- **The campaign's name reached members without `campaigns.read` (Low):** the editor's detail now
+  runs no campaign check for them, and publishing and testing check the permission before the
+  draft's checks; integration test added.
+- **Attribution wording (Low):** ADR-414 and `CAMPAIGN_REPLY_HOURS` now say the trigger and
+  attribution share the 72-hour bound, not the rule (attribution is last touch; the trigger follows
+  the quoted message), with the example of a tap on an older campaign's message.
+- **The lookup guard's test (Low):** unit tests of `dispatchInboundToAutomation` count the reads.
+- **A possible deadlock (Low):** the endpoints' check moved from 0324 to its own migration, 0327;
+  DEPLOYMENT and RUNBOOKS cover both files.
+- **Rollback (Low):** DEPLOYMENT says pending run-event deliveries of such runs would be built by
+  the older payload code, and to let them drain after the pause (or disable the endpoint).
+- **CI's first run (PR #107):** the tests' campaigns, inserted as completed or running with no
+  template or audience, broke `campaigns_submitted_complete`, so none of the nine tests got past
+  its first campaign, and the webhook test's running campaign failed the same way. Each campaign
+  now has an approved template and an audience, as other tests' campaigns do. Two tests then sent
+  one campaign to the same contact twice, which `campaign_recipients_contact_uq` refuses (a
+  campaign sends a contact one message); they now reuse the first message.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                                         | Result                                                                  |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`                                                 | clean                                                                   |
+| `npx prettier --check . --ignore-path .prettierignore --ignore-path .gitignore` | clean                                                                   |
+| `pnpm typecheck`                                                                | clean                                                                   |
+| `pnpm test` (unit, after the review fixes)                                      | 2,158 of 2,158 passed (187 files)                                       |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`                             | clean                                                                   |
+| `pnpm build`                                                                    | passed                                                                  |
+| hand mutation of 32 rules, bounds and checks                                    | 18 caught by unit tests; 14 exercised only by integration tests (above) |
+| `pnpm test:integration`, `pnpm test:e2e`                                        | not run here: no local PostgreSQL or browser; CI runs them              |
+
+## 2026-10-21 — Call-to-action URL buttons and taking reactions back: researched, not built (P5-08, ADR-412)
+
+Status: **Not built: Meta's OpenAPI description supports neither part (M-203).** Unit tests run
+locally; no integration or e2e test was added (no database or interface behaviour changed); no
+live Meta traffic. P5-08's remaining list names both; they stay on it.
+
+### Completed
+
+- **Research (M-203):** `business-messaging-api_v23.0.yaml` is the only description Meta publishes
+  (v24.0 to v26.0 answer 404; the file matches the copy read for ADR-082). It lists no `cta_url`
+  interactive type and no action with a display text and a link; its outbound reaction gives no
+  removal form; its status webhook names no message type. Recorded with what it does and does not
+  say, open question 23 and a "must not assume" line.
+- **API behaviour kept honest:** `POST /messages` still refuses every call-to-action type name as an
+  unknown `type` (422, path `type`) and every reaction-removal form (empty, blank, null or missing
+  `emoji`, a lone joiner or selector, a remove flag). OpenAPI's send description now says both are
+  unavailable and why (additive; no schema, field, status or webhook change).
+- **Inbox:** the composer sends text, files and templates only, not buttons, lists or reactions,
+  so nothing was added there.
+- **No migration** (0322 unused), no setting, no scope or permission change.
+- **Docs:** ADR-412, research M-203, THREAT-MODEL T361, BACKLOG P5-08, ARCHITECTURE.
+
+### Tests
+
+| Suite               | Files             | Result                                    |
+| ------------------- | ----------------- | ----------------------------------------- |
+| Unit (new, ADR-412) | `api/api.test.ts` | 3 tests, passed locally                   |
+| Unit (whole suite)  | 186 files         | 2,143 tests, passed locally (`pnpm test`) |
+| Integration         | none added        | nothing database-side changed             |
+| E2E                 | none added        | no page changed                           |
+
+- Hand mutation of 18 guards that keep both parts unavailable (call-to-action names dispatched to
+  buttons, a list or a template; the unknown type's field; the emoji accepting empty, trimmed,
+  optional or null values; the reaction schema not strict; `isSingleEmoji` accepting an empty
+  string, whitespace, a lone joiner or selector, or being unanchored; the OpenAPI sentences removed
+  or `cta_url` listed): **18 of 18 caught by unit tests**, 17 by the new ADR-412 tests alone and
+  the unanchored pattern by ADR-082's existing emoji test. No survivor needed an integration or
+  e2e test.
+
 ## 2026-10-21 — Campaigns that test up to five templates (P3-04, ADR-410)
 
 Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI

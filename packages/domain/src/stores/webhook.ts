@@ -235,14 +235,31 @@ const idList = (value: unknown): string[] =>
 
 // Shopify ------------------------------------------------------------------------------------------
 
-const SHOPIFY_RESOURCE_TOPICS: Record<string, { kind: StoreFetchKind; delete: boolean }> = {
+/**
+ * What each resource topic asks for. A fulfillment delivery (ADR-413, SH-044) asks for its order
+ * to be read again, named by the body's `order_id` (SH-048); nothing else in it is used.
+ */
+const SHOPIFY_RESOURCE_TOPICS: Record<
+  string,
+  { kind: StoreFetchKind; delete: boolean; orderOfFulfillment?: true }
+> = {
   'orders/create': { kind: 'order', delete: false },
   'orders/updated': { kind: 'order', delete: false },
   'orders/delete': { kind: 'order', delete: true },
   'products/create': { kind: 'product', delete: false },
   'products/update': { kind: 'product', delete: false },
   'products/delete': { kind: 'product', delete: true },
+  'fulfillments/create': { kind: 'order', delete: false, orderOfFulfillment: true },
+  'fulfillments/update': { kind: 'order', delete: false, orderOfFulfillment: true },
 };
+
+/** The order a fulfillment delivery names (`order_id`, SH-048), or null. */
+export function fulfillmentOrderId(body: Record<string, unknown>): string | null {
+  const id = body.order_id;
+  if (typeof id === 'number' && Number.isSafeInteger(id) && id > 0) return String(id);
+  if (typeof id === 'string' && EXTERNAL_ID_RE.test(id)) return id;
+  return null;
+}
 
 export async function handleShopifyWebhook(
   deps: StoreWebhookDeps,
@@ -286,7 +303,18 @@ export async function handleShopifyWebhook(
       return uninstalled(deps, scope, target, headerShop, body, deliveryId);
     }
     const gidType = resource?.kind === 'order' ? 'Order' : 'Product';
-    const externalId = resourceId(body, gidType);
+    const externalId = resource?.orderOfFulfillment
+      ? fulfillmentOrderId(body)
+      : resourceId(body, gidType);
+    // A shipment delivery whose body names no usable order (its shape is unconfirmed, SH-048) is
+    // answered 200 and logged: a 400 would count as a failure, and Shopify deletes subscriptions
+    // after repeated failures. The hourly read and the transit check still read the order.
+    if (resource?.orderOfFulfillment && !externalId) {
+      return {
+        status: 200,
+        log: { outcome: 'ignored_no_order', topic, tenantIds: [target.tenantId] },
+      };
+    }
     if (!resource || !externalId) return { status: 400, log: { outcome: 'malformed', topic } };
     const outcome = await deps.db.run(scope, async (tx) => {
       if (!(await recordDelivery(tx, scope, target.storeId, deliveryId, topic))) return 'duplicate';

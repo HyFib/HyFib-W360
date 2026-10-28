@@ -2673,6 +2673,7 @@ describe('automation run events (ADR-078)', () => {
         trigger: 'keyword',
         apiKeyId: null,
         enrollmentId: null,
+        campaign: null,
         status: 'running',
         endReason: null,
         startedAt: run.started_at.toISOString(),
@@ -3961,6 +3962,107 @@ describe('automation run events (ADR-078)', () => {
       ),
     ).toEqual([{ state: 'failed', attempts: 0, last_error: 'event_gone' }]);
     expect(bodiesAt(hook.path)).toEqual([]);
+  });
+
+  it('name the campaign a reply answers, and endpoints may choose runs started by such replies (ADR-414)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const every = await addEndpoint(c, ['automation.run_started']);
+    const onlyReplies = await addEndpoint(
+      c,
+      ['automation.run_started'],
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      ['campaign_reply'],
+    );
+    const onlyKeywords = await addEndpoint(
+      c,
+      ['automation.run_started'],
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      ['keyword'],
+    );
+    const from = waId();
+    const { conversation_id: conversationId, contact_id: contactId } = await inbound(
+      c,
+      from,
+      'Hello',
+    );
+    // A campaign message WhatsApp accepted an hour ago, of variant B.
+    const campaignId = uuidv7();
+    // A running campaign names its template and audience (campaigns_submitted_complete).
+    const templateId = uuidv7();
+    await fx.query(
+      `INSERT INTO app.message_templates (id, tenant_id, whatsapp_account_id, name, language,
+         category, components, status)
+       VALUES ($1, $2, $3, 'diwali_offers', 'en', 'MARKETING', '[]'::jsonb, 'approved')`,
+      [templateId, c.tenant.id, c.whatsappAccountId],
+    );
+    await fx.query(
+      `INSERT INTO app.campaigns (id, tenant_id, name, status, channel_account_id, template_id,
+         audience_used, timezone)
+       VALUES ($1, $2, 'Diwali offers', 'running', $3, $4, '{}', 'Asia/Kolkata')`,
+      [campaignId, c.tenant.id, c.channelAccountId, templateId],
+    );
+    const wamid = `wamid.out.${randomBytes(6).toString('hex')}`;
+    const messageId = uuidv7();
+    await fx.query(
+      `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction,
+         type, content, status, sender_type, external_message_id)
+       VALUES ($1, $2, $3, $4, 'outbound', 'template', '{}'::jsonb, 'delivered', 'campaign', $5)`,
+      [messageId, c.tenant.id, conversationId, c.channelAccountId, wamid],
+    );
+    await fx.query(
+      `INSERT INTO app.campaign_recipients (id, tenant_id, campaign_id, contact_id, state,
+         message_id, queued_at, variant)
+       VALUES ($1, $2, $3, $4, 'queued', $5, now() - interval '1 hour', 'B')`,
+      [uuidv7(), c.tenant.id, campaignId, contactId, messageId],
+    );
+    const automationId = await publishAutomation(
+      owner,
+      'Diwali follow-up',
+      { type: 'campaign_reply', campaignId, button: null, hours: 'any', cooldownMinutes: 0 },
+      sayGraph('Thanks for answering {{campaign.name}}.'),
+    );
+    await fx.deliver(
+      fx.messagesBody(c, {
+        messages: [
+          {
+            waId: from,
+            type: 'button',
+            extra: { button: { text: 'Call me', payload: 'call' } },
+            contextId: wamid,
+          },
+        ],
+      }),
+    );
+    const [run] = await runsIn(conversationId);
+    if (!run) throw new Error('no run started');
+    await deliverDue(c);
+    const [body] = bodiesAt(every.path);
+    const started = automationRunStartedPayloadSchema.parse(body);
+    expect(started.data.run).toMatchObject({
+      id: run.id,
+      automationId,
+      trigger: 'campaign_reply',
+      apiKeyId: null,
+      enrollmentId: null,
+      campaign: { id: campaignId, name: 'Diwali offers', variant: 'B' },
+    });
+    // The button the customer tapped is their answer, withheld as a run's answers are.
+    expect(JSON.stringify(body)).not.toContain('Call me');
+    expect(bodiesAt(onlyReplies.path).map((b) => b.type)).toEqual(['automation.run_started']);
+    expect(bodiesAt(onlyKeywords.path)).toEqual([]);
   });
 });
 

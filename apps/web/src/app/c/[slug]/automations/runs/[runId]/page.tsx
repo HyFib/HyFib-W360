@@ -267,6 +267,26 @@ export default async function AutomationRunPage({
                   available.
                 </p>
               ) : null}
+              {run.campaign?.hidden ? (
+                <p>
+                  {run.mode === 'test'
+                    ? 'Tested as a reply to a campaign'
+                    : 'A reply to a campaign'}
+                  ; seeing which one needs the permission to see campaigns.
+                </p>
+              ) : run.campaign ? (
+                <p>
+                  {run.mode === 'test' ? 'Tested as a reply to ' : 'A reply to '}
+                  <Link
+                    href={`/c/${ctx.tenant.slug}/campaigns/${run.campaign.id}`}
+                    className="text-primary underline-offset-4 hover:underline"
+                  >
+                    {run.campaign.name}
+                  </Link>
+                  {run.campaign.variant ? `, variant ${run.campaign.variant}` : ''}
+                  {run.campaign.buttonText ? `, tapping “${run.campaign.buttonText}”` : ''}.
+                </p>
+              ) : null}
               {run.conversationId ? (
                 <Link
                   href={`/c/${ctx.tenant.slug}/inbox/${run.conversationId}`}
