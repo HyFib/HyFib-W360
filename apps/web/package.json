@@ -10,7 +10,7 @@
     "typecheck": "next typegen && tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@hookform/resolvers": "5.9.1",
+    "@hookform/resolvers": "6.0.1",
     "@w360/contracts": "workspace:*",
     "@w360/core": "workspace:*",
     "@w360/db": "workspace:*",
